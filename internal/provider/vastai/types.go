@@ -134,13 +134,13 @@ type Instance struct {
 
 // CreateInstanceRequest is the request body for creating an instance
 type CreateInstanceRequest struct {
-	ClientID  string `json:"client_id"`
-	Image     string `json:"image"`
-	DiskSpace int    `json:"disk"`
-	Label     string `json:"label"`
-	OnStart   string `json:"onstart,omitempty"`
-	Env       string `json:"env,omitempty"`
-	RunType   string `json:"runtype,omitempty"`
+	ClientID  string            `json:"client_id"`
+	Image     string            `json:"image"`
+	DiskSpace int               `json:"disk"`
+	Label     string            `json:"label"`
+	OnStart   string            `json:"onstart,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	RunType   string            `json:"runtype,omitempty"`
 }
 
 // CreateInstanceResponse is the response from creating an instance

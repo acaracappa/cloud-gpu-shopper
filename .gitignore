@@ -25,11 +25,19 @@ logs/
 # Build artifacts
 /bin/
 /dist/
+/build/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# Built binaries (root level)
+/server
+/agent
+/cli
+/mockprovider
+/gpu-shopper-*
 
 # Test artifacts
 *.test

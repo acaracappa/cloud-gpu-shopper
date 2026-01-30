@@ -216,17 +216,33 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		Label:     req.Tags.ToLabel(),
 	}
 
-	// Add SSH key to onstart script
+	// Build onstart script that:
+	// 1. Sets up SSH access
+	// 2. Downloads and runs the agent binary (if SHOPPER_AGENT_URL env var is set)
+	var onStartParts []string
+
+	// Add SSH key
 	if req.SSHPublicKey != "" {
-		createReq.OnStart = fmt.Sprintf("mkdir -p ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys", req.SSHPublicKey)
+		onStartParts = append(onStartParts, fmt.Sprintf("mkdir -p ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys", req.SSHPublicKey))
 	}
 
-	// Add environment variables as JSON object (Vast.ai format)
+	// Download and run agent if URL provided
+	if agentURL := req.EnvVars["SHOPPER_AGENT_URL"]; agentURL != "" {
+		agentScript := fmt.Sprintf(`
+curl -fsSL '%s' -o /usr/local/bin/gpu-agent && \
+chmod +x /usr/local/bin/gpu-agent && \
+nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &
+`, agentURL)
+		onStartParts = append(onStartParts, agentScript)
+	}
+
+	if len(onStartParts) > 0 {
+		createReq.OnStart = strings.Join(onStartParts, " && ")
+	}
+
+	// Add environment variables as map (Vast.ai expects object, not string)
 	if len(req.EnvVars) > 0 {
-		envJSON, err := json.Marshal(req.EnvVars)
-		if err == nil {
-			createReq.Env = string(envJSON)
-		}
+		createReq.Env = req.EnvVars
 	}
 
 	// Parse offer ID as bundle ID
