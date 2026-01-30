@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Server - Linux only (runs on cloud)
+          - binary: server
+            goos: linux
+            goarch: amd64
+
+          # Agent - Linux only (runs on GPU instances)
+          - binary: agent
+            goos: linux
+            goarch: amd64
+
+          # CLI - Multiple platforms
+          - binary: cli
+            goos: linux
+            goarch: amd64
+          - binary: cli
+            goos: darwin
+            goarch: amd64
+          - binary: cli
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          OUTPUT_NAME="gpu-shopper-${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build -ldflags="-s -w" -o "${OUTPUT_NAME}" ./cmd/${{ matrix.binary }}
+          chmod +x "${OUTPUT_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-shopper-${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: gpu-shopper-${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec mv {} release/ \;
+          ls -la release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -63,6 +63,8 @@ type Service struct {
 	deploymentID string
 	agentImage   string
 	agentPort    int
+	shopperURL   string // Public URL for agents to reach this server
+	agentBinURL  string // URL to download agent binary (for non-Docker providers)
 
 	// Configuration
 	heartbeatTimeout       time.Duration
@@ -103,6 +105,20 @@ func WithAgentImage(image string) Option {
 func WithAgentPort(port int) Option {
 	return func(s *Service) {
 		s.agentPort = port
+	}
+}
+
+// WithShopperURL sets the public URL for agents to reach the shopper server
+func WithShopperURL(url string) Option {
+	return func(s *Service) {
+		s.shopperURL = url
+	}
+}
+
+// WithAgentBinaryURL sets the URL to download agent binary from
+func WithAgentBinaryURL(url string) Option {
+	return func(s *Service) {
+		s.agentBinURL = url
 	}
 }
 
@@ -509,7 +525,8 @@ func (s *Service) failSession(ctx context.Context, session *models.Session, reas
 
 // buildAgentEnv creates environment variables for the node agent
 func (s *Service) buildAgentEnv(session *models.Session, tags models.InstanceTags) map[string]string {
-	return map[string]string{
+	env := map[string]string{
+		"SHOPPER_URL":           s.shopperURL,
 		"SHOPPER_SESSION_ID":    session.ID,
 		"SHOPPER_DEPLOYMENT_ID": s.deploymentID,
 		"SHOPPER_EXPIRES_AT":    tags.ShopperExpiresAt.Format(time.RFC3339),
@@ -517,6 +534,11 @@ func (s *Service) buildAgentEnv(session *models.Session, tags models.InstanceTag
 		"SHOPPER_AGENT_TOKEN":   session.AgentToken,
 		"SHOPPER_AGENT_PORT":    fmt.Sprintf("%d", s.agentPort),
 	}
+	// Include agent binary URL if configured (for non-Docker providers)
+	if s.agentBinURL != "" {
+		env["SHOPPER_AGENT_URL"] = s.agentBinURL
+	}
+	return env
 }
 
 // generateSSHKeyPair generates an RSA SSH key pair
