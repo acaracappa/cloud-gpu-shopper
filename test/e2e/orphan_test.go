@@ -1,0 +1,160 @@
+//go:build e2e
+// +build e2e
+
+package e2e
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestOrphanDetection tests that orphan instances (exist on provider but not in DB) are detected and destroyed
+func TestOrphanDetection(t *testing.T) {
+	env := NewTestEnv()
+	env.WaitForServer(t, 30*time.Second)
+	env.WaitForMockProvider(t, 10*time.Second)
+	env.ResetMockProvider(t)
+
+	// Get initial metrics
+	initialOrphans, initialDestroyed, _, _ := env.GetReconcileMetrics(t)
+
+	// Create an orphan instance directly in the mock provider (bypassing API)
+	// This simulates an instance that exists on the provider but we have no DB record for
+	orphanLabel := GenerateSessionLabel()
+	t.Logf("Creating orphan instance with label: %s", orphanLabel)
+	orphanID := env.CreateOrphanInstance(t, orphanLabel)
+	require.NotEmpty(t, orphanID, "Orphan instance ID should not be empty")
+	t.Logf("Created orphan instance: %s", orphanID)
+
+	// Verify instance exists on provider
+	instances := env.ListProviderInstances(t)
+	assert.Contains(t, instances, orphanID, "Orphan should exist on provider")
+
+	// Run reconciliation
+	t.Log("Running reconciliation...")
+	env.RunReconciliation(t)
+
+	// Wait a moment for async operations
+	time.Sleep(500 * time.Millisecond)
+
+	// Check metrics - orphan should be detected and destroyed
+	orphansFound, orphansDestroyed, _, _ := env.GetReconcileMetrics(t)
+	t.Logf("Metrics: orphans_found=%d (was %d), orphans_destroyed=%d (was %d)",
+		orphansFound, initialOrphans, orphansDestroyed, initialDestroyed)
+
+	assert.Greater(t, orphansFound, initialOrphans, "Should have detected at least one orphan")
+	assert.Greater(t, orphansDestroyed, initialDestroyed, "Should have destroyed at least one orphan")
+
+	// Verify orphan instance no longer exists on provider
+	instances = env.ListProviderInstances(t)
+	assert.NotContains(t, instances, orphanID, "Orphan should have been destroyed")
+
+	t.Log("Orphan detection test completed successfully")
+}
+
+// TestOrphanDetectionWithMultipleOrphans tests detection of multiple orphan instances
+func TestOrphanDetectionWithMultipleOrphans(t *testing.T) {
+	env := NewTestEnv()
+	env.WaitForServer(t, 30*time.Second)
+	env.WaitForMockProvider(t, 10*time.Second)
+	env.ResetMockProvider(t)
+
+	// Get initial metrics
+	initialOrphans, initialDestroyed, _, _ := env.GetReconcileMetrics(t)
+
+	// Create multiple orphan instances
+	orphanIDs := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		label := GenerateSessionLabel()
+		orphanIDs[i] = env.CreateOrphanInstance(t, label)
+		t.Logf("Created orphan %d: %s", i+1, orphanIDs[i])
+	}
+
+	// Verify all orphans exist
+	instances := env.ListProviderInstances(t)
+	for _, id := range orphanIDs {
+		assert.Contains(t, instances, id, "Orphan should exist on provider")
+	}
+
+	// Run reconciliation
+	t.Log("Running reconciliation...")
+	env.RunReconciliation(t)
+
+	// Wait for async operations
+	time.Sleep(500 * time.Millisecond)
+
+	// Check metrics
+	orphansFound, orphansDestroyed, _, _ := env.GetReconcileMetrics(t)
+	expectedFound := initialOrphans + 3
+	expectedDestroyed := initialDestroyed + 3
+
+	t.Logf("Metrics: orphans_found=%d (expected %d), orphans_destroyed=%d (expected %d)",
+		orphansFound, expectedFound, orphansDestroyed, expectedDestroyed)
+
+	assert.GreaterOrEqual(t, orphansFound, expectedFound, "Should have detected all orphans")
+	assert.GreaterOrEqual(t, orphansDestroyed, expectedDestroyed, "Should have destroyed all orphans")
+
+	// Verify all orphans destroyed
+	instances = env.ListProviderInstances(t)
+	for _, id := range orphanIDs {
+		assert.NotContains(t, instances, id, "Orphan should have been destroyed")
+	}
+
+	t.Log("Multiple orphan detection test completed successfully")
+}
+
+// TestLegitimateSessionNotOrphan verifies that legitimate sessions are not treated as orphans
+func TestLegitimateSessionNotOrphan(t *testing.T) {
+	env := NewTestEnv()
+	env.WaitForServer(t, 30*time.Second)
+	env.WaitForMockProvider(t, 10*time.Second)
+	env.ResetMockProvider(t)
+
+	// Create a legitimate session through the API
+	inventory := env.ListInventory(t)
+	require.NotEmpty(t, inventory.Offers)
+
+	createResp := env.CreateSession(t, CreateSessionRequest{
+		ConsumerID:     GenerateConsumerID(),
+		OfferID:        inventory.Offers[0].ID,
+		WorkloadType:   "llm",
+		ReservationHrs: 1,
+	})
+
+	sessionID := createResp.Session.ID
+	defer env.Cleanup(t, sessionID)
+
+	// Send heartbeat to transition to running
+	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
+		SessionID:  sessionID,
+		AgentToken: createResp.AgentToken,
+		Status:     "running",
+	})
+
+	// Wait for running
+	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
+
+	// Get metrics before reconciliation
+	initialOrphans, _, _, _ := env.GetReconcileMetrics(t)
+
+	// Run reconciliation
+	t.Log("Running reconciliation with legitimate session...")
+	env.RunReconciliation(t)
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Check that no new orphans were detected (our session is legitimate)
+	orphansFound, _, _, _ := env.GetReconcileMetrics(t)
+	assert.Equal(t, initialOrphans, orphansFound, "Legitimate session should not be detected as orphan")
+
+	// Session should still be running
+	session := env.GetSession(t, sessionID)
+	assert.Equal(t, "running", session.Status, "Session should still be running")
+
+	// Cleanup
+	env.DeleteSession(t, sessionID)
+	t.Log("Legitimate session test completed successfully")
+}

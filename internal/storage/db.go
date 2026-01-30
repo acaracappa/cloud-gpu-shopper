@@ -58,6 +58,16 @@ func (db *DB) Migrate(ctx context.Context) error {
 		}
 	}
 
+	// Run ALTER TABLE migrations (ignore "duplicate column" errors)
+	alterMigrations := []string{
+		migrationIdleTracking,
+		migrationAgentToken,
+	}
+
+	for _, migration := range alterMigrations {
+		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
+	}
+
 	return nil
 }
 
@@ -143,4 +153,12 @@ CREATE INDEX IF NOT EXISTS idx_costs_session_id ON costs(session_id);
 CREATE INDEX IF NOT EXISTS idx_costs_consumer_id ON costs(consumer_id);
 CREATE INDEX IF NOT EXISTS idx_costs_hour ON costs(hour);
 CREATE INDEX IF NOT EXISTS idx_consumers_api_key_hash ON consumers(api_key_hash);
+`
+
+const migrationIdleTracking = `
+ALTER TABLE sessions ADD COLUMN last_idle_seconds INTEGER NOT NULL DEFAULT 0;
+`
+
+const migrationAgentToken = `
+ALTER TABLE sessions ADD COLUMN agent_token TEXT;
 `

@@ -1,0 +1,209 @@
+package api
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
+
+	// Register metrics
+	_ "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
+)
+
+// Server is the HTTP API server
+type Server struct {
+	router      *gin.Engine
+	httpServer  *http.Server
+	logger      *slog.Logger
+
+	// Services
+	inventory   *inventory.Service
+	provisioner *provisioner.Service
+	lifecycle   *lifecycle.Manager
+	costTracker *cost.Tracker
+
+	// Configuration
+	host string
+	port int
+}
+
+// Option configures the server
+type Option func(*Server)
+
+// WithLogger sets a custom logger
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *Server) {
+		s.logger = logger
+	}
+}
+
+// WithHost sets the server host
+func WithHost(host string) Option {
+	return func(s *Server) {
+		s.host = host
+	}
+}
+
+// WithPort sets the server port
+func WithPort(port int) Option {
+	return func(s *Server) {
+		s.port = port
+	}
+}
+
+// New creates a new API server
+func New(
+	inv *inventory.Service,
+	prov *provisioner.Service,
+	lm *lifecycle.Manager,
+	ct *cost.Tracker,
+	opts ...Option,
+) *Server {
+	s := &Server{
+		logger:      slog.Default(),
+		inventory:   inv,
+		provisioner: prov,
+		lifecycle:   lm,
+		costTracker: ct,
+		host:        "0.0.0.0",
+		port:        8080,
+	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	s.setupRouter()
+	return s
+}
+
+// setupRouter configures the Gin router
+func (s *Server) setupRouter() {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+
+	// Add middleware
+	router.Use(s.requestIDMiddleware())
+	router.Use(s.loggingMiddleware())
+	router.Use(s.recoveryMiddleware())
+
+	// Health endpoint
+	router.GET("/health", s.handleHealth)
+
+	// Prometheus metrics endpoint
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// API v1 routes
+	v1 := router.Group("/api/v1")
+	{
+		// Inventory
+		v1.GET("/inventory", s.handleListInventory)
+		v1.GET("/inventory/:id", s.handleGetOffer)
+
+		// Sessions
+		v1.POST("/sessions", s.handleCreateSession)
+		v1.GET("/sessions", s.handleListSessions)
+		v1.GET("/sessions/:id", s.handleGetSession)
+		v1.POST("/sessions/:id/done", s.handleSessionDone)
+		v1.POST("/sessions/:id/extend", s.handleExtendSession)
+		v1.DELETE("/sessions/:id", s.handleDeleteSession)
+
+		// Costs
+		v1.GET("/costs", s.handleGetCosts)
+		v1.GET("/costs/summary", s.handleGetCostSummary)
+
+		// Agent endpoints
+		v1.POST("/sessions/:id/heartbeat", s.handleHeartbeat)
+	}
+
+	s.router = router
+}
+
+// Start starts the HTTP server
+func (s *Server) Start() error {
+	addr := fmt.Sprintf("%s:%d", s.host, s.port)
+	s.httpServer = &http.Server{
+		Addr:         addr,
+		Handler:      s.router,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	s.logger.Info("starting API server", slog.String("addr", addr))
+	return s.httpServer.ListenAndServe()
+}
+
+// Shutdown gracefully shuts down the server
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.logger.Info("shutting down API server")
+	return s.httpServer.Shutdown(ctx)
+}
+
+// Router returns the Gin router (for testing)
+func (s *Server) Router() *gin.Engine {
+	return s.router
+}
+
+// Middleware
+
+func (s *Server) requestIDMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		requestID := c.GetHeader("X-Request-ID")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+		c.Set("request_id", requestID)
+		c.Header("X-Request-ID", requestID)
+		c.Next()
+	}
+}
+
+func (s *Server) loggingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+
+		c.Next()
+
+		latency := time.Since(start)
+		status := c.Writer.Status()
+
+		s.logger.Info("request completed",
+			slog.String("method", c.Request.Method),
+			slog.String("path", path),
+			slog.Int("status", status),
+			slog.Duration("latency", latency),
+			slog.String("request_id", c.GetString("request_id")),
+			slog.String("client_ip", c.ClientIP()))
+	}
+}
+
+func (s *Server) recoveryMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				s.logger.Error("panic recovered",
+					slog.Any("error", err),
+					slog.String("request_id", c.GetString("request_id")))
+
+				c.JSON(http.StatusInternalServerError, ErrorResponse{
+					Error:     "internal server error",
+					RequestID: c.GetString("request_id"),
+				})
+				c.Abort()
+			}
+		}()
+		c.Next()
+	}
+}
