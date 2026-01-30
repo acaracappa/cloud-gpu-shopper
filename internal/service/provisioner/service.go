@@ -39,6 +39,9 @@ const (
 
 	// DefaultAgentPort is the default port for the agent endpoint
 	DefaultAgentPort = 8081
+
+	// DefaultAgentBinaryURL is the URL to download the agent binary from GitHub releases
+	DefaultAgentBinaryURL = "https://github.com/acaracappa/cloud-gpu-shopper/releases/latest/download/gpu-shopper-agent-linux-amd64"
 )
 
 // SessionStore defines the interface for session persistence
@@ -145,6 +148,7 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 		deploymentID:           uuid.New().String(),
 		agentImage:             "ghcr.io/cloud-gpu-shopper/agent:latest",
 		agentPort:              DefaultAgentPort,
+		agentBinURL:            DefaultAgentBinaryURL,
 		heartbeatTimeout:       DefaultHeartbeatTimeout,
 		heartbeatCheckInterval: DefaultHeartbeatCheckInterval,
 		destroyTimeout:         DefaultDestroyTimeout,
