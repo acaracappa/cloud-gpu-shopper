@@ -1,14 +1,18 @@
 # Cloud GPU Shopper
 
-A unified inventory and orchestration service for commodity GPU cloud providers. Acts as a "menu and orchestrator" - provisions GPU instances, hands off direct access to consumers, and ensures safe lifecycle management.
+A unified inventory and orchestration service for commodity GPU providers (Vast.ai, TensorDock). Acts as a "menu and provisioner" - select, provision, hand off credentials, ensure cleanup.
+
+## Key Principle
+
+**Menu, not middleman.** We provision and hand off direct access. We don't proxy traffic.
 
 ## Features
 
-- **Unified Inventory**: Aggregates GPU offerings from multiple providers (Vast.ai, TensorDock)
-- **Smart Provisioning**: Two-phase provisioning with crash recovery
-- **Lifecycle Management**: Automatic spin-down, 12-hour hard max, heartbeat monitoring
+- **Unified Inventory**: Browse GPUs across multiple providers with filtering
+- **Session Management**: Provision, monitor, and destroy GPU sessions
+- **Safety Systems**: 12-hour hard max, orphan detection, verified destruction
 - **Cost Tracking**: Per-session and per-consumer cost aggregation with budget alerts
-- **Safety First**: Orphan detection, verified destruction, provider reconciliation
+- **Node Agent**: Heartbeat monitoring with self-destruct failsafe
 
 ## Supported Providers
 
@@ -21,87 +25,184 @@ A unified inventory and orchestration service for commodity GPU cloud providers.
 
 ### Prerequisites
 
-- Go 1.21+
-- SQLite 3
+- Go 1.22+
+- Docker (optional, for containerized deployment)
 
-### Configuration
-
-Set environment variables or create a `.env` file:
+### Environment Variables
 
 ```bash
-# Provider Credentials
-VASTAI_API_KEY=your_vastai_api_key
-TENSORDOCK_API_ID=your_tensordock_api_id
-TENSORDOCK_API_TOKEN=your_tensordock_api_token
-
-# Server Configuration
-SERVER_PORT=8080
-LOG_LEVEL=info
-LOG_FORMAT=json
-
-# Database
-DATABASE_PATH=./data/shopper.db
+export VASTAI_API_KEY=your-vastai-key
+export TENSORDOCK_API_KEY=your-tensordock-key
+export TENSORDOCK_AUTH_ID=your-tensordock-auth-id
+export DATABASE_PATH=./data/gpu-shopper.db
 ```
 
-### Build
+### Run the Server
 
 ```bash
-go build -o bin/gpu-shopper ./cmd/server
-go build -o bin/gpu-cli ./cmd/cli
+# Build and run
+go build -o bin/server ./cmd/server
+./bin/server
+
+# Or run directly
+go run ./cmd/server
 ```
 
-### Run Tests
+The server starts on `http://localhost:8080`.
+
+### Use the CLI
 
 ```bash
-go test ./...
+# Build CLI
+go build -o bin/gpu-shopper ./cmd/cli
+
+# List available GPUs
+./bin/gpu-shopper inventory
+
+# Filter by GPU type and max price
+./bin/gpu-shopper inventory --gpu-type "RTX 4090" --max-price 0.50
+
+# Provision a session
+./bin/gpu-shopper provision --offer-id <offer-id> --consumer-id my-app --hours 2
+
+# List active sessions
+./bin/gpu-shopper sessions list
+
+# Get session details
+./bin/gpu-shopper sessions get <session-id>
+
+# Signal session complete
+./bin/gpu-shopper sessions done <session-id>
+
+# View costs
+./bin/gpu-shopper costs --consumer-id my-app
+./bin/gpu-shopper costs summary
 ```
 
-## Architecture
+### Docker Deployment
 
+```bash
+cd deploy
+
+# Start server only
+docker-compose up -d server
+
+# Start with monitoring (Prometheus + Grafana)
+docker-compose --profile monitoring up -d
+
+# View logs
+docker-compose logs -f server
 ```
-cloud-gpu-shopper/
-├── cmd/
-│   ├── server/       # Main API server
-│   └── cli/          # CLI tool
-├── internal/
-│   ├── config/       # Configuration loading
-│   ├── logging/      # Structured logging
-│   ├── provider/     # Provider adapters
-│   │   ├── vastai/
-│   │   └── tensordock/
-│   ├── storage/      # SQLite persistence
-│   └── service/      # Business logic (coming soon)
-├── pkg/
-│   └── models/       # Shared data models
-└── docs/             # Documentation
-```
+
+Access points:
+- API Server: http://localhost:8080
+- Prometheus: http://localhost:9090 (with monitoring profile)
+- Grafana: http://localhost:3000 (with monitoring profile, admin/admin)
 
 ## API Overview
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/inventory` | GET | List available GPU offers |
-| `/sessions` | POST | Provision a new GPU session |
-| `/sessions/:id` | GET | Get session details |
-| `/sessions/:id` | DELETE | Terminate a session |
-| `/costs` | GET | Get cost summary |
 | `/health` | GET | Health check |
+| `/metrics` | GET | Prometheus metrics |
+| `/api/v1/inventory` | GET | List available GPUs |
+| `/api/v1/inventory/:id` | GET | Get specific offer |
+| `/api/v1/sessions` | POST | Create session |
+| `/api/v1/sessions` | GET | List sessions |
+| `/api/v1/sessions/:id` | GET | Get session |
+| `/api/v1/sessions/:id` | DELETE | Force destroy session |
+| `/api/v1/sessions/:id/done` | POST | Signal session complete |
+| `/api/v1/sessions/:id/extend` | POST | Extend session |
+| `/api/v1/sessions/:id/heartbeat` | POST | Agent heartbeat |
+| `/api/v1/costs` | GET | Get costs |
+| `/api/v1/costs/summary` | GET | Monthly cost summary |
 
-## Safety Mechanisms
+See [docs/API.md](docs/API.md) for full API documentation.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CLOUD GPU SHOPPER                         │
+├─────────────────────────────────────────────────────────────┤
+│  REST API (Gin)  │  CLI (Cobra)  │  Background Jobs          │
+├─────────────────────────────────────────────────────────────┤
+│  Inventory │ Provisioner │ Lifecycle │ Cost Tracker          │
+├─────────────────────────────────────────────────────────────┤
+│         Vast.ai Adapter    │    TensorDock Adapter           │
+├─────────────────────────────────────────────────────────────┤
+│                     SQLite Storage                           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                    SSH + Container Deploy
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      GPU NODE (Remote)                       │
+├─────────────────────────────────────────────────────────────┤
+│  Node Agent: Heartbeat + Health + Self-Destruct Timer        │
+│  Consumer Workload: vLLM, Training, Batch Jobs               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Safety Systems
+
+The service is designed with "zero orphaned instances" as the primary goal:
 
 1. **Two-Phase Provisioning**: Database record created before provider call
-2. **Verified Destruction**: Polls until instance confirmed destroyed
-3. **Instance Tagging**: All instances tagged with `shopper-{sessionID}`
-4. **Provider Reconciliation**: Every 5 minutes, detects orphans and ghosts
-5. **Startup Recovery**: Reconciles state on service restart
-6. **Agent Self-Destruct**: Independent failsafe timer on provisioned nodes
-7. **Hard Max Enforcement**: 12-hour default limit, CLI override available
+2. **Verified Destruction**: Retries and confirms instance is gone
+3. **Instance Tagging**: All instances tagged for reconciliation
+4. **Provider Reconciliation**: Compares DB vs provider every 5 minutes
+5. **12-Hour Hard Max**: Automatic shutdown (CLI override available)
+6. **Agent Self-Destruct**: Node shuts down if shopper unreachable for 30min
+7. **Orphan Detection**: Alerts and auto-destroys orphaned instances
+
+## Development
+
+```bash
+# Run tests
+go test ./...
+
+# Run tests with verbose output
+go test -v ./...
+
+# Run tests with coverage
+go test -cover ./...
+
+# Build all binaries
+go build -o bin/server ./cmd/server
+go build -o bin/agent ./cmd/agent
+go build -o bin/gpu-shopper ./cmd/cli
+```
+
+## Project Structure
+
+```
+├── cmd/
+│   ├── server/     # API server
+│   ├── agent/      # Node agent
+│   └── cli/        # CLI tool
+├── agent/          # Agent packages
+│   ├── api/        # Agent health endpoints
+│   └── heartbeat/  # Heartbeat sender
+├── internal/
+│   ├── api/        # REST API handlers
+│   ├── config/     # Configuration
+│   ├── logging/    # Structured logging
+│   ├── metrics/    # Prometheus metrics
+│   ├── provider/   # Provider adapters
+│   ├── service/    # Business logic
+│   └── storage/    # SQLite persistence
+├── pkg/models/     # Shared data models
+├── deploy/         # Docker files
+└── docs/           # Documentation
+```
 
 ## Development Status
 
 See [PROGRESS.md](PROGRESS.md) for detailed implementation status.
 
-**Current Phase**: Day 1 Complete - Foundation + Provider Adapters
+**Current Phase**: Day 5 Complete - MVP Ready
 
 ## License
 

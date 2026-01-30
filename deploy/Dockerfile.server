@@ -1,0 +1,49 @@
+# Build stage
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies for CGO (SQLite)
+RUN apk add --no-cache git ca-certificates gcc musl-dev
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the server binary
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-w -s" -o /server ./cmd/server
+
+# Runtime stage
+FROM alpine:3.19
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
+
+# Copy the binary
+COPY --from=builder /server /app/server
+
+# Create directories for data and config
+RUN mkdir -p /app/data /app/config
+
+# Create non-root user for security
+RUN adduser -D -s /bin/sh shopper
+RUN chown -R shopper:shopper /app
+USER shopper
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+# Expose API and metrics ports
+EXPOSE 8080
+
+# Volume for database persistence
+VOLUME ["/app/data"]
+
+# Run the server
+ENTRYPOINT ["/app/server"]

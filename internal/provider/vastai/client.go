@@ -221,13 +221,12 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		createReq.OnStart = fmt.Sprintf("mkdir -p ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys", req.SSHPublicKey)
 	}
 
-	// Add environment variables
+	// Add environment variables as JSON object (Vast.ai format)
 	if len(req.EnvVars) > 0 {
-		envParts := make([]string, 0, len(req.EnvVars))
-		for k, v := range req.EnvVars {
-			envParts = append(envParts, fmt.Sprintf("%s=%s", k, v))
+		envJSON, err := json.Marshal(req.EnvVars)
+		if err == nil {
+			createReq.Env = string(envJSON)
 		}
-		createReq.Env = strings.Join(envParts, " ")
 	}
 
 	// Parse offer ID as bundle ID

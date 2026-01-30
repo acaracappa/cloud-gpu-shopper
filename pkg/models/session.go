@@ -65,10 +65,11 @@ type Session struct {
 	PricePerHour float64 `json:"price_per_hour"`
 
 	// Timestamps
-	CreatedAt     time.Time `json:"created_at"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	LastHeartbeat time.Time `json:"last_heartbeat,omitempty"`
-	StoppedAt     time.Time `json:"stopped_at,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	LastHeartbeat   time.Time `json:"last_heartbeat,omitempty"`
+	LastIdleSeconds int       `json:"last_idle_seconds,omitempty"`
+	StoppedAt       time.Time `json:"stopped_at,omitempty"`
 }
 
 // CreateSessionRequest is the request to create a new session

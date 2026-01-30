@@ -1,0 +1,78 @@
+version: "3.8"
+
+services:
+  # GPU Shopper API Server
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_PATH=/app/data/gpu-shopper.db
+      - VASTAI_API_KEY=${VASTAI_API_KEY:-}
+      - TENSORDOCK_API_KEY=${TENSORDOCK_API_KEY:-}
+      - TENSORDOCK_AUTH_ID=${TENSORDOCK_AUTH_ID:-}
+      - LOG_LEVEL=info
+    volumes:
+      - shopper-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Mock Agent (for local testing)
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    ports:
+      - "8081:8081"
+    environment:
+      - SHOPPER_SESSION_ID=test-session
+      - SHOPPER_AGENT_TOKEN=test-token
+      - SHOPPER_EXPIRES_AT=2099-12-31T23:59:59Z
+      - SHOPPER_URL=http://server:8080
+      - SHOPPER_AGENT_PORT=8081
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Prometheus for metrics (optional)
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    depends_on:
+      - server
+    profiles:
+      - monitoring
+
+  # Grafana for dashboards (optional)
+  grafana:
+    image: grafana/grafana:10.1.5
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+volumes:
+  shopper-data:
+  grafana-data:
