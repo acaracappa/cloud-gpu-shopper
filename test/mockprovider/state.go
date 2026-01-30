@@ -227,13 +227,15 @@ func (s *State) CreateInstance(offerID string, label string, envVars map[string]
 
 	s.instances[instanceID] = instance
 
+	// Capture delay before releasing lock to avoid race with Reset()
+	delay := s.createDelay
+	if delay == 0 {
+		delay = 100 * time.Millisecond // Default small delay
+	}
+
 	// Simulate async provisioning
 	go func() {
-		if s.createDelay > 0 {
-			time.Sleep(s.createDelay)
-		} else {
-			time.Sleep(100 * time.Millisecond) // Default small delay
-		}
+		time.Sleep(delay)
 		s.mu.Lock()
 		if inst, ok := s.instances[instanceID]; ok && inst.Status == StatusCreating {
 			inst.Status = StatusRunning
@@ -242,18 +244,25 @@ func (s *State) CreateInstance(offerID string, label string, envVars map[string]
 		s.mu.Unlock()
 	}()
 
-	return instance, nil
+	// Return a copy to avoid races with async status updates
+	copy := *instance
+	return &copy, nil
 }
 
-// GetInstance returns an instance by ID
+// GetInstance returns a copy of an instance by ID
 func (s *State) GetInstance(id string) (*Instance, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	instance, ok := s.instances[id]
-	return instance, ok
+	if !ok {
+		return nil, false
+	}
+	// Return a copy to avoid races with async status updates
+	copy := *instance
+	return &copy, true
 }
 
-// ListInstances returns all instances
+// ListInstances returns copies of all instances
 func (s *State) ListInstances() []*Instance {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -261,7 +270,9 @@ func (s *State) ListInstances() []*Instance {
 	instances := make([]*Instance, 0, len(s.instances))
 	for _, inst := range s.instances {
 		if inst.Status != StatusDestroyed {
-			instances = append(instances, inst)
+			// Return copies to avoid races with async status updates
+			copy := *inst
+			instances = append(instances, &copy)
 		}
 	}
 	return instances

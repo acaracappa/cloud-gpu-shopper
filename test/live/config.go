@@ -62,8 +62,8 @@ func DefaultTestConfig() *TestConfig {
 	}
 
 	// TensorDock configuration
-	tensorKey := os.Getenv("TENSORDOCK_API_KEY")
-	tensorOrg := os.Getenv("TENSORDOCK_ORG_ID")
+	tensorKey := os.Getenv("TENSORDOCK_API_TOKEN")
+	tensorOrg := os.Getenv("TENSORDOCK_AUTH_ID")
 	cfg.Providers[ProviderTensorDock] = ProviderConfig{
 		Name:         ProviderTensorDock,
 		APIKey:       tensorKey,
