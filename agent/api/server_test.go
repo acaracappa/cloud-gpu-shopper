@@ -21,14 +21,14 @@ type mockStatusProvider struct {
 	shopperReachable  bool
 }
 
-func (m *mockStatusProvider) GetSessionID() string         { return m.sessionID }
-func (m *mockStatusProvider) GetStatus() string            { return m.status }
-func (m *mockStatusProvider) GetIdleSeconds() int          { return m.idleSeconds }
-func (m *mockStatusProvider) GetGPUUtilization() float64   { return m.gpuUtil }
-func (m *mockStatusProvider) GetMemoryUsedMB() int         { return m.memUsed }
-func (m *mockStatusProvider) GetUptime() time.Duration     { return m.uptime }
-func (m *mockStatusProvider) GetHeartbeatFailures() int    { return m.heartbeatFailures }
-func (m *mockStatusProvider) IsShopperReachable() bool     { return m.shopperReachable }
+func (m *mockStatusProvider) GetSessionID() string       { return m.sessionID }
+func (m *mockStatusProvider) GetStatus() string          { return m.status }
+func (m *mockStatusProvider) GetIdleSeconds() int        { return m.idleSeconds }
+func (m *mockStatusProvider) GetGPUUtilization() float64 { return m.gpuUtil }
+func (m *mockStatusProvider) GetMemoryUsedMB() int       { return m.memUsed }
+func (m *mockStatusProvider) GetUptime() time.Duration   { return m.uptime }
+func (m *mockStatusProvider) GetHeartbeatFailures() int  { return m.heartbeatFailures }
+func (m *mockStatusProvider) IsShopperReachable() bool   { return m.shopperReachable }
 
 func TestServer_HealthEndpoint(t *testing.T) {
 	server := New("test-session-123",

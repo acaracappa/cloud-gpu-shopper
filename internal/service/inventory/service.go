@@ -27,10 +27,10 @@ type Service struct {
 	providers []provider.Provider
 	logger    *slog.Logger
 
-	mu           sync.RWMutex
-	cache        map[string]*providerCache
-	cacheTTL     time.Duration
-	backoffTTL   time.Duration
+	mu         sync.RWMutex
+	cache      map[string]*providerCache
+	cacheTTL   time.Duration
+	backoffTTL time.Duration
 }
 
 // providerCache holds cached offers for a single provider

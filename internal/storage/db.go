@@ -68,6 +68,15 @@ func (db *DB) Migrate(ctx context.Context) error {
 		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
 	}
 
+	// Run index migrations that may fail if already exists
+	indexMigrations := []string{
+		migrationDuplicatePrevention,
+	}
+
+	for _, migration := range indexMigrations {
+		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
+	}
+
 	return nil
 }
 
@@ -153,6 +162,14 @@ CREATE INDEX IF NOT EXISTS idx_costs_session_id ON costs(session_id);
 CREATE INDEX IF NOT EXISTS idx_costs_consumer_id ON costs(consumer_id);
 CREATE INDEX IF NOT EXISTS idx_costs_hour ON costs(hour);
 CREATE INDEX IF NOT EXISTS idx_consumers_api_key_hash ON consumers(api_key_hash);
+`
+
+// migrationDuplicatePrevention adds a partial unique index to prevent duplicate active sessions
+// for the same consumer and offer. This is a belt-and-suspenders approach to catch any race conditions.
+const migrationDuplicatePrevention = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_consumer_offer_active
+ON sessions(consumer_id, offer_id)
+WHERE status IN ('pending', 'provisioning', 'running');
 `
 
 const migrationIdleTracking = `

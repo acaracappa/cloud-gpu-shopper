@@ -135,12 +135,12 @@ func (m *mockDestroyer) getDestroyCalls() []string {
 
 // mockEventHandler implements EventHandler for testing
 type mockEventHandler struct {
-	mu                   sync.Mutex
-	expiredSessions      []*models.Session
-	hardMaxSessions      []*models.Session
-	heartbeatSessions    []*models.Session
-	orphanSessions       []*models.Session
-	idleShutdowns        []idleShutdownEvent
+	mu                sync.Mutex
+	expiredSessions   []*models.Session
+	hardMaxSessions   []*models.Session
+	heartbeatSessions []*models.Session
+	orphanSessions    []*models.Session
+	idleShutdowns     []idleShutdownEvent
 }
 
 type idleShutdownEvent struct {

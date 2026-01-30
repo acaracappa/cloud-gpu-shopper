@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
@@ -91,9 +93,9 @@ func (s *Server) handleListInventory(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	filter := models.OfferFilter{
-		Provider:       c.Query("provider"),
-		GPUType:        c.Query("gpu_type"),
-		Location:       c.Query("location"),
+		Provider: c.Query("provider"),
+		GPUType:  c.Query("gpu_type"),
+		Location: c.Query("location"),
 	}
 
 	if minVRAM := c.Query("min_vram"); minVRAM != "" {
@@ -192,6 +194,14 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 
 	session, err := s.provisioner.CreateSession(ctx, createReq, offer)
 	if err != nil {
+		var dupErr *provisioner.DuplicateSessionError
+		if errors.As(err, &dupErr) {
+			c.JSON(http.StatusConflict, ErrorResponse{
+				Error:     err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error:     err.Error(),
 			RequestID: c.GetString("request_id"),

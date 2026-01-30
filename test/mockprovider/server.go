@@ -83,22 +83,22 @@ type BundlesResponse struct {
 
 // OfferResponse matches Vast.ai offer format
 type OfferResponse struct {
-	ID             int     `json:"id"`
-	MachineID      int     `json:"machine_id"`
-	GPUName        string  `json:"gpu_name"`
-	NumGPUs        int     `json:"num_gpus"`
-	GPURam         int     `json:"gpu_ram"`
-	DPHTotal       float64 `json:"dph_total"`
-	Verified       bool    `json:"verified"`
-	Reliability    float64 `json:"reliability2"`
-	DLPerf         float64 `json:"dlperf"`
-	InetUp         float64 `json:"inet_up"`
-	InetDown       float64 `json:"inet_down"`
-	Rented         bool    `json:"rented"`
-	PublicIPAddr   string  `json:"public_ipaddr"`
-	DirectPortStart int    `json:"direct_port_start"`
-	CUDAMaxGood    string  `json:"cuda_max_good"`
-	DriverVersion  string  `json:"driver_version"`
+	ID              int     `json:"id"`
+	MachineID       int     `json:"machine_id"`
+	GPUName         string  `json:"gpu_name"`
+	NumGPUs         int     `json:"num_gpus"`
+	GPURam          int     `json:"gpu_ram"`
+	DPHTotal        float64 `json:"dph_total"`
+	Verified        bool    `json:"verified"`
+	Reliability     float64 `json:"reliability2"`
+	DLPerf          float64 `json:"dlperf"`
+	InetUp          float64 `json:"inet_up"`
+	InetDown        float64 `json:"inet_down"`
+	Rented          bool    `json:"rented"`
+	PublicIPAddr    string  `json:"public_ipaddr"`
+	DirectPortStart int     `json:"direct_port_start"`
+	CUDAMaxGood     string  `json:"cuda_max_good"`
+	DriverVersion   string  `json:"driver_version"`
 }
 
 func (s *Server) handleListOffers(c *gin.Context) {
@@ -138,14 +138,14 @@ func (s *Server) handleListOffers(c *gin.Context) {
 
 // CreateInstanceRequest matches Vast.ai create instance request
 type CreateInstanceRequest struct {
-	ClientID      string            `json:"client_id"`
-	Image         string            `json:"image"`
-	Env           map[string]string `json:"env"`
-	Disk          float64           `json:"disk"`
-	Label         string            `json:"label"`
-	OnStart       string            `json:"onstart"`
-	RunType       string            `json:"runtype"`
-	SSHKey        string            `json:"ssh_key"`
+	ClientID string            `json:"client_id"`
+	Image    string            `json:"image"`
+	Env      map[string]string `json:"env"`
+	Disk     float64           `json:"disk"`
+	Label    string            `json:"label"`
+	OnStart  string            `json:"onstart"`
+	RunType  string            `json:"runtype"`
+	SSHKey   string            `json:"ssh_key"`
 }
 
 // CreateInstanceResponse matches Vast.ai create response
@@ -200,18 +200,18 @@ type InstancesResponse struct {
 
 // InstanceResponse matches Vast.ai instance format
 type InstanceResponse struct {
-	ID           int               `json:"id"`
-	MachineID    int               `json:"machine_id"`
-	ActualStatus string            `json:"actual_status"`
-	SSHHost      string            `json:"ssh_host"`
-	SSHPort      int               `json:"ssh_port"`
-	Label        string            `json:"label"`
-	GPUName      string            `json:"gpu_name"`
-	NumGPUs      int               `json:"num_gpus"`
-	DPHTotal     float64           `json:"dph_total"`
-	StartDate    float64           `json:"start_date"`
-	StatusMsg    string            `json:"status_msg"`
-	CurState     string            `json:"cur_state"`
+	ID           int     `json:"id"`
+	MachineID    int     `json:"machine_id"`
+	ActualStatus string  `json:"actual_status"`
+	SSHHost      string  `json:"ssh_host"`
+	SSHPort      int     `json:"ssh_port"`
+	Label        string  `json:"label"`
+	GPUName      string  `json:"gpu_name"`
+	NumGPUs      int     `json:"num_gpus"`
+	DPHTotal     float64 `json:"dph_total"`
+	StartDate    float64 `json:"start_date"`
+	StatusMsg    string  `json:"status_msg"`
+	CurState     string  `json:"cur_state"`
 }
 
 func (s *Server) handleListInstances(c *gin.Context) {

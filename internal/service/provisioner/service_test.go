@@ -80,6 +80,22 @@ func (m *mockSessionStore) UpdateHeartbeatWithIdle(ctx context.Context, id strin
 	return nil
 }
 
+func (m *mockSessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, session := range m.sessions {
+		if session.ConsumerID == consumerID && session.OfferID == offerID {
+			if session.Status == models.StatusPending ||
+				session.Status == models.StatusProvisioning ||
+				session.Status == models.StatusRunning {
+				copy := *session
+				return &copy, nil
+			}
+		}
+	}
+	return nil, ErrNotFound
+}
+
 // mockProvider implements provider.Provider for testing
 type mockProvider struct {
 	name              string
@@ -87,11 +103,11 @@ type mockProvider struct {
 	destroyInstanceFn func(ctx context.Context, instanceID string) error
 	getStatusFn       func(ctx context.Context, instanceID string) (*provider.InstanceStatus, error)
 
-	mu                 sync.Mutex
-	createCalls        int
-	destroyCalls       int
-	statusCalls        int
-	lastCreateRequest  provider.CreateInstanceRequest
+	mu                sync.Mutex
+	createCalls       int
+	destroyCalls      int
+	statusCalls       int
+	lastCreateRequest provider.CreateInstanceRequest
 }
 
 func newMockProvider(name string) *mockProvider {
@@ -679,4 +695,137 @@ func TestService_CreateSession_WithIdleThreshold(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 30, session.IdleThreshold)
+}
+
+func TestService_CreateSession_DuplicatePrevention(t *testing.T) {
+	store := newMockSessionStore()
+	prov := newMockProvider("vastai")
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+
+	svc := New(store, registry, WithLogger(newTestLogger()))
+
+	ctx := context.Background()
+	req := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 2,
+	}
+	offer := &models.GPUOffer{Provider: "vastai", ProviderID: "123"}
+
+	// First session should succeed
+	session1, err := svc.CreateSession(ctx, req, offer)
+	require.NoError(t, err)
+	assert.NotEmpty(t, session1.ID)
+
+	// Second session with same consumer and offer should fail
+	_, err = svc.CreateSession(ctx, req, offer)
+	require.Error(t, err)
+
+	var dupErr *DuplicateSessionError
+	assert.True(t, errors.As(err, &dupErr))
+	assert.Equal(t, "consumer-001", dupErr.ConsumerID)
+	assert.Equal(t, "offer-123", dupErr.OfferID)
+	assert.Equal(t, session1.ID, dupErr.SessionID)
+}
+
+func TestService_CreateSession_AllowsAfterStopped(t *testing.T) {
+	store := newMockSessionStore()
+	prov := newMockProvider("vastai")
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+
+	svc := New(store, registry, WithLogger(newTestLogger()))
+
+	ctx := context.Background()
+
+	// Create a stopped session manually
+	stoppedSession := &models.Session{
+		ID:         "old-sess",
+		ConsumerID: "consumer-001",
+		OfferID:    "offer-123",
+		Provider:   "vastai",
+		Status:     models.StatusStopped,
+	}
+	store.sessions[stoppedSession.ID] = stoppedSession
+
+	// New session with same consumer and offer should succeed (old one is stopped)
+	req := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 2,
+	}
+	offer := &models.GPUOffer{Provider: "vastai", ProviderID: "123"}
+
+	session, err := svc.CreateSession(ctx, req, offer)
+	require.NoError(t, err)
+	assert.NotEmpty(t, session.ID)
+	assert.NotEqual(t, "old-sess", session.ID) // Should be a new session
+}
+
+func TestService_CreateSession_AllowsDifferentConsumer(t *testing.T) {
+	store := newMockSessionStore()
+	prov := newMockProvider("vastai")
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+
+	svc := New(store, registry, WithLogger(newTestLogger()))
+
+	ctx := context.Background()
+	offer := &models.GPUOffer{Provider: "vastai", ProviderID: "123"}
+
+	// First consumer creates a session
+	req1 := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 2,
+	}
+	session1, err := svc.CreateSession(ctx, req1, offer)
+	require.NoError(t, err)
+
+	// Different consumer with same offer should succeed
+	req2 := models.CreateSessionRequest{
+		ConsumerID:     "consumer-002",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 2,
+	}
+	session2, err := svc.CreateSession(ctx, req2, offer)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, session1.ID, session2.ID)
+}
+
+func TestService_CreateSession_AllowsDifferentOffer(t *testing.T) {
+	store := newMockSessionStore()
+	prov := newMockProvider("vastai")
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+
+	svc := New(store, registry, WithLogger(newTestLogger()))
+
+	ctx := context.Background()
+
+	// Same consumer creates session for offer-123
+	req1 := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 2,
+	}
+	offer1 := &models.GPUOffer{Provider: "vastai", ProviderID: "123"}
+	session1, err := svc.CreateSession(ctx, req1, offer1)
+	require.NoError(t, err)
+
+	// Same consumer with different offer should succeed
+	req2 := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-456",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 2,
+	}
+	offer2 := &models.GPUOffer{Provider: "vastai", ProviderID: "456"}
+	session2, err := svc.CreateSession(ctx, req2, offer2)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, session1.ID, session2.ID)
 }

@@ -33,15 +33,15 @@ const (
 
 // Session represents an active GPU rental session
 type Session struct {
-	ID              string        `json:"id"`
-	ConsumerID      string        `json:"consumer_id"`
-	Provider        string        `json:"provider"`
-	ProviderID      string        `json:"provider_instance_id"`
-	OfferID         string        `json:"offer_id"`
-	GPUType         string        `json:"gpu_type"`
-	GPUCount        int           `json:"gpu_count"`
-	Status          SessionStatus `json:"status"`
-	Error           string        `json:"error,omitempty"`
+	ID         string        `json:"id"`
+	ConsumerID string        `json:"consumer_id"`
+	Provider   string        `json:"provider"`
+	ProviderID string        `json:"provider_instance_id"`
+	OfferID    string        `json:"offer_id"`
+	GPUType    string        `json:"gpu_type"`
+	GPUCount   int           `json:"gpu_count"`
+	Status     SessionStatus `json:"status"`
+	Error      string        `json:"error,omitempty"`
 
 	// Connection details
 	SSHHost       string `json:"ssh_host,omitempty"`
@@ -84,23 +84,23 @@ type CreateSessionRequest struct {
 
 // SessionResponse is the API response for a session (hides sensitive fields after creation)
 type SessionResponse struct {
-	ID              string        `json:"id"`
-	ConsumerID      string        `json:"consumer_id"`
-	Provider        string        `json:"provider"`
-	GPUType         string        `json:"gpu_type"`
-	GPUCount        int           `json:"gpu_count"`
-	Status          SessionStatus `json:"status"`
-	Error           string        `json:"error,omitempty"`
-	SSHHost         string        `json:"ssh_host,omitempty"`
-	SSHPort         int           `json:"ssh_port,omitempty"`
-	SSHUser         string        `json:"ssh_user,omitempty"`
-	AgentEndpoint   string        `json:"agent_endpoint,omitempty"`
-	WorkloadType    WorkloadType  `json:"workload_type"`
-	ReservationHrs  int           `json:"reservation_hours"`
-	PricePerHour    float64       `json:"price_per_hour"`
-	CreatedAt       time.Time     `json:"created_at"`
-	ExpiresAt       time.Time     `json:"expires_at"`
-	LastHeartbeat   time.Time     `json:"last_heartbeat,omitempty"`
+	ID             string        `json:"id"`
+	ConsumerID     string        `json:"consumer_id"`
+	Provider       string        `json:"provider"`
+	GPUType        string        `json:"gpu_type"`
+	GPUCount       int           `json:"gpu_count"`
+	Status         SessionStatus `json:"status"`
+	Error          string        `json:"error,omitempty"`
+	SSHHost        string        `json:"ssh_host,omitempty"`
+	SSHPort        int           `json:"ssh_port,omitempty"`
+	SSHUser        string        `json:"ssh_user,omitempty"`
+	AgentEndpoint  string        `json:"agent_endpoint,omitempty"`
+	WorkloadType   WorkloadType  `json:"workload_type"`
+	ReservationHrs int           `json:"reservation_hours"`
+	PricePerHour   float64       `json:"price_per_hour"`
+	CreatedAt      time.Time     `json:"created_at"`
+	ExpiresAt      time.Time     `json:"expires_at"`
+	LastHeartbeat  time.Time     `json:"last_heartbeat,omitempty"`
 }
 
 // ToResponse converts a Session to a SessionResponse (without secrets)

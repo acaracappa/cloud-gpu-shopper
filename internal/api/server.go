@@ -22,9 +22,9 @@ import (
 
 // Server is the HTTP API server
 type Server struct {
-	router      *gin.Engine
-	httpServer  *http.Server
-	logger      *slog.Logger
+	router     *gin.Engine
+	httpServer *http.Server
+	logger     *slog.Logger
 
 	// Services
 	inventory   *inventory.Service

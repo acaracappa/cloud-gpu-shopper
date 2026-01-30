@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -208,6 +209,7 @@ func TestSessionStore_GetActiveSessions(t *testing.T) {
 	now := time.Now()
 
 	// Create sessions with various statuses
+	// Use different offer IDs for active statuses to avoid unique constraint violation
 	statuses := []models.SessionStatus{
 		models.StatusPending,
 		models.StatusProvisioning,
@@ -222,7 +224,7 @@ func TestSessionStore_GetActiveSessions(t *testing.T) {
 			ID:             "sess-active-" + string(rune('a'+i)),
 			ConsumerID:     "consumer-001",
 			Provider:       "vastai",
-			OfferID:        "offer-1",
+			OfferID:        fmt.Sprintf("offer-%d", i), // Use unique offer IDs to avoid duplicate constraint
 			GPUType:        "RTX4090",
 			GPUCount:       1,
 			Status:         status,
@@ -379,4 +381,192 @@ func TestSessionStore_NullableFields(t *testing.T) {
 	assert.Empty(t, retrieved.Error)
 	assert.True(t, retrieved.LastHeartbeat.IsZero())
 	assert.True(t, retrieved.StoppedAt.IsZero())
+}
+
+func TestSessionStore_GetActiveSessionByConsumerAndOffer(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Create an active session (running)
+	activeSession := &models.Session{
+		ID:             "sess-active",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		OfferID:        "offer-123",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusRunning,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(4 * time.Hour),
+	}
+	err := store.Create(ctx, activeSession)
+	require.NoError(t, err)
+
+	// Should find the active session
+	found, err := store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-001", "offer-123")
+	require.NoError(t, err)
+	assert.Equal(t, "sess-active", found.ID)
+	assert.Equal(t, models.StatusRunning, found.Status)
+}
+
+func TestSessionStore_GetActiveSessionByConsumerAndOffer_NotFound(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	// No sessions exist
+	_, err := store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-001", "offer-123")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestSessionStore_GetActiveSessionByConsumerAndOffer_IgnoresStoppedSessions(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Create a stopped session
+	stoppedSession := &models.Session{
+		ID:             "sess-stopped",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		OfferID:        "offer-123",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusStopped,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now.Add(-time.Hour),
+		ExpiresAt:      now,
+		StoppedAt:      now,
+	}
+	err := store.Create(ctx, stoppedSession)
+	require.NoError(t, err)
+
+	// Create a failed session
+	failedSession := &models.Session{
+		ID:             "sess-failed",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		OfferID:        "offer-123",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusFailed,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now.Add(-2 * time.Hour),
+		ExpiresAt:      now.Add(-time.Hour),
+	}
+	err = store.Create(ctx, failedSession)
+	require.NoError(t, err)
+
+	// Should not find any active session (stopped and failed are ignored)
+	_, err = store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-001", "offer-123")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestSessionStore_GetActiveSessionByConsumerAndOffer_FindsPendingAndProvisioning(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Create a pending session
+	pendingSession := &models.Session{
+		ID:             "sess-pending",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		OfferID:        "offer-pending",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusPending,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(4 * time.Hour),
+	}
+	err := store.Create(ctx, pendingSession)
+	require.NoError(t, err)
+
+	// Create a provisioning session
+	provisioningSession := &models.Session{
+		ID:             "sess-provisioning",
+		ConsumerID:     "consumer-002",
+		Provider:       "vastai",
+		OfferID:        "offer-provisioning",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusProvisioning,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(4 * time.Hour),
+	}
+	err = store.Create(ctx, provisioningSession)
+	require.NoError(t, err)
+
+	// Should find pending session
+	found, err := store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-001", "offer-pending")
+	require.NoError(t, err)
+	assert.Equal(t, "sess-pending", found.ID)
+	assert.Equal(t, models.StatusPending, found.Status)
+
+	// Should find provisioning session
+	found, err = store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-002", "offer-provisioning")
+	require.NoError(t, err)
+	assert.Equal(t, "sess-provisioning", found.ID)
+	assert.Equal(t, models.StatusProvisioning, found.Status)
+}
+
+func TestSessionStore_GetActiveSessionByConsumerAndOffer_DifferentConsumer(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Create an active session for consumer-001
+	session := &models.Session{
+		ID:             "sess-consumer1",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		OfferID:        "offer-shared",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusRunning,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(4 * time.Hour),
+	}
+	err := store.Create(ctx, session)
+	require.NoError(t, err)
+
+	// consumer-002 should not find consumer-001's session
+	_, err = store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-002", "offer-shared")
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// consumer-001 should find their session
+	found, err := store.GetActiveSessionByConsumerAndOffer(ctx, "consumer-001", "offer-shared")
+	require.NoError(t, err)
+	assert.Equal(t, "sess-consumer1", found.ID)
 }

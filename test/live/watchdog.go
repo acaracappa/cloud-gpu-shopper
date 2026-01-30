@@ -153,8 +153,8 @@ func (w *Watchdog) GetStats() WatchdogStats {
 	defer w.mu.Unlock()
 
 	stats := WatchdogStats{
-		TotalRuntime:   time.Since(w.startTime),
-		SpendByProv:    make(map[Provider]float64),
+		TotalRuntime:    time.Since(w.startTime),
+		SpendByProv:     make(map[Provider]float64),
 		ActiveInstances: len(w.instances),
 	}
 

@@ -51,10 +51,10 @@ type EventHandler interface {
 // noopEventHandler is a default handler that does nothing
 type noopEventHandler struct{}
 
-func (n *noopEventHandler) OnSessionExpired(session *models.Session)       {}
-func (n *noopEventHandler) OnHardMaxReached(session *models.Session)       {}
-func (n *noopEventHandler) OnHeartbeatTimeout(session *models.Session)     {}
-func (n *noopEventHandler) OnOrphanDetected(session *models.Session)       {}
+func (n *noopEventHandler) OnSessionExpired(session *models.Session)         {}
+func (n *noopEventHandler) OnHardMaxReached(session *models.Session)         {}
+func (n *noopEventHandler) OnHeartbeatTimeout(session *models.Session)       {}
+func (n *noopEventHandler) OnOrphanDetected(session *models.Session)         {}
 func (n *noopEventHandler) OnIdleShutdown(sessionID string, idleSeconds int) {}
 
 // Manager handles session lifecycle operations
@@ -74,10 +74,10 @@ type Manager struct {
 	now func() time.Time
 
 	// Shutdown coordination
-	mu       sync.Mutex
-	running  bool
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 
 	// Metrics
 	metrics *Metrics
@@ -85,15 +85,15 @@ type Manager struct {
 
 // Metrics tracks lifecycle manager statistics
 type Metrics struct {
-	mu                  sync.RWMutex
-	ChecksRun           int64
-	SessionsExpired     int64
-	HardMaxEnforced     int64
-	HeartbeatTimeouts   int64
-	OrphansDetected     int64
-	IdleShutdowns       int64
-	DestroySuccesses    int64
-	DestroyFailures     int64
+	mu                sync.RWMutex
+	ChecksRun         int64
+	SessionsExpired   int64
+	HardMaxEnforced   int64
+	HeartbeatTimeouts int64
+	OrphansDetected   int64
+	IdleShutdowns     int64
+	DestroySuccesses  int64
+	DestroyFailures   int64
 }
 
 // Option configures the lifecycle manager

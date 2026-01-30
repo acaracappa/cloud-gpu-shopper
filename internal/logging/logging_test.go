@@ -50,9 +50,9 @@ func TestSetup_TextFormat(t *testing.T) {
 
 func TestSetup_LogLevels(t *testing.T) {
 	tests := []struct {
-		level       string
-		shouldLog   bool
-		logFunc     func(ctx context.Context, msg string, args ...any)
+		level     string
+		shouldLog bool
+		logFunc   func(ctx context.Context, msg string, args ...any)
 	}{
 		{"debug", true, Debug},
 		{"info", true, Info},

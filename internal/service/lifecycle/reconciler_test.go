@@ -184,10 +184,10 @@ func (m *mockReconcileStore) Update(ctx context.Context, session *models.Session
 
 // mockReconcileEventHandler implements ReconcileEventHandler for testing
 type mockReconcileEventHandler struct {
-	mu         sync.Mutex
-	orphans    []string
-	ghosts     []*models.Session
-	errors     []string
+	mu      sync.Mutex
+	orphans []string
+	ghosts  []*models.Session
+	errors  []string
 }
 
 func newMockReconcileEventHandler() *mockReconcileEventHandler {

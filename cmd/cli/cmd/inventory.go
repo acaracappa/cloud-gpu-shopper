@@ -13,10 +13,10 @@ import (
 )
 
 var (
-	inventoryProvider   string
-	inventoryGPUType    string
-	inventoryMaxPrice   float64
-	inventoryMinVRAM    int
+	inventoryProvider    string
+	inventoryGPUType     string
+	inventoryMaxPrice    float64
+	inventoryMinVRAM     int
 	inventoryMinGPUCount int
 )
 

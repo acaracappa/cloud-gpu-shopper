@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	serverURL string
+	serverURL    string
 	outputFormat string
 )
 

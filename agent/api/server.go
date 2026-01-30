@@ -33,23 +33,23 @@ type HealthResponse struct {
 
 // StatusResponse is the detailed status response
 type StatusResponse struct {
-	SessionID          string    `json:"session_id"`
-	Status             string    `json:"status"`
-	IdleSeconds        int       `json:"idle_seconds"`
-	GPUUtilization     float64   `json:"gpu_utilization_pct"`
-	MemoryUsedMB       int       `json:"memory_used_mb"`
-	Uptime             string    `json:"uptime"`
-	ShopperReachable   bool      `json:"shopper_reachable"`
-	HeartbeatFailures  int       `json:"heartbeat_failures"`
-	Timestamp          time.Time `json:"timestamp"`
+	SessionID         string    `json:"session_id"`
+	Status            string    `json:"status"`
+	IdleSeconds       int       `json:"idle_seconds"`
+	GPUUtilization    float64   `json:"gpu_utilization_pct"`
+	MemoryUsedMB      int       `json:"memory_used_mb"`
+	Uptime            string    `json:"uptime"`
+	ShopperReachable  bool      `json:"shopper_reachable"`
+	HeartbeatFailures int       `json:"heartbeat_failures"`
+	Timestamp         time.Time `json:"timestamp"`
 }
 
 // Server is the agent HTTP API server
 type Server struct {
-	server   *http.Server
-	logger   *slog.Logger
-	status   StatusProvider
-	port     int
+	server    *http.Server
+	logger    *slog.Logger
+	status    StatusProvider
+	port      int
 	startedAt time.Time
 
 	mu sync.RWMutex
@@ -85,14 +85,14 @@ type defaultStatusProvider struct {
 	startedAt time.Time
 }
 
-func (d *defaultStatusProvider) GetSessionID() string         { return d.sessionID }
-func (d *defaultStatusProvider) GetStatus() string            { return "running" }
-func (d *defaultStatusProvider) GetIdleSeconds() int          { return 0 }
-func (d *defaultStatusProvider) GetGPUUtilization() float64   { return 0.0 }
-func (d *defaultStatusProvider) GetMemoryUsedMB() int         { return 0 }
-func (d *defaultStatusProvider) GetUptime() time.Duration     { return time.Since(d.startedAt) }
-func (d *defaultStatusProvider) GetHeartbeatFailures() int    { return 0 }
-func (d *defaultStatusProvider) IsShopperReachable() bool     { return true }
+func (d *defaultStatusProvider) GetSessionID() string       { return d.sessionID }
+func (d *defaultStatusProvider) GetStatus() string          { return "running" }
+func (d *defaultStatusProvider) GetIdleSeconds() int        { return 0 }
+func (d *defaultStatusProvider) GetGPUUtilization() float64 { return 0.0 }
+func (d *defaultStatusProvider) GetMemoryUsedMB() int       { return 0 }
+func (d *defaultStatusProvider) GetUptime() time.Duration   { return time.Since(d.startedAt) }
+func (d *defaultStatusProvider) GetHeartbeatFailures() int  { return 0 }
+func (d *defaultStatusProvider) IsShopperReachable() bool   { return true }
 
 // New creates a new agent API server
 func New(sessionID string, opts ...Option) *Server {

@@ -373,3 +373,64 @@ func joinStrings(strs []string, sep string) string {
 	}
 	return result
 }
+
+// GetActiveSessionByConsumerAndOffer returns an active session for the given consumer and offer, if one exists.
+// Active sessions are those with status pending, provisioning, or running.
+// Returns ErrNotFound if no active session exists.
+func (s *SessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error) {
+	query := `
+		SELECT
+			id, consumer_id, provider, provider_instance_id, offer_id,
+			gpu_type, gpu_count, status, error,
+			ssh_host, ssh_port, ssh_user, ssh_public_key,
+			agent_endpoint, agent_token,
+			workload_type, reservation_hours, hard_max_override,
+			idle_threshold_minutes, storage_policy,
+			price_per_hour, created_at, expires_at, last_heartbeat, last_idle_seconds, stopped_at
+		FROM sessions
+		WHERE consumer_id = ? AND offer_id = ?
+		  AND status IN ('pending', 'provisioning', 'running')
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+
+	session := &models.Session{}
+	var lastHeartbeat, stoppedAt sql.NullTime
+	var providerID, sshHost, sshUser, sshPublicKey, agentEndpoint, agentToken, errorStr sql.NullString
+	var sshPort sql.NullInt64
+
+	err := s.db.QueryRowContext(ctx, query, consumerID, offerID).Scan(
+		&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
+		&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
+		&sshHost, &sshPort, &sshUser, &sshPublicKey,
+		&agentEndpoint, &agentToken,
+		&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
+		&session.IdleThreshold, &session.StoragePolicy,
+		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &lastHeartbeat, &session.LastIdleSeconds, &stoppedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active session: %w", err)
+	}
+
+	// Handle nullable fields
+	session.ProviderID = providerID.String
+	session.SSHHost = sshHost.String
+	session.SSHPort = int(sshPort.Int64)
+	session.SSHUser = sshUser.String
+	session.SSHPublicKey = sshPublicKey.String
+	session.AgentEndpoint = agentEndpoint.String
+	session.AgentToken = agentToken.String
+	session.Error = errorStr.String
+	if lastHeartbeat.Valid {
+		session.LastHeartbeat = lastHeartbeat.Time
+	}
+	if stoppedAt.Valid {
+		session.StoppedAt = stoppedAt.Time
+	}
+
+	return session, nil
+}

@@ -57,11 +57,11 @@ type InventoryConfig struct {
 
 // LifecycleConfig holds lifecycle management configuration
 type LifecycleConfig struct {
-	CheckInterval         time.Duration `mapstructure:"check_interval"`
-	HardMaxHours          int           `mapstructure:"hard_max_hours"`
-	DefaultIdleThreshold  int           `mapstructure:"default_idle_threshold"`
-	HeartbeatTimeout      time.Duration `mapstructure:"heartbeat_timeout"`
-	OrphanGracePeriod     time.Duration `mapstructure:"orphan_grace_period"`
+	CheckInterval          time.Duration `mapstructure:"check_interval"`
+	HardMaxHours           int           `mapstructure:"hard_max_hours"`
+	DefaultIdleThreshold   int           `mapstructure:"default_idle_threshold"`
+	HeartbeatTimeout       time.Duration `mapstructure:"heartbeat_timeout"`
+	OrphanGracePeriod      time.Duration `mapstructure:"orphan_grace_period"`
 	ReconciliationInterval time.Duration `mapstructure:"reconciliation_interval"`
 }
 

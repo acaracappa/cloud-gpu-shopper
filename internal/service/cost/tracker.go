@@ -63,18 +63,18 @@ type Tracker struct {
 	logger        *slog.Logger
 
 	// Configuration
-	aggregationInterval      time.Duration
-	budgetWarningThreshold   float64
-	budgetExceededThreshold  float64
+	aggregationInterval     time.Duration
+	budgetWarningThreshold  float64
+	budgetExceededThreshold float64
 
 	// For time mocking in tests
 	now func() time.Time
 
 	// Shutdown coordination
-	mu       sync.Mutex
-	running  bool
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 
 	// Metrics
 	metrics *Metrics
@@ -82,12 +82,12 @@ type Tracker struct {
 
 // Metrics tracks cost tracker statistics
 type Metrics struct {
-	mu                 sync.RWMutex
-	AggregationsRun    int64
-	CostsRecorded      int64
-	BudgetWarnings     int64
-	BudgetExceeded     int64
-	Errors             int64
+	mu              sync.RWMutex
+	AggregationsRun int64
+	CostsRecorded   int64
+	BudgetWarnings  int64
+	BudgetExceeded  int64
+	Errors          int64
 }
 
 // Option configures the cost tracker

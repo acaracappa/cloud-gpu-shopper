@@ -18,39 +18,39 @@ const (
 
 // Instance represents a mock GPU instance
 type Instance struct {
-	ID             string         `json:"id"`
-	MachineID      string         `json:"machine_id"`
-	Status         InstanceStatus `json:"status"`
-	ActualStatus   string         `json:"actual_status"`
-	SSHHost        string         `json:"ssh_host"`
-	SSHPort        int            `json:"ssh_port"`
-	Label          string         `json:"label"`
-	GPUName        string         `json:"gpu_name"`
-	NumGPUs        int            `json:"num_gpus"`
-	DPHTotal       float64        `json:"dph_total"` // Price per hour
-	StartedAt      time.Time      `json:"started_at"`
-	EnvVars        map[string]string
-	OnStartScript  string
+	ID            string         `json:"id"`
+	MachineID     string         `json:"machine_id"`
+	Status        InstanceStatus `json:"status"`
+	ActualStatus  string         `json:"actual_status"`
+	SSHHost       string         `json:"ssh_host"`
+	SSHPort       int            `json:"ssh_port"`
+	Label         string         `json:"label"`
+	GPUName       string         `json:"gpu_name"`
+	NumGPUs       int            `json:"num_gpus"`
+	DPHTotal      float64        `json:"dph_total"` // Price per hour
+	StartedAt     time.Time      `json:"started_at"`
+	EnvVars       map[string]string
+	OnStartScript string
 }
 
 // Offer represents a mock GPU offer
 type Offer struct {
-	ID           string  `json:"id"`
-	MachineID    string  `json:"machine_id"`
-	GPUName      string  `json:"gpu_name"`
-	NumGPUs      int     `json:"num_gpus"`
-	VRAM         int     `json:"gpu_ram"`
-	DPHTotal     float64 `json:"dph_total"`
-	Verified     bool    `json:"verified"`
-	Reliability  float64 `json:"reliability2"`
-	DLPerf       float64 `json:"dlperf"`
-	InetUp       float64 `json:"inet_up"`
-	InetDown     float64 `json:"inet_down"`
-	Rented       bool    `json:"rented"`
-	SSHHost      string  `json:"public_ipaddr"`
-	SSHPort      int     `json:"direct_port_start"`
-	CUDAVersion  string  `json:"cuda_max_good"`
-	DriverVersion string `json:"driver_version"`
+	ID            string  `json:"id"`
+	MachineID     string  `json:"machine_id"`
+	GPUName       string  `json:"gpu_name"`
+	NumGPUs       int     `json:"num_gpus"`
+	VRAM          int     `json:"gpu_ram"`
+	DPHTotal      float64 `json:"dph_total"`
+	Verified      bool    `json:"verified"`
+	Reliability   float64 `json:"reliability2"`
+	DLPerf        float64 `json:"dlperf"`
+	InetUp        float64 `json:"inet_up"`
+	InetDown      float64 `json:"inet_down"`
+	Rented        bool    `json:"rented"`
+	SSHHost       string  `json:"public_ipaddr"`
+	SSHPort       int     `json:"direct_port_start"`
+	CUDAVersion   string  `json:"cuda_max_good"`
+	DriverVersion string  `json:"driver_version"`
 }
 
 // State manages the in-memory state for the mock provider

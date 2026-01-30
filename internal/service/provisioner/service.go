@@ -51,6 +51,7 @@ type SessionStore interface {
 	Update(ctx context.Context, session *models.Session) error
 	UpdateHeartbeat(ctx context.Context, id string, t time.Time) error
 	UpdateHeartbeatWithIdle(ctx context.Context, id string, t time.Time, idleSeconds int) error
+	GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error)
 }
 
 // ProviderRegistry provides access to provider clients
@@ -146,7 +147,7 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 		providers:              providers,
 		logger:                 slog.Default(),
 		deploymentID:           uuid.New().String(),
-		agentImage:             "ghcr.io/cloud-gpu-shopper/agent:latest",
+		agentImage:             "nvidia/cuda:12.1.0-runtime-ubuntu22.04",
 		agentPort:              DefaultAgentPort,
 		agentBinURL:            DefaultAgentBinaryURL,
 		heartbeatTimeout:       DefaultHeartbeatTimeout,
@@ -170,6 +171,21 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		slog.String("offer_id", req.OfferID),
 		slog.String("provider", offer.Provider))
 
+	// Check for existing active session for this consumer and offer
+	existing, err := s.store.GetActiveSessionByConsumerAndOffer(ctx, req.ConsumerID, req.OfferID)
+	if err == nil && existing != nil {
+		return nil, &DuplicateSessionError{
+			ConsumerID: req.ConsumerID,
+			OfferID:    req.OfferID,
+			SessionID:  existing.ID,
+			Status:     existing.Status,
+		}
+	}
+	// Only fail on unexpected errors (not ErrNotFound which is expected)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, fmt.Errorf("failed to check for existing session: %w", err)
+	}
+
 	// Generate SSH key pair
 	privateKey, publicKey, err := s.generateSSHKeyPair()
 	if err != nil {
@@ -190,23 +206,23 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 
 	// PHASE 1: Create session record in database (survives crashes)
 	session := &models.Session{
-		ID:              uuid.New().String(),
-		ConsumerID:      req.ConsumerID,
-		Provider:        offer.Provider,
-		OfferID:         req.OfferID,
-		GPUType:         offer.GPUType,
-		GPUCount:        offer.GPUCount,
-		Status:          models.StatusPending,
-		SSHPublicKey:    publicKey,
-		SSHPrivateKey:   privateKey,
-		AgentToken:      agentToken,
-		WorkloadType:    req.WorkloadType,
-		ReservationHrs:  req.ReservationHrs,
-		IdleThreshold:   req.IdleThreshold,
-		StoragePolicy:   storagePolicy,
-		PricePerHour:    offer.PricePerHour,
-		CreatedAt:       now,
-		ExpiresAt:       expiresAt,
+		ID:             uuid.New().String(),
+		ConsumerID:     req.ConsumerID,
+		Provider:       offer.Provider,
+		OfferID:        req.OfferID,
+		GPUType:        offer.GPUType,
+		GPUCount:       offer.GPUCount,
+		Status:         models.StatusPending,
+		SSHPublicKey:   publicKey,
+		SSHPrivateKey:  privateKey,
+		AgentToken:     agentToken,
+		WorkloadType:   req.WorkloadType,
+		ReservationHrs: req.ReservationHrs,
+		IdleThreshold:  req.IdleThreshold,
+		StoragePolicy:  storagePolicy,
+		PricePerHour:   offer.PricePerHour,
+		CreatedAt:      now,
+		ExpiresAt:      expiresAt,
 	}
 
 	if err := s.store.Create(ctx, session); err != nil {

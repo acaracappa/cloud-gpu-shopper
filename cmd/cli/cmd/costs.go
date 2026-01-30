@@ -184,8 +184,8 @@ type CostSummary struct {
 
 // Time is a custom time type for JSON unmarshaling
 type Time struct {
-	time    string
-	isZero  bool
+	time   string
+	isZero bool
 }
 
 func (t *Time) UnmarshalJSON(data []byte) error {

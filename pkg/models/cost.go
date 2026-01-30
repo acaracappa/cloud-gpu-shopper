@@ -37,14 +37,14 @@ type CostQuery struct {
 
 // Consumer represents a registered API consumer
 type Consumer struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	APIKey        string    `json:"api_key,omitempty"` // Only shown on creation
-	BudgetLimit   float64   `json:"budget_limit"`      // Monthly budget limit in USD, 0 = unlimited
-	WebhookURL    string    `json:"webhook_url,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	CurrentSpend  float64   `json:"current_spend"`  // Current month spend
-	AlertSent     bool      `json:"alert_sent"`     // Budget alert already sent this period
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	APIKey       string    `json:"api_key,omitempty"` // Only shown on creation
+	BudgetLimit  float64   `json:"budget_limit"`      // Monthly budget limit in USD, 0 = unlimited
+	WebhookURL   string    `json:"webhook_url,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	CurrentSpend float64   `json:"current_spend"` // Current month spend
+	AlertSent    bool      `json:"alert_sent"`    // Budget alert already sent this period
 }
 
 // BudgetAlert is sent when a consumer approaches or exceeds their budget

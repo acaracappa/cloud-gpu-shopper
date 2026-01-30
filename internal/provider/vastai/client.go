@@ -229,7 +229,8 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	// Download and run agent if URL provided
 	if agentURL := req.EnvVars["SHOPPER_AGENT_URL"]; agentURL != "" {
 		agentScript := fmt.Sprintf(`
-curl -fsSL '%s' -o /usr/local/bin/gpu-agent && \
+apt-get update && apt-get install -y curl 2>/dev/null || true
+curl -fsSL -L '%s' -o /usr/local/bin/gpu-agent && \
 chmod +x /usr/local/bin/gpu-agent && \
 nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &
 `, agentURL)

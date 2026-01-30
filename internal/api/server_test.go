@@ -92,6 +92,19 @@ func (m *mockSessionStore) UpdateHeartbeatWithIdle(ctx context.Context, id strin
 	return nil
 }
 
+func (m *mockSessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error) {
+	for _, session := range m.sessions {
+		if session.ConsumerID == consumerID && session.OfferID == offerID {
+			if session.Status == models.StatusPending ||
+				session.Status == models.StatusProvisioning ||
+				session.Status == models.StatusRunning {
+				return session, nil
+			}
+		}
+	}
+	return nil, provisioner.ErrNotFound
+}
+
 func (m *mockSessionStore) GetActiveSessions(ctx context.Context) ([]*models.Session, error) {
 	var result []*models.Session
 	for _, s := range m.sessions {

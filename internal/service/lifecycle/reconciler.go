@@ -54,14 +54,14 @@ type Reconciler struct {
 	deploymentID string
 
 	// Configuration
-	reconcileInterval time.Duration
+	reconcileInterval  time.Duration
 	autoDestroyOrphans bool
 
 	// Shutdown coordination
-	mu       sync.Mutex
-	running  bool
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	mu      sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 
 	// Metrics
 	metrics *ReconcileMetrics
@@ -69,7 +69,7 @@ type Reconciler struct {
 
 // ReconcileMetrics tracks reconciliation statistics
 type ReconcileMetrics struct {
-	mu                sync.RWMutex
+	mu                 sync.RWMutex
 	ReconciliationsRun int64
 	OrphansFound       int64
 	OrphansDestroyed   int64

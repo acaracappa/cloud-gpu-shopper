@@ -44,13 +44,13 @@ type AgentStatus struct {
 	gpuMonitor      *gpumon.Monitor
 	idleDetector    *idle.Detector
 
-	mu            sync.RWMutex
-	lastStats     gpumon.GPUStats
+	mu        sync.RWMutex
+	lastStats gpumon.GPUStats
 }
 
-func (a *AgentStatus) GetSessionID() string       { return a.sessionID }
-func (a *AgentStatus) GetStatus() string          { return "running" }
-func (a *AgentStatus) GetIdleSeconds() int        { return a.idleDetector.IdleSeconds() }
+func (a *AgentStatus) GetSessionID() string { return a.sessionID }
+func (a *AgentStatus) GetStatus() string    { return "running" }
+func (a *AgentStatus) GetIdleSeconds() int  { return a.idleDetector.IdleSeconds() }
 func (a *AgentStatus) GetGPUUtilization() float64 {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -61,9 +61,9 @@ func (a *AgentStatus) GetMemoryUsedMB() int {
 	defer a.mu.RUnlock()
 	return a.lastStats.MemoryUsedMB
 }
-func (a *AgentStatus) GetUptime() time.Duration      { return time.Since(a.startedAt) }
-func (a *AgentStatus) GetHeartbeatFailures() int     { return a.heartbeatSender.GetFailureCount() }
-func (a *AgentStatus) IsShopperReachable() bool      { return a.heartbeatSender.GetFailureCount() < 3 }
+func (a *AgentStatus) GetUptime() time.Duration  { return time.Since(a.startedAt) }
+func (a *AgentStatus) GetHeartbeatFailures() int { return a.heartbeatSender.GetFailureCount() }
+func (a *AgentStatus) IsShopperReachable() bool  { return a.heartbeatSender.GetFailureCount() < 3 }
 
 // updateStats updates the cached GPU stats
 func (a *AgentStatus) updateStats(stats gpumon.GPUStats) {
@@ -184,14 +184,14 @@ func main() {
 
 // Config holds the agent configuration
 type Config struct {
-	SessionID       string
-	DeploymentID    string
-	ExpiresAt       time.Time
-	SelfDestructAt  time.Time
-	ConsumerID      string
-	AgentToken      string
-	AgentPort       int
-	ShopperURL      string
+	SessionID      string
+	DeploymentID   string
+	ExpiresAt      time.Time
+	SelfDestructAt time.Time
+	ConsumerID     string
+	AgentToken     string
+	AgentPort      int
+	ShopperURL     string
 }
 
 // loadConfig loads configuration from environment variables

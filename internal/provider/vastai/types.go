@@ -15,11 +15,11 @@ type BundlesResponse struct {
 
 // Bundle represents a Vast.ai GPU offer
 type Bundle struct {
-	ID            int     `json:"id"`
-	AskContractID int     `json:"ask_contract_id"`
-	BundleID      int     `json:"bundle_id"`
-	MachineID     int     `json:"machine_id"`
-	HostID        int     `json:"host_id"`
+	ID            int `json:"id"`
+	AskContractID int `json:"ask_contract_id"`
+	BundleID      int `json:"bundle_id"`
+	MachineID     int `json:"machine_id"`
+	HostID        int `json:"host_id"`
 
 	// GPU info
 	GPUName     string  `json:"gpu_name"`
@@ -50,9 +50,9 @@ type Bundle struct {
 	InetUpCost   float64 `json:"inet_up_cost"`
 
 	// Pricing
-	DphBase    float64 `json:"dph_base"`    // Base price per hour
-	DphTotal   float64 `json:"dph_total"`   // Total price per hour
-	MinBid     float64 `json:"min_bid"`
+	DphBase     float64 `json:"dph_base"`  // Base price per hour
+	DphTotal    float64 `json:"dph_total"` // Total price per hour
+	MinBid      float64 `json:"min_bid"`
 	StorageCost float64 `json:"storage_cost"`
 
 	// Location
@@ -102,23 +102,23 @@ type InstancesResponse struct {
 
 // Instance represents a Vast.ai instance
 type Instance struct {
-	ID            int     `json:"id"`
-	MachineID     int     `json:"machine_id"`
-	HostID        int     `json:"host_id"`
-	Label         string  `json:"label"`
-	ActualStatus  string  `json:"actual_status"`
+	ID             int    `json:"id"`
+	MachineID      int    `json:"machine_id"`
+	HostID         int    `json:"host_id"`
+	Label          string `json:"label"`
+	ActualStatus   string `json:"actual_status"`
 	IntendedStatus string `json:"intended_status"`
-	CurState      string  `json:"cur_state"`
+	CurState       string `json:"cur_state"`
 
 	// Connection info
-	SSHHost    string `json:"ssh_host"`
-	SSHPort    int    `json:"ssh_port"`
-	PublicIP   string `json:"public_ipaddr"`
+	SSHHost  string `json:"ssh_host"`
+	SSHPort  int    `json:"ssh_port"`
+	PublicIP string `json:"public_ipaddr"`
 
 	// GPU info
-	GPUName  string  `json:"gpu_name"`
-	NumGPUs  int     `json:"num_gpus"`
-	GPURam   float64 `json:"gpu_ram"`
+	GPUName string  `json:"gpu_name"`
+	NumGPUs int     `json:"num_gpus"`
+	GPURam  float64 `json:"gpu_ram"`
 
 	// Pricing
 	DphTotal float64 `json:"dph_total"`

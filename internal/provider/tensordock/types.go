@@ -19,23 +19,23 @@ type LocationsData struct {
 
 // Location represents a TensorDock data center location
 type Location struct {
-	ID            string       `json:"id"`
-	City          string       `json:"city"`
-	StateProvince string       `json:"stateprovince"`
-	Country       string       `json:"country"`
-	Tier          int          `json:"tier"`
+	ID            string        `json:"id"`
+	City          string        `json:"city"`
+	StateProvince string        `json:"stateprovince"`
+	Country       string        `json:"country"`
+	Tier          int           `json:"tier"`
 	GPUs          []LocationGPU `json:"gpus"`
 }
 
 // LocationGPU represents GPU availability at a location
 type LocationGPU struct {
-	V0Name          string           `json:"v0Name"`
-	DisplayName     string           `json:"displayName"`
-	MaxCount        int              `json:"max_count"`
-	PricePerHr      float64          `json:"price_per_hr"`
-	Resources       GPUResources     `json:"resources"`
-	NetworkFeatures NetworkFeatures  `json:"network_features"`
-	Pricing         ResourcePricing  `json:"pricing"`
+	V0Name          string          `json:"v0Name"`
+	DisplayName     string          `json:"displayName"`
+	MaxCount        int             `json:"max_count"`
+	PricePerHr      float64         `json:"price_per_hr"`
+	Resources       GPUResources    `json:"resources"`
+	NetworkFeatures NetworkFeatures `json:"network_features"`
+	Pricing         ResourcePricing `json:"pricing"`
 }
 
 // GPUResources describes resource limits for a GPU type
@@ -47,9 +47,9 @@ type GPUResources struct {
 
 // NetworkFeatures describes network capabilities
 type NetworkFeatures struct {
-	DedicatedIPAvailable     bool `json:"dedicated_ip_available"`
-	PortForwardingAvailable  bool `json:"port_forwarding_available"`
-	NetworkStorageAvailable  bool `json:"network_storage_available"`
+	DedicatedIPAvailable    bool `json:"dedicated_ip_available"`
+	PortForwardingAvailable bool `json:"port_forwarding_available"`
+	NetworkStorageAvailable bool `json:"network_storage_available"`
 }
 
 // ResourcePricing describes per-resource pricing

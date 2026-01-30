@@ -1,6 +1,14 @@
 package provisioner
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
+)
+
+// ErrNotFound is returned when a record is not found
+var ErrNotFound = errors.New("record not found")
 
 // DestroyVerificationError indicates instance destruction couldn't be verified
 type DestroyVerificationError struct {
@@ -40,4 +48,17 @@ type HeartbeatTimeoutError struct {
 
 func (e *HeartbeatTimeoutError) Error() string {
 	return fmt.Sprintf("agent heartbeat timeout for session %s after %s", e.SessionID, e.Timeout)
+}
+
+// DuplicateSessionError indicates a consumer already has an active session for the given offer
+type DuplicateSessionError struct {
+	ConsumerID string
+	OfferID    string
+	SessionID  string
+	Status     models.SessionStatus
+}
+
+func (e *DuplicateSessionError) Error() string {
+	return fmt.Sprintf("consumer %s already has active session %s for offer %s (status: %s)",
+		e.ConsumerID, e.SessionID, e.OfferID, e.Status)
 }

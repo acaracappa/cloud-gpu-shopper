@@ -243,9 +243,9 @@ func TestCostStore_GetSummary(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, 5.50, summary.TotalCost)       // 2*0.50 + 3*1.50
-	assert.Equal(t, 2, summary.SessionCount)       // 2 unique sessions
-	assert.Equal(t, 5.0, summary.HoursUsed)        // 5 total cost records
+	assert.Equal(t, 5.50, summary.TotalCost) // 2*0.50 + 3*1.50
+	assert.Equal(t, 2, summary.SessionCount) // 2 unique sessions
+	assert.Equal(t, 5.0, summary.HoursUsed)  // 5 total cost records
 	assert.Equal(t, 1.00, summary.ByProvider["vastai"])
 	assert.Equal(t, 4.50, summary.ByProvider["tensordock"])
 	assert.Equal(t, 1.00, summary.ByGPUType["RTX4090"])
@@ -315,12 +315,13 @@ func TestCostStore_GetSummary_ByProvider(t *testing.T) {
 	now := time.Now()
 
 	// Create two sessions with different providers
+	// Use unique offer IDs per provider to avoid duplicate constraint
 	for _, provider := range []string{"vastai", "tensordock"} {
 		session := &models.Session{
 			ID:             "sess-provider-" + provider,
 			ConsumerID:     "consumer-provider",
 			Provider:       provider,
-			OfferID:        "offer-1",
+			OfferID:        "offer-" + provider, // Use provider-specific offer ID
 			GPUType:        "RTX4090",
 			GPUCount:       1,
 			Status:         models.StatusRunning,

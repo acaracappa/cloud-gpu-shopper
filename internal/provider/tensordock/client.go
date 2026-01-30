@@ -204,9 +204,9 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 				Image:      "ubuntu2404", // Default image, can be customized
 				LocationID: locationID,
 				Resources: ResourcesConfig{
-					VCPUCount: 8,         // Default vCPUs
-					RAMGb:     32,        // Default RAM
-					StorageGb: 100,       // Minimum required
+					VCPUCount: 8,   // Default vCPUs
+					RAMGb:     32,  // Default RAM
+					StorageGb: 100, // Minimum required
 					GPUs: GPUsConfig{
 						Model: gpuName,
 						Count: 1,
