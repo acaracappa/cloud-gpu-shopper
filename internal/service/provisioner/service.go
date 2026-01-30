@@ -18,6 +18,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/storage"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
@@ -182,7 +183,7 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		}
 	}
 	// Only fail on unexpected errors (not ErrNotFound which is expected)
-	if err != nil && !errors.Is(err, ErrNotFound) {
+	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, storage.ErrNotFound) {
 		return nil, fmt.Errorf("failed to check for existing session: %w", err)
 	}
 
