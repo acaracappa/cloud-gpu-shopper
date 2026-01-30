@@ -20,6 +20,18 @@ const (
 
 	// MaxConcurrentFetches limits parallel provider requests
 	MaxConcurrentFetches = 5
+
+	// StaleInventoryThreshold is how old inventory can be before we start
+	// degrading availability confidence. Offers older than this threshold
+	// will have their confidence reduced to warn users of potential staleness.
+	StaleInventoryThreshold = 2 * time.Minute
+
+	// MaxStaleAge is the maximum age before inventory is considered very stale
+	// and confidence is reduced to a minimum
+	MaxStaleAge = 5 * time.Minute
+
+	// StaleConfidenceMultiplier is applied to offers when inventory is stale
+	StaleConfidenceMultiplier = 0.5
 )
 
 // Service aggregates GPU offers from multiple providers with caching
@@ -236,8 +248,10 @@ func (s *Service) filterAndSort(offers []models.GPUOffer, filter models.OfferFil
 	filtered := make([]models.GPUOffer, 0, len(offers))
 
 	for _, offer := range offers {
-		if offer.MatchesFilter(filter) && offer.Available {
-			filtered = append(filtered, offer)
+		// Apply staleness degradation to availability confidence
+		adjustedOffer := s.applyStalenessDegradation(offer)
+		if adjustedOffer.MatchesFilter(filter) && adjustedOffer.Available {
+			filtered = append(filtered, adjustedOffer)
 		}
 	}
 
@@ -247,6 +261,33 @@ func (s *Service) filterAndSort(offers []models.GPUOffer, filter models.OfferFil
 	})
 
 	return filtered
+}
+
+// applyStalenessDegradation reduces availability confidence for stale offers
+func (s *Service) applyStalenessDegradation(offer models.GPUOffer) models.GPUOffer {
+	age := time.Since(offer.FetchedAt)
+
+	// If inventory is fresh, no degradation needed
+	if age < StaleInventoryThreshold {
+		return offer
+	}
+
+	// Calculate degradation factor based on staleness
+	// Linear degradation from 1.0 at StaleInventoryThreshold to StaleConfidenceMultiplier at MaxStaleAge
+	var degradationFactor float64
+	if age >= MaxStaleAge {
+		degradationFactor = StaleConfidenceMultiplier
+	} else {
+		// Linear interpolation
+		progress := float64(age-StaleInventoryThreshold) / float64(MaxStaleAge-StaleInventoryThreshold)
+		degradationFactor = 1.0 - (progress * (1.0 - StaleConfidenceMultiplier))
+	}
+
+	// Get the effective confidence and apply degradation
+	baseConfidence := offer.GetEffectiveAvailabilityConfidence()
+	offer.AvailabilityConfidence = baseConfidence * degradationFactor
+
+	return offer
 }
 
 // GetOffer retrieves a specific offer by ID
@@ -303,6 +344,7 @@ func (s *Service) GetCacheStatus() map[string]CacheStatus {
 	now := time.Now()
 
 	for name, cached := range s.cache {
+		age := now.Sub(cached.fetchedAt)
 		status[name] = CacheStatus{
 			OfferCount: len(cached.offers),
 			FetchedAt:  cached.fetchedAt,
@@ -310,6 +352,8 @@ func (s *Service) GetCacheStatus() map[string]CacheStatus {
 			IsExpired:  now.After(cached.expiresAt),
 			InBackoff:  cached.inBackoff,
 			HasError:   cached.err != nil,
+			AgeSeconds: age.Seconds(),
+			IsStale:    age >= StaleInventoryThreshold,
 		}
 	}
 
@@ -324,6 +368,8 @@ type CacheStatus struct {
 	IsExpired  bool
 	InBackoff  bool
 	HasError   bool
+	AgeSeconds float64 // How old the cache is in seconds
+	IsStale    bool    // True if older than StaleInventoryThreshold
 }
 
 // ProviderCount returns the number of registered providers

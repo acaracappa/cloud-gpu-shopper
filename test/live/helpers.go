@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,20 +21,32 @@ import (
 
 // LiveTestEnv provides helpers for live testing
 type LiveTestEnv struct {
-	Config   *TestConfig
-	Watchdog *Watchdog
-	client   *http.Client
+	Config      *TestConfig
+	Watchdog    *Watchdog
+	Diagnostics *DiagnosticsManager
+	client      *http.Client
 }
 
 // NewLiveTestEnv creates a new live test environment
 func NewLiveTestEnv(config *TestConfig, watchdog *Watchdog) *LiveTestEnv {
-	return &LiveTestEnv{
+	env := &LiveTestEnv{
 		Config:   config,
 		Watchdog: watchdog,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
 	}
+
+	// Initialize diagnostics manager
+	diagConfig := DefaultDiagnosticsConfig()
+	env.Diagnostics = NewDiagnosticsManager(diagConfig, env)
+
+	// Set diagnostics manager on watchdog
+	if watchdog != nil {
+		watchdog.SetDiagnosticsManager(env.Diagnostics)
+	}
+
+	return env
 }
 
 // GPUOffer represents an available GPU from the inventory
@@ -77,8 +91,9 @@ type CreateSessionRequest struct {
 
 // CreateSessionResponse represents a session creation response
 type CreateSessionResponse struct {
-	Session    Session `json:"session"`
-	AgentToken string  `json:"agent_token"`
+	Session       Session `json:"session"`
+	AgentToken    string  `json:"agent_token"`
+	SSHPrivateKey string  `json:"ssh_private_key,omitempty"`
 }
 
 // ListInventory fetches available GPUs, optionally filtered by provider and max price
@@ -137,6 +152,7 @@ func (e *LiveTestEnv) FindCheapestGPU(t *testing.T) (*GPUOffer, Provider) {
 }
 
 // FindCheapestFromProvider finds the cheapest GPU from a specific provider
+// Filters out very cheap instances (< $0.05/hr) which tend to be unreliable
 func (e *LiveTestEnv) FindCheapestFromProvider(t *testing.T, provider Provider) *GPUOffer {
 	cfg, ok := e.Config.Providers[provider]
 	require.True(t, ok, "Provider %s not configured", provider)
@@ -145,12 +161,26 @@ func (e *LiveTestEnv) FindCheapestFromProvider(t *testing.T, provider Provider) 
 	offers := e.ListInventory(t, provider, cfg.MaxPriceHour)
 	require.NotEmpty(t, offers, "No cheap GPUs available from %s", provider)
 
+	// Filter out very cheap instances which tend to be unreliable
+	minPrice := 0.05 // Minimum $0.05/hr for reliability
+	var filtered []GPUOffer
+	for _, o := range offers {
+		if o.PricePerHour >= minPrice {
+			filtered = append(filtered, o)
+		}
+	}
+
+	// Fall back to all offers if no offers above minimum price
+	if len(filtered) == 0 {
+		filtered = offers
+	}
+
 	// Sort by price
-	sort.Slice(offers, func(i, j int) bool {
-		return offers[i].PricePerHour < offers[j].PricePerHour
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].PricePerHour < filtered[j].PricePerHour
 	})
 
-	cheapest := offers[0]
+	cheapest := filtered[0]
 	t.Logf("Cheapest %s GPU: %s @ $%.2f/hr",
 		provider, cheapest.GPUType, cheapest.PricePerHour)
 
@@ -191,6 +221,47 @@ func (e *LiveTestEnv) CreateSession(t *testing.T, req CreateSessionRequest) *Cre
 		result.Session.ID, result.Session.Provider, result.Session.ProviderInstanceID)
 
 	return &result
+}
+
+// CreateSessionWithError provisions a new GPU session and returns error on failure
+func (e *LiveTestEnv) CreateSessionWithError(t *testing.T, req CreateSessionRequest) (*CreateSessionResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/api/v1/sessions", e.Config.ServerURL)
+	resp, err := e.client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("create session failed: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	var result CreateSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	// Track with watchdog
+	if e.Watchdog != nil {
+		e.Watchdog.TrackInstance(InstanceInfo{
+			InstanceID: result.Session.ProviderInstanceID,
+			SessionID:  result.Session.ID,
+			Provider:   Provider(result.Session.Provider),
+			StartTime:  time.Now(),
+			PriceHour:  result.Session.PricePerHour,
+		})
+	}
+
+	t.Logf("Created session %s (provider=%s, instance=%s)",
+		result.Session.ID, result.Session.Provider, result.Session.ProviderInstanceID)
+
+	return &result, nil
 }
 
 // GetSession retrieves a session by ID
@@ -347,4 +418,346 @@ func (e *LiveTestEnv) Cleanup(t *testing.T, sessionID string) {
 	resp.Body.Close()
 
 	t.Logf("Cleanup: Destroyed session %s", sessionID)
+}
+
+// ConnectSSH creates and connects an SSH helper for a session
+func (e *LiveTestEnv) ConnectSSH(t *testing.T, session *Session, privateKey string) *SSHHelper {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	ssh := NewSSHHelperFromSession(session, privateKey)
+	err := ssh.Connect(ctx)
+	require.NoError(t, err, "Failed to connect SSH to %s:%d", session.SSHHost, session.SSHPort)
+
+	t.Logf("SSH connected to %s@%s:%d", session.SSHUser, session.SSHHost, session.SSHPort)
+	return ssh
+}
+
+// WaitForAgentReady waits for the agent to be ready and responding
+func (e *LiveTestEnv) WaitForAgentReady(t *testing.T, ssh *SSHHelper, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		// Check if agent process is running
+		running, err := ssh.ProcessRunning(ctx, "gpu-agent")
+		if err == nil && running {
+			// Try to hit the health endpoint
+			output, err := ssh.CurlEndpoint(ctx, "http://localhost:8081/health")
+			if err == nil && output != "" {
+				t.Log("Agent is ready and responding")
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			// Continue waiting
+		}
+	}
+
+	return fmt.Errorf("timeout waiting for agent to be ready")
+}
+
+// SendHeartbeat sends a manual heartbeat for testing
+func (e *LiveTestEnv) SendHeartbeat(t *testing.T, sessionID, agentToken string, req HeartbeatRequest) {
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	url := fmt.Sprintf("%s/api/v1/sessions/%s/heartbeat", e.Config.ServerURL, sessionID)
+	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.client.Do(httpReq)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Heartbeat failed: %d - %s", resp.StatusCode, string(respBody))
+	}
+}
+
+// HeartbeatRequest represents a heartbeat request
+type HeartbeatRequest struct {
+	SessionID    string  `json:"session_id"`
+	AgentToken   string  `json:"agent_token"`
+	Status       string  `json:"status"`
+	IdleSeconds  int     `json:"idle_seconds,omitempty"`
+	GPUUtilPct   float64 `json:"gpu_util_pct,omitempty"`
+	MemoryUsedMB int     `json:"memory_used_mb,omitempty"`
+}
+
+// GetDiagnosticsCollector returns or creates a diagnostics collector for a session
+func (e *LiveTestEnv) GetDiagnosticsCollector(sessionID string) *DiagnosticsCollector {
+	if e.Diagnostics == nil {
+		return nil
+	}
+	return e.Diagnostics.GetCollector(sessionID)
+}
+
+// CollectDiagnostics collects a diagnostic snapshot for a session
+func (e *LiveTestEnv) CollectDiagnostics(t *testing.T, sessionID, label string) {
+	if e.Diagnostics == nil || !e.Diagnostics.IsEnabled() {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	collector := e.GetDiagnosticsCollector(sessionID)
+	if collector == nil {
+		return
+	}
+
+	snapshot, err := collector.CollectSnapshot(ctx, label)
+	if err != nil {
+		t.Logf("Warning: Failed to collect diagnostics: %v", err)
+		return
+	}
+
+	t.Logf("Collected diagnostics snapshot: %s (errors: %d)", label, len(snapshot.Errors))
+}
+
+// FindReliableOffer finds a GPU offer with better availability characteristics
+func (e *LiveTestEnv) FindReliableOffer(t *testing.T, provider Provider) *GPUOffer {
+	cfg, ok := e.Config.Providers[provider]
+	require.True(t, ok, "Provider %s not configured", provider)
+	require.True(t, cfg.Enabled, "Provider %s not enabled", provider)
+
+	offers := e.ListInventory(t, provider, cfg.MaxPriceHour)
+	require.NotEmpty(t, offers, "No GPUs available from %s under $%.2f/hr", provider, cfg.MaxPriceHour)
+
+	// Sort by availability score, then price
+	sort.Slice(offers, func(i, j int) bool {
+		scoreI := availabilityScore(offers[i].GPUType)
+		scoreJ := availabilityScore(offers[j].GPUType)
+		if scoreI != scoreJ {
+			return scoreI > scoreJ
+		}
+		return offers[i].PricePerHour < offers[j].PricePerHour
+	})
+
+	selected := offers[0]
+	t.Logf("Selected reliable offer: %s (%s) @ $%.4f/hr (availability score: %d)",
+		selected.GPUType, selected.ID, selected.PricePerHour, availabilityScore(selected.GPUType))
+
+	return &selected
+}
+
+// availabilityScore returns a score for GPU availability (higher = more available)
+func availabilityScore(gpuType string) int {
+	gpuLower := strings.ToLower(gpuType)
+
+	// Lower demand = higher availability score
+	switch {
+	case strings.Contains(gpuLower, "3080"):
+		return 4 // Good availability
+	case strings.Contains(gpuLower, "3090"):
+		return 3 // Good availability
+	case strings.Contains(gpuLower, "4080"):
+		return 2 // Moderate
+	case strings.Contains(gpuLower, "4090"):
+		return 1 // High demand
+	case strings.Contains(gpuLower, "a100"):
+		return 0 // Very high demand
+	case strings.Contains(gpuLower, "h100"):
+		return 0 // Very high demand
+	default:
+		return 2 // Default moderate
+	}
+}
+
+// ProvisionReliableGPU provisions a GPU with better availability characteristics
+func (e *LiveTestEnv) ProvisionReliableGPU(t *testing.T, provider Provider) *CreateSessionResponse {
+	var offer *GPUOffer
+
+	if provider == "" {
+		// Find cheapest across all providers
+		offer, provider = e.FindCheapestGPU(t)
+	} else {
+		// Use reliability scoring for specific provider
+		offer = e.FindReliableOffer(t, provider)
+	}
+
+	return e.CreateSession(t, CreateSessionRequest{
+		ConsumerID:     GenerateConsumerID(),
+		OfferID:        offer.ID,
+		WorkloadType:   "live-test",
+		ReservationHrs: 1,
+	})
+}
+
+// FindMidRangeOffer finds a GPU offer from the middle price range.
+// This strategy picks GPUs that are less likely to be claimed by others:
+// - Avoids cheapest offers (high competition)
+// - Avoids most expensive offers (wasteful)
+// - Prefers higher GPU counts (less likely to be fully utilized)
+// - Adds randomness to avoid always picking the same offer
+func (e *LiveTestEnv) FindMidRangeOffer(t *testing.T, provider Provider) *GPUOffer {
+	cfg, ok := e.Config.Providers[provider]
+	require.True(t, ok, "Provider %s not configured", provider)
+	require.True(t, cfg.Enabled, "Provider %s not enabled", provider)
+
+	offers := e.ListInventory(t, provider, cfg.MaxPriceHour)
+	require.NotEmpty(t, offers, "No GPUs available from %s under $%.2f/hr", provider, cfg.MaxPriceHour)
+
+	// If only 1-2 offers, just return the first one with some preference for GPU count
+	if len(offers) <= 2 {
+		sort.Slice(offers, func(i, j int) bool {
+			return offers[i].GPUCount > offers[j].GPUCount
+		})
+		t.Logf("Limited offers (%d), selecting: %s (%s) @ $%.4f/hr, %d GPUs",
+			len(offers), offers[0].GPUType, offers[0].ID, offers[0].PricePerHour, offers[0].GPUCount)
+		return &offers[0]
+	}
+
+	// Sort by price ascending
+	sort.Slice(offers, func(i, j int) bool {
+		return offers[i].PricePerHour < offers[j].PricePerHour
+	})
+
+	// Calculate the middle 50% range (25th to 75th percentile)
+	startIdx := len(offers) / 4         // 25th percentile
+	endIdx := (len(offers) * 3) / 4     // 75th percentile
+	if endIdx <= startIdx {
+		endIdx = startIdx + 1
+	}
+	if endIdx > len(offers) {
+		endIdx = len(offers)
+	}
+
+	midRangeOffers := offers[startIdx:endIdx]
+	t.Logf("Mid-range selection: using offers %d-%d of %d (price range $%.4f - $%.4f)",
+		startIdx, endIdx-1, len(offers),
+		midRangeOffers[0].PricePerHour,
+		midRangeOffers[len(midRangeOffers)-1].PricePerHour)
+
+	// Score each mid-range offer: prefer higher GPU counts and good availability
+	type scoredOffer struct {
+		offer *GPUOffer
+		score float64
+	}
+	scored := make([]scoredOffer, len(midRangeOffers))
+	for i := range midRangeOffers {
+		// Score based on:
+		// - GPU count (more = better, as multi-GPU is less common demand)
+		// - Availability score (from existing function)
+		// - Small random factor to avoid always picking the same one
+		gpuCountScore := float64(midRangeOffers[i].GPUCount) * 10.0
+		availScore := float64(availabilityScore(midRangeOffers[i].GPUType)) * 5.0
+		randomFactor := rand.Float64() * 3.0 // Random 0-3 points
+
+		scored[i] = scoredOffer{
+			offer: &midRangeOffers[i],
+			score: gpuCountScore + availScore + randomFactor,
+		}
+	}
+
+	// Sort by score descending
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	selected := scored[0].offer
+	t.Logf("Selected mid-range offer: %s (%s) @ $%.4f/hr, %d GPUs, score=%.2f",
+		selected.GPUType, selected.ID, selected.PricePerHour, selected.GPUCount, scored[0].score)
+
+	return selected
+}
+
+// FindMidRangeGPU finds a mid-range priced GPU across enabled providers
+func (e *LiveTestEnv) FindMidRangeGPU(t *testing.T) (*GPUOffer, Provider) {
+	var allOffers []GPUOffer
+
+	for prov, cfg := range e.Config.Providers {
+		if !cfg.Enabled {
+			continue
+		}
+
+		offers := e.ListInventory(t, prov, cfg.MaxPriceHour)
+		for i := range offers {
+			offers[i].Provider = string(prov) // Ensure provider is set
+		}
+		allOffers = append(allOffers, offers...)
+	}
+
+	require.NotEmpty(t, allOffers, "No GPUs available from any provider")
+
+	// If only 1-2 offers, just return the first one with preference for GPU count
+	if len(allOffers) <= 2 {
+		sort.Slice(allOffers, func(i, j int) bool {
+			return allOffers[i].GPUCount > allOffers[j].GPUCount
+		})
+		selected := allOffers[0]
+		t.Logf("Limited offers (%d), selecting: %s (%s) @ $%.4f/hr from %s",
+			len(allOffers), selected.GPUType, selected.ID, selected.PricePerHour, selected.Provider)
+		return &selected, Provider(selected.Provider)
+	}
+
+	// Sort by price ascending
+	sort.Slice(allOffers, func(i, j int) bool {
+		return allOffers[i].PricePerHour < allOffers[j].PricePerHour
+	})
+
+	// Calculate the middle 50% range
+	startIdx := len(allOffers) / 4
+	endIdx := (len(allOffers) * 3) / 4
+	if endIdx <= startIdx {
+		endIdx = startIdx + 1
+	}
+	if endIdx > len(allOffers) {
+		endIdx = len(allOffers)
+	}
+
+	midRangeOffers := allOffers[startIdx:endIdx]
+
+	// Score and select
+	type scoredOffer struct {
+		offer *GPUOffer
+		score float64
+	}
+	scored := make([]scoredOffer, len(midRangeOffers))
+	for i := range midRangeOffers {
+		gpuCountScore := float64(midRangeOffers[i].GPUCount) * 10.0
+		availScore := float64(availabilityScore(midRangeOffers[i].GPUType)) * 5.0
+		randomFactor := rand.Float64() * 3.0
+
+		scored[i] = scoredOffer{
+			offer: &midRangeOffers[i],
+			score: gpuCountScore + availScore + randomFactor,
+		}
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	selected := scored[0].offer
+	t.Logf("Selected mid-range GPU: %s (%s) @ $%.4f/hr, %d GPUs from %s",
+		selected.GPUType, selected.ID, selected.PricePerHour, selected.GPUCount, selected.Provider)
+
+	return selected, Provider(selected.Provider)
+}
+
+// ProvisionMidRangeGPU provisions a GPU from the middle price range
+func (e *LiveTestEnv) ProvisionMidRangeGPU(t *testing.T, provider Provider) *CreateSessionResponse {
+	var offer *GPUOffer
+
+	if provider == "" {
+		offer, provider = e.FindMidRangeGPU(t)
+	} else {
+		offer = e.FindMidRangeOffer(t, provider)
+	}
+
+	return e.CreateSession(t, CreateSessionRequest{
+		ConsumerID:     GenerateConsumerID(),
+		OfferID:        offer.ID,
+		WorkloadType:   "live-test",
+		ReservationHrs: 1,
+	})
 }

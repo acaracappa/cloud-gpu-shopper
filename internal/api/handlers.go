@@ -116,6 +116,12 @@ func (s *Server) handleListInventory(c *gin.Context) {
 		}
 	}
 
+	if minConfidence := c.Query("min_availability_confidence"); minConfidence != "" {
+		if v, err := strconv.ParseFloat(minConfidence, 64); err == nil {
+			filter.MinAvailabilityConfidence = v
+		}
+	}
+
 	offers, err := s.inventory.ListOffers(ctx, filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
@@ -202,6 +208,23 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 			})
 			return
 		}
+
+		// Check for stale inventory error - this means the offer appeared available
+		// but provisioning failed, likely due to stale inventory data
+		var staleErr *provisioner.StaleInventoryError
+		if errors.As(err, &staleErr) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":           err.Error(),
+				"error_type":      "stale_inventory",
+				"offer_id":        staleErr.OfferID,
+				"provider":        staleErr.Provider,
+				"retry_suggested": true,
+				"message":         "The selected offer is no longer available. Please refresh inventory and select a different offer.",
+				"request_id":      c.GetString("request_id"),
+			})
+			return
+		}
+
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error:     err.Error(),
 			RequestID: c.GetString("request_id"),

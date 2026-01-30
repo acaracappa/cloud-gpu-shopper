@@ -85,3 +85,22 @@ func IsRetryable(err error) bool {
 	}
 	return false
 }
+
+// IsStaleInventoryError checks if the error indicates stale inventory
+// This typically means the offer appeared available but failed to provision
+// because the inventory data was out of date
+func IsStaleInventoryError(err error) bool {
+	if errors.Is(err, ErrOfferStaleInventory) {
+		return true
+	}
+	if errors.Is(err, ErrOfferUnavailable) {
+		return true
+	}
+	return false
+}
+
+// ShouldRetryWithDifferentOffer checks if provisioning failed due to
+// stale inventory and we should automatically try a different offer
+func ShouldRetryWithDifferentOffer(err error) bool {
+	return IsStaleInventoryError(err)
+}

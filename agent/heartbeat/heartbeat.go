@@ -19,8 +19,8 @@ const (
 	// DefaultTimeout is the HTTP request timeout
 	DefaultTimeout = 10 * time.Second
 
-	// UnreachableThreshold is consecutive failures before triggering failsafe
-	UnreachableThreshold = 60 // 30 minutes at 30s interval
+	// DefaultUnreachableThreshold is consecutive failures before triggering failsafe
+	DefaultUnreachableThreshold = 60 // 30 minutes at 30s interval
 )
 
 // Request is the heartbeat request body
@@ -43,16 +43,17 @@ type FailsafeHandler func()
 
 // Sender sends periodic heartbeats to the shopper service
 type Sender struct {
-	shopperURL   string
-	sessionID    string
-	agentToken   string
-	interval     time.Duration
-	httpClient   *http.Client
-	logger       *slog.Logger
-	status       StatusProvider
-	failsafe     FailsafeHandler
-	failureCount atomic.Int32
-	running      atomic.Bool
+	shopperURL           string
+	sessionID            string
+	agentToken           string
+	interval             time.Duration
+	httpClient           *http.Client
+	logger               *slog.Logger
+	status               StatusProvider
+	failsafe             FailsafeHandler
+	failureCount         atomic.Int32
+	running              atomic.Bool
+	unreachableThreshold int32
 }
 
 // Option configures the heartbeat sender
@@ -86,6 +87,15 @@ func WithFailsafeHandler(h FailsafeHandler) Option {
 	}
 }
 
+// WithUnreachableThreshold sets the consecutive failure threshold for failsafe
+func WithUnreachableThreshold(threshold int) Option {
+	return func(s *Sender) {
+		if threshold > 0 {
+			s.unreachableThreshold = int32(threshold)
+		}
+	}
+}
+
 // defaultStatusProvider returns static status
 type defaultStatusProvider struct{}
 
@@ -96,10 +106,11 @@ func (d defaultStatusProvider) GetStatus() (string, int, float64, int) {
 // New creates a new heartbeat sender
 func New(shopperURL, sessionID, agentToken string, opts ...Option) *Sender {
 	s := &Sender{
-		shopperURL: shopperURL,
-		sessionID:  sessionID,
-		agentToken: agentToken,
-		interval:   DefaultInterval,
+		shopperURL:           shopperURL,
+		sessionID:            sessionID,
+		agentToken:           agentToken,
+		interval:             DefaultInterval,
+		unreachableThreshold: DefaultUnreachableThreshold,
 		httpClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
@@ -113,6 +124,11 @@ func New(shopperURL, sessionID, agentToken string, opts ...Option) *Sender {
 	}
 
 	return s
+}
+
+// GetUnreachableThreshold returns the current failsafe threshold
+func (s *Sender) GetUnreachableThreshold() int {
+	return int(s.unreachableThreshold)
 }
 
 // Start begins sending heartbeats in the background
@@ -208,9 +224,10 @@ func (s *Sender) sendHeartbeat() {
 // handleFailure increments failure count and triggers failsafe if threshold reached
 func (s *Sender) handleFailure() {
 	count := s.failureCount.Add(1)
-	if count >= UnreachableThreshold {
+	if count >= s.unreachableThreshold {
 		s.logger.Error("FAILSAFE: shopper unreachable for too long, triggering shutdown",
 			slog.Int("consecutive_failures", int(count)),
+			slog.Int("threshold", int(s.unreachableThreshold)),
 			slog.Duration("unreachable_time", time.Duration(count)*s.interval))
 		s.failsafe()
 	}

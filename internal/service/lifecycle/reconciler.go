@@ -427,8 +427,17 @@ func (r *Reconciler) RecoverStuckSessions(ctx context.Context) error {
 
 		if status.Running {
 			if session.Status == models.StatusProvisioning {
-				// Instance is running - update to running
+				// Instance is running - update to running with SSH info
 				session.Status = models.StatusRunning
+				if status.SSHHost != "" {
+					session.SSHHost = status.SSHHost
+				}
+				if status.SSHPort != 0 {
+					session.SSHPort = status.SSHPort
+				}
+				if status.SSHUser != "" {
+					session.SSHUser = status.SSHUser
+				}
 				r.store.Update(ctx, session)
 			} else {
 				// Was stopping but still running - retry destroy

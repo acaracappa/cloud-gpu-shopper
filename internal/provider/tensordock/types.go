@@ -70,11 +70,12 @@ type InstancesData struct {
 }
 
 // Instance represents a TensorDock VM instance
+// Note: TensorDock API uses camelCase for some fields
 type Instance struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
 	Status       string    `json:"status"`
-	IPAddress    string    `json:"ip_address"`
+	IPAddress    string    `json:"ipAddress"` // camelCase in API response
 	GPUModel     string    `json:"gpu_model"`
 	GPUCount     int       `json:"gpu_count"`
 	VCPUs        int       `json:"vcpus"`
@@ -86,23 +87,15 @@ type Instance struct {
 }
 
 // InstanceResponse is the response from GET /instances/{id}
+// Note: This endpoint returns the instance directly, NOT wrapped in "data"
 type InstanceResponse struct {
-	Data InstanceData `json:"data"`
-}
-
-// InstanceData wraps instance attributes
-type InstanceData struct {
-	ID         string             `json:"id"`
-	Type       string             `json:"type"`
-	Attributes InstanceAttributes `json:"attributes"`
-}
-
-// InstanceAttributes contains instance details
-type InstanceAttributes struct {
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	IPAddress string    `json:"ip_address"`
-	CreatedAt time.Time `json:"created_at"`
+	Type         string        `json:"type"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Status       string        `json:"status"`
+	IPAddress    string        `json:"ipAddress"` // camelCase in API response
+	PortForwards []PortForward `json:"portForwards"`
+	RateHourly   float64       `json:"rateHourly"`
 }
 
 // CreateInstanceRequest is the request body for creating an instance
@@ -118,43 +111,59 @@ type CreateInstanceData struct {
 
 // CreateInstanceAttributes contains the instance configuration
 type CreateInstanceAttributes struct {
-	Name       string          `json:"name"`
-	Image      string          `json:"image"`
-	LocationID string          `json:"location_id"`
-	Resources  ResourcesConfig `json:"resources"`
-	SSHKey     string          `json:"ssh_key,omitempty"`
-	CloudInit  *CloudInit      `json:"cloud_init,omitempty"`
+	Name         string          `json:"name"`
+	Type         string          `json:"type"`
+	Image        string          `json:"image"`
+	LocationID   string          `json:"location_id"`
+	Resources    ResourcesConfig `json:"resources"`
+	PortForwards []PortForward   `json:"port_forwards"`
+	SSHKey       string          `json:"ssh_key,omitempty"`
+	CloudInit    *CloudInit      `json:"cloud_init,omitempty"`
+}
+
+// PortForward specifies a port forwarding rule
+type PortForward struct {
+	Protocol     string `json:"protocol"`
+	InternalPort int    `json:"internal_port"`
+	ExternalPort int    `json:"external_port"`
 }
 
 // ResourcesConfig specifies instance resources
 type ResourcesConfig struct {
-	VCPUCount int        `json:"vcpu_count"`
-	RAMGb     int        `json:"ram_gb"`
-	StorageGb int        `json:"storage_gb"`
-	GPUs      GPUsConfig `json:"gpus"`
+	VCPUCount int                   `json:"vcpu_count"`
+	RAMGb     int                   `json:"ram_gb"`
+	StorageGb int                   `json:"storage_gb"`
+	GPUs      map[string]GPUCount   `json:"gpus"`
 }
 
-// GPUsConfig specifies GPU configuration
-type GPUsConfig struct {
-	Model string `json:"model"`
-	Count int    `json:"count"`
+// GPUCount specifies the count for a GPU model
+type GPUCount struct {
+	Count int `json:"count"`
 }
 
 // CloudInit contains cloud-init configuration
+// TensorDock uses standard cloud-init fields: runcmd, packages, write_files, etc.
+// Note: TensorDock's ssh_key API field doesn't work - must use ssh_authorized_keys in cloud-init
 type CloudInit struct {
-	Commands []string `json:"commands,omitempty"`
+	Packages          []string `json:"packages,omitempty"`
+	PackageUpdate     bool     `json:"package_update,omitempty"`
+	PackageUpgrade    bool     `json:"package_upgrade,omitempty"`
+	RunCmd            []string `json:"runcmd,omitempty"`
+	SSHAuthorizedKeys []string `json:"ssh_authorized_keys,omitempty"`
 }
 
 // CreateInstanceResponse is the response from POST /instances
+// Note: Response is wrapped in "data" but has no "attributes" nesting
 type CreateInstanceResponse struct {
 	Data CreateInstanceResponseData `json:"data"`
 }
 
 // CreateInstanceResponseData contains the created instance info
 type CreateInstanceResponseData struct {
-	ID         string             `json:"id"`
-	Type       string             `json:"type"`
-	Attributes InstanceAttributes `json:"attributes"`
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
 }
 
 // normalizeGPUName converts TensorDock GPU names to standardized names

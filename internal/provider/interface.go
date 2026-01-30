@@ -10,12 +10,13 @@ import (
 
 // Common errors returned by providers
 var (
-	ErrProviderRateLimit = errors.New("provider rate limit exceeded")
-	ErrProviderAuth      = errors.New("provider authentication failed")
-	ErrInstanceNotFound  = errors.New("instance not found")
-	ErrOfferUnavailable  = errors.New("offer no longer available")
-	ErrProviderError     = errors.New("provider API error")
-	ErrInvalidResponse   = errors.New("invalid provider response")
+	ErrProviderRateLimit    = errors.New("provider rate limit exceeded")
+	ErrProviderAuth         = errors.New("provider authentication failed")
+	ErrInstanceNotFound     = errors.New("instance not found")
+	ErrOfferUnavailable     = errors.New("offer no longer available")
+	ErrOfferStaleInventory  = errors.New("offer unavailable due to stale inventory - retry with different offer recommended")
+	ErrProviderError        = errors.New("provider API error")
+	ErrInvalidResponse      = errors.New("invalid provider response")
 )
 
 // ProviderFeature represents optional features a provider may support
@@ -80,6 +81,9 @@ type InstanceStatus struct {
 	Running   bool      // Convenience flag
 	StartedAt time.Time // When the instance started
 	Error     string    // Error message if status is "error"
+	SSHHost   string    // SSH host (populated when running)
+	SSHPort   int       // SSH port (populated when running)
+	SSHUser   string    // SSH user (populated when running)
 }
 
 // ProviderInstance represents an instance discovered during reconciliation

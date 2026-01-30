@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// Note: We need context for diagnostics collection, so we use it in monitor()
+
 // Watchdog monitors test execution and enforces safety limits
 type Watchdog struct {
 	config      *TestConfig
@@ -20,6 +22,7 @@ type Watchdog struct {
 	spendByProv map[Provider]float64
 	timeByProv  map[Provider]time.Duration
 	instances   map[string]InstanceInfo // instanceID -> info
+	diagManager *DiagnosticsManager     // optional diagnostics manager
 }
 
 // InstanceInfo tracks a live instance for cleanup
@@ -40,6 +43,13 @@ func NewWatchdog(config *TestConfig) *Watchdog {
 		timeByProv:  make(map[Provider]time.Duration),
 		instances:   make(map[string]InstanceInfo),
 	}
+}
+
+// SetDiagnosticsManager sets the diagnostics manager for automatic collection
+func (w *Watchdog) SetDiagnosticsManager(dm *DiagnosticsManager) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.diagManager = dm
 }
 
 // Start begins watchdog monitoring with a parent context
@@ -222,6 +232,8 @@ func (w *Watchdog) monitor(ctx context.Context) {
 
 			if err := w.CheckLimits(); err != nil {
 				log.Printf("WATCHDOG: LIMIT EXCEEDED: %v", err)
+				// Collect diagnostics before cleanup
+				w.collectDiagnosticsOnLimitExceeded(ctx, err)
 				w.cleanupAllInstances()
 				w.cancel()
 				return
@@ -262,4 +274,23 @@ func (w *Watchdog) cleanupAllInstances() {
 func forceDestroyInstance(sessionID string) error {
 	// This will be implemented in helpers.go
 	return nil
+}
+
+// collectDiagnosticsOnLimitExceeded collects diagnostics from all active instances
+func (w *Watchdog) collectDiagnosticsOnLimitExceeded(ctx context.Context, limitErr error) {
+	w.mu.Lock()
+	dm := w.diagManager
+	w.mu.Unlock()
+
+	if dm == nil || !dm.IsEnabled() {
+		return
+	}
+
+	log.Printf("WATCHDOG: Collecting diagnostics before cleanup (reason: %v)", limitErr)
+
+	// Create a timeout context for diagnostics collection
+	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	dm.CollectAllSnapshots(diagCtx, fmt.Sprintf("limit_exceeded_%s", limitErr.Error()))
 }

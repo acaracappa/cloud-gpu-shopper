@@ -43,10 +43,10 @@ type TestConfig struct {
 // DefaultTestConfig returns the default configuration for live tests
 func DefaultTestConfig() *TestConfig {
 	cfg := &TestConfig{
-		MaxTotalSpendUSD:   3.00,
-		MaxTotalRuntime:    60 * time.Minute,
-		MaxPerProviderUSD:  1.50,
-		MaxPerProviderTime: 30 * time.Minute,
+		MaxTotalSpendUSD:   5.00,  // Increased for agent testing
+		MaxTotalRuntime:    90 * time.Minute, // Extended for agent tests
+		MaxPerProviderUSD:  2.50,  // Increased for agent testing
+		MaxPerProviderTime: 45 * time.Minute, // Extended for agent tests
 		ServerURL:          getEnvOrDefault("SHOPPER_URL", "http://localhost:8080"),
 		Providers:          make(map[Provider]ProviderConfig),
 	}
@@ -57,7 +57,7 @@ func DefaultTestConfig() *TestConfig {
 		Name:         ProviderVastAI,
 		APIKey:       vastKey,
 		BaseURL:      "https://console.vast.ai/api/v0",
-		MaxPriceHour: 0.15, // Max $0.15/hr for cheap test GPUs
+		MaxPriceHour: 0.30, // Max $0.30/hr for better availability
 		Enabled:      vastKey != "",
 	}
 
@@ -68,7 +68,7 @@ func DefaultTestConfig() *TestConfig {
 		Name:         ProviderTensorDock,
 		APIKey:       tensorKey,
 		BaseURL:      "https://api.tensordock.com/api/v2",
-		MaxPriceHour: 0.20, // Max $0.20/hr for TensorDock
+		MaxPriceHour: 0.30, // Max $0.30/hr for better availability
 		Enabled:      tensorKey != "" && tensorOrg != "",
 	}
 

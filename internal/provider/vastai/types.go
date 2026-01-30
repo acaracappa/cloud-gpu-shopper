@@ -77,6 +77,11 @@ type Bundle struct {
 	Duration      float64 `json:"duration"`
 }
 
+// VastAIAvailabilityConfidence is the confidence level for Vast.ai offers.
+// Vast.ai's inventory is generally more accurate than other providers,
+// with real-time availability tracking.
+const VastAIAvailabilityConfidence = 0.9
+
 // ToGPUOffer converts a Vast.ai Bundle to a unified GPUOffer
 func (b Bundle) ToGPUOffer() models.GPUOffer {
 	return models.GPUOffer{
@@ -92,6 +97,8 @@ func (b Bundle) ToGPUOffer() models.GPUOffer {
 		Available:    b.Rentable && !b.Rented,
 		MaxDuration:  0, // Vast.ai doesn't have max duration
 		FetchedAt:    time.Now(),
+		// Vast.ai inventory is generally reliable
+		AvailabilityConfidence: VastAIAvailabilityConfidence,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,16 +17,24 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://dashboard.tensordock.com/api/v2"
-	defaultTimeout = 30 * time.Second
+	defaultBaseURL   = "https://dashboard.tensordock.com/api/v2"
+	defaultTimeout   = 30 * time.Second
+	defaultImageName = "ubuntu2404"
+
+	// TensorDockAvailabilityConfidence is the confidence level for TensorDock offers.
+	// TensorDock's inventory API often shows GPUs as available when they're not,
+	// leading to "No available nodes found" errors during provisioning.
+	// This lower confidence helps users understand these offers may fail.
+	TensorDockAvailabilityConfidence = 0.5
 )
 
 // Client implements the provider.Provider interface for TensorDock
 type Client struct {
-	apiKey     string // Authorization ID
-	apiToken   string // API Token
-	baseURL    string
-	httpClient *http.Client
+	apiKey       string // Authorization ID
+	apiToken     string // API Token
+	baseURL      string
+	httpClient   *http.Client
+	defaultImage string // Default OS image for instances
 
 	// Rate limiting
 	mu          sync.Mutex
@@ -57,14 +66,24 @@ func WithMinInterval(d time.Duration) ClientOption {
 	}
 }
 
+// WithDefaultImage sets the default OS image for instances
+func WithDefaultImage(image string) ClientOption {
+	return func(c *Client) {
+		if image != "" {
+			c.defaultImage = image
+		}
+	}
+}
+
 // NewClient creates a new TensorDock client
 func NewClient(apiKey, apiToken string, opts ...ClientOption) *Client {
 	c := &Client{
-		apiKey:      apiKey,
-		apiToken:    apiToken,
-		baseURL:     defaultBaseURL,
-		httpClient:  &http.Client{Timeout: defaultTimeout},
-		minInterval: time.Second, // Default 1 request per second
+		apiKey:       apiKey,
+		apiToken:     apiToken,
+		baseURL:      defaultBaseURL,
+		httpClient:   &http.Client{Timeout: defaultTimeout},
+		defaultImage: defaultImageName,
+		minInterval:  time.Second, // Default 1 request per second
 	}
 
 	for _, opt := range opts {
@@ -134,13 +153,14 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]m
 func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInstance, error) {
 	c.rateLimit()
 
-	reqURL := c.buildURL("/instances")
+	reqURL := c.buildURLNoAuth("/instances")
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	c.setAuthHeader(req)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -188,40 +208,93 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	c.rateLimit()
 
 	// Parse offer ID to get location and GPU info
-	// Format: "tensordock-{locationID}-{gpuName}"
-	parts := strings.SplitN(req.OfferID, "-", 3)
-	if len(parts) < 3 {
+	// Format: "tensordock-{locationUUID}-{gpuName}"
+	// Location UUIDs contain dashes, so we need to find the GPU name at the end
+	prefix := "tensordock-"
+	if !strings.HasPrefix(req.OfferID, prefix) {
 		return nil, fmt.Errorf("invalid offer ID format: %s", req.OfferID)
 	}
-	locationID := parts[1]
-	gpuName := parts[2]
+
+	// The GPU name is the last segment after the UUID (36 chars + 1 dash)
+	remainder := strings.TrimPrefix(req.OfferID, prefix)
+	// UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars)
+	if len(remainder) < 38 { // 36 for UUID + 1 for dash + at least 1 for GPU name
+		return nil, fmt.Errorf("invalid offer ID format: %s", req.OfferID)
+	}
+	locationID := remainder[:36]
+	gpuName := remainder[37:] // Skip the dash after UUID
+
+	// TensorDock uses predefined OS images (not Docker images), always use the client default
+	// The DockerImage field in CreateInstanceRequest is for Docker-based providers like Vast.ai
+	image := c.defaultImage
 
 	createReq := CreateInstanceRequest{
 		Data: CreateInstanceData{
 			Type: "virtualmachine",
 			Attributes: CreateInstanceAttributes{
 				Name:       req.Tags.ToLabel(),
-				Image:      "ubuntu2404", // Default image, can be customized
+				Type:       "virtualmachine",
+				Image:      image,
 				LocationID: locationID,
 				Resources: ResourcesConfig{
 					VCPUCount: 8,   // Default vCPUs
 					RAMGb:     32,  // Default RAM
 					StorageGb: 100, // Minimum required
-					GPUs: GPUsConfig{
-						Model: gpuName,
-						Count: 1,
+					GPUs: map[string]GPUCount{
+						gpuName: {Count: 1},
 					},
+				},
+				PortForwards: []PortForward{
+					{Protocol: "tcp", InternalPort: 22, ExternalPort: 22}, // SSH required for Ubuntu
 				},
 			},
 		},
 	}
 
-	// Add SSH key if provided
-	if req.SSHPublicKey != "" {
-		createReq.Data.Attributes.SSHKey = req.SSHPublicKey
+	// Build cloud-init configuration
+	// Note: TensorDock's ssh_key API field is REQUIRED but doesn't actually install the key
+	// We must also add it to cloud-init ssh_authorized_keys for it to actually work
+	cloudInit := &CloudInit{
+		PackageUpdate: true,
+		Packages:      []string{"curl"},
 	}
 
-	reqURL := c.buildURL("/instances")
+	// Add SSH key in both places:
+	// 1. API field (required by TensorDock, but doesn't actually install it)
+	// 2. cloud-init (actually installs the key)
+	if req.SSHPublicKey != "" {
+		createReq.Data.Attributes.SSHKey = req.SSHPublicKey
+		cloudInit.SSHAuthorizedKeys = []string{req.SSHPublicKey}
+	}
+
+	// Build runcmd to install and run the agent
+	if agentURL := req.EnvVars["SHOPPER_AGENT_URL"]; agentURL != "" {
+		var runcmds []string
+
+		// Download agent binary
+		runcmds = append(runcmds,
+			fmt.Sprintf("curl -fsSL -L '%s' -o /usr/local/bin/gpu-agent", agentURL),
+			"chmod +x /usr/local/bin/gpu-agent",
+		)
+
+		// Run agent with env vars inline (nohup for background)
+		runcmds = append(runcmds,
+			fmt.Sprintf("SHOPPER_URL='%s' SHOPPER_SESSION_ID='%s' SHOPPER_AGENT_TOKEN='%s' SHOPPER_EXPIRES_AT='%s' SHOPPER_DEPLOYMENT_ID='%s' SHOPPER_CONSUMER_ID='%s' SHOPPER_AGENT_PORT='%s' nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &",
+				req.EnvVars["SHOPPER_URL"],
+				req.EnvVars["SHOPPER_SESSION_ID"],
+				req.EnvVars["SHOPPER_AGENT_TOKEN"],
+				req.EnvVars["SHOPPER_EXPIRES_AT"],
+				req.EnvVars["SHOPPER_DEPLOYMENT_ID"],
+				req.EnvVars["SHOPPER_CONSUMER_ID"],
+				req.EnvVars["SHOPPER_AGENT_PORT"]),
+		)
+
+		cloudInit.RunCmd = runcmds
+	}
+
+	createReq.Data.Attributes.CloudInit = cloudInit
+
+	reqURL := c.buildURLNoAuth("/instances")
 
 	body, err := json.Marshal(createReq)
 	if err != nil {
@@ -233,6 +306,7 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	c.setAuthHeader(httpReq)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
@@ -246,17 +320,46 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		return nil, c.handleError(resp, "CreateInstance")
 	}
 
-	var result CreateInstanceResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// TensorDock sometimes returns HTTP 200 with error in body, check for that
+	var errResp struct {
+		Status int    `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Status >= 400 {
+		// Check for stale inventory errors - these indicate the inventory showed
+		// availability but the actual resources weren't available
+		if isStaleInventoryErrorMessage(errResp.Error) {
+			return nil, provider.NewProviderError("tensordock", "CreateInstance", errResp.Status,
+				errResp.Error, provider.ErrOfferStaleInventory)
+		}
+		return nil, fmt.Errorf("tensordock CreateInstance failed: %s", errResp.Error)
+	}
+
+	var result CreateInstanceResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w (body: %s)", err, string(respBody))
+	}
+
+	// Validate we got an instance ID
+	if result.Data.ID == "" {
+		return nil, fmt.Errorf("tensordock CreateInstance returned empty instance ID (body: %s)", string(respBody))
+	}
+
+	log.Printf("[DEBUG] TensorDock CreateInstance success: ID=%s", result.Data.ID)
+
+	// Note: Create response doesn't include IP address - must poll GetInstanceStatus for that
 	return &provider.InstanceInfo{
 		ProviderInstanceID: result.Data.ID,
-		SSHHost:            result.Data.Attributes.IPAddress,
+		SSHHost:            "", // Will be populated by GetInstanceStatus after instance boots
 		SSHPort:            22,
 		SSHUser:            "root",
-		Status:             result.Data.Attributes.Status,
+		Status:             result.Data.Status,
 	}, nil
 }
 
@@ -264,12 +367,14 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
 	c.rateLimit()
 
-	reqURL := c.buildURL(fmt.Sprintf("/instances/%s", instanceID))
+	reqURL := c.buildURLNoAuth(fmt.Sprintf("/instances/%s", instanceID))
 
 	req, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+
+	c.setAuthHeader(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -288,13 +393,14 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
 func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
 	c.rateLimit()
 
-	reqURL := c.buildURL(fmt.Sprintf("/instances/%s", instanceID))
+	reqURL := c.buildURLNoAuth(fmt.Sprintf("/instances/%s", instanceID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	c.setAuthHeader(req)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -316,14 +422,25 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*pro
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
+	// Find SSH port from port forwards (default to 22)
+	sshPort := 22
+	for _, pf := range result.PortForwards {
+		if pf.InternalPort == 22 {
+			sshPort = pf.ExternalPort
+			break
+		}
+	}
+
 	return &provider.InstanceStatus{
-		Status:    result.Data.Attributes.Status,
-		Running:   result.Data.Attributes.Status == "running",
-		StartedAt: result.Data.Attributes.CreatedAt,
+		Status:  result.Status,
+		Running: result.Status == "running",
+		SSHHost: result.IPAddress,
+		SSHPort: sshPort,
+		SSHUser: "root",
 	}, nil
 }
 
-// buildURL builds a URL with authentication query params
+// buildURL builds a URL with authentication query params (for /locations endpoint)
 func (c *Client) buildURL(path string) string {
 	u, _ := url.Parse(c.baseURL + path)
 	q := u.Query()
@@ -331,6 +448,16 @@ func (c *Client) buildURL(path string) string {
 	q.Set("api_token", c.apiToken)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// buildURLNoAuth builds a URL without query param auth (for /instances endpoint which uses Bearer auth)
+func (c *Client) buildURLNoAuth(path string) string {
+	return c.baseURL + path
+}
+
+// setAuthHeader adds Bearer token authentication header
+func (c *Client) setAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.apiToken)
 }
 
 // rateLimit enforces minimum interval between requests
@@ -386,5 +513,31 @@ func locationGPUToOffer(loc Location, gpu LocationGPU) models.GPUOffer {
 		Available:    true,
 		MaxDuration:  0,
 		FetchedAt:    time.Now(),
+		// TensorDock inventory is often stale - set lower confidence
+		AvailabilityConfidence: TensorDockAvailabilityConfidence,
 	}
+}
+
+// isStaleInventoryErrorMessage checks if an error message indicates stale inventory
+// These are errors that occur when TensorDock's inventory shows availability
+// but the actual resources are not available for provisioning
+func isStaleInventoryErrorMessage(msg string) bool {
+	staleIndicators := []string{
+		"No available nodes found",
+		"no available nodes",
+		"insufficient capacity",
+		"Insufficient capacity",
+		"not enough capacity",
+		"resource unavailable",
+		"Resource unavailable",
+		"out of stock",
+		"Out of stock",
+	}
+	msgLower := strings.ToLower(msg)
+	for _, indicator := range staleIndicators {
+		if strings.Contains(msgLower, strings.ToLower(indicator)) {
+			return true
+		}
+	}
+	return false
 }

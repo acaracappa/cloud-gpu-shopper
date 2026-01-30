@@ -249,7 +249,7 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	}
 
 	instanceReq := provider.CreateInstanceRequest{
-		OfferID:      offer.ProviderID,
+		OfferID:      offer.ID,
 		SessionID:    session.ID,
 		SSHPublicKey: publicKey,
 		DockerImage:  s.agentImage,
@@ -267,6 +267,17 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	instance, err := prov.CreateInstance(ctx, instanceReq)
 	if err != nil {
 		s.failSession(ctx, session, fmt.Sprintf("provider create failed: %s", err.Error()))
+
+		// Check if this is a stale inventory error - wrap it so callers can
+		// identify it and potentially retry with a different offer
+		if provider.ShouldRetryWithDifferentOffer(err) {
+			return nil, &StaleInventoryError{
+				OfferID:     offer.ID,
+				Provider:    offer.Provider,
+				OriginalErr: err,
+			}
+		}
+
 		return nil, fmt.Errorf("failed to create instance: %w", err)
 	}
 
@@ -343,6 +354,26 @@ func (s *Service) waitForHeartbeatAsync(ctx context.Context, sessionID string, p
 				logger.Error("failed to get session", slog.String("error", err.Error()))
 				return
 			}
+
+			// Fetch SSH info if we don't have it yet
+			if session.SSHHost == "" && session.ProviderID != "" {
+				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
+				if err != nil {
+					logger.Warn("failed to get SSH info on heartbeat", slog.String("error", err.Error()))
+				} else if status.SSHHost != "" {
+					session.SSHHost = status.SSHHost
+					if status.SSHPort != 0 {
+						session.SSHPort = status.SSHPort
+					}
+					if status.SSHUser != "" {
+						session.SSHUser = status.SSHUser
+					}
+					logger.Info("SSH info updated on heartbeat",
+						slog.String("ssh_host", session.SSHHost),
+						slog.Int("ssh_port", session.SSHPort))
+				}
+			}
+
 			session.Status = models.StatusRunning
 			if err := s.store.Update(ctx, session); err != nil {
 				logger.Error("failed to update session to running", slog.String("error", err.Error()))
@@ -369,12 +400,37 @@ func (s *Service) waitForHeartbeatAsync(ctx context.Context, sessionID string, p
 			return
 
 		case <-ticker.C:
-			// Check if session received heartbeat
+			// Get current session state
 			session, err := s.store.Get(ctx, sessionID)
 			if err != nil {
 				logger.Error("failed to get session", slog.String("error", err.Error()))
 				continue
 			}
+
+			// Poll provider for SSH info if we don't have it yet
+			if session.SSHHost == "" && session.ProviderID != "" {
+				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
+				if err != nil {
+					logger.Debug("failed to get instance status", slog.String("error", err.Error()))
+				} else if status.SSHHost != "" {
+					session.SSHHost = status.SSHHost
+					if status.SSHPort != 0 {
+						session.SSHPort = status.SSHPort
+					}
+					if status.SSHUser != "" {
+						session.SSHUser = status.SSHUser
+					}
+					if err := s.store.Update(ctx, session); err != nil {
+						logger.Error("failed to update SSH info", slog.String("error", err.Error()))
+					} else {
+						logger.Info("SSH info updated",
+							slog.String("ssh_host", session.SSHHost),
+							slog.Int("ssh_port", session.SSHPort))
+					}
+				}
+			}
+
+			// Check if session received heartbeat
 			if !session.LastHeartbeat.IsZero() {
 				close(done)
 			}

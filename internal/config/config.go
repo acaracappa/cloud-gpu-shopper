@@ -21,8 +21,9 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Host string `mapstructure:"host"`
-	Port int    `mapstructure:"port"`
+	Host      string `mapstructure:"host"`
+	Port      int    `mapstructure:"port"`
+	PublicURL string `mapstructure:"public_url"` // Public URL for agents to reach this server
 }
 
 // DatabaseConfig holds database configuration
@@ -44,9 +45,10 @@ type VastAIConfig struct {
 
 // TensorDockConfig holds TensorDock specific configuration
 type TensorDockConfig struct {
-	AuthID   string `mapstructure:"auth_id"`
-	APIToken string `mapstructure:"api_token"`
-	Enabled  bool   `mapstructure:"enabled"`
+	AuthID       string `mapstructure:"auth_id"`
+	APIToken     string `mapstructure:"api_token"`
+	Enabled      bool   `mapstructure:"enabled"`
+	DefaultImage string `mapstructure:"default_image"` // Default OS image (e.g., "ubuntu2404")
 }
 
 // InventoryConfig holds inventory cache configuration
@@ -149,6 +151,7 @@ func setDefaults(v *viper.Viper) {
 	// Provider defaults
 	v.SetDefault("providers.vastai.enabled", true)
 	v.SetDefault("providers.tensordock.enabled", true)
+	v.SetDefault("providers.tensordock.default_image", "ubuntu2404")
 
 	// Inventory defaults
 	v.SetDefault("inventory.default_cache_ttl", time.Minute)
@@ -177,6 +180,7 @@ func bindEnvVars(v *viper.Viper) {
 	v.BindEnv("providers.vastai.api_key", "VASTAI_API_KEY")
 	v.BindEnv("providers.tensordock.auth_id", "TENSORDOCK_AUTH_ID")
 	v.BindEnv("providers.tensordock.api_token", "TENSORDOCK_API_TOKEN")
+	v.BindEnv("providers.tensordock.default_image", "TENSORDOCK_DEFAULT_IMAGE")
 
 	// Database path
 	v.BindEnv("database.path", "DATABASE_PATH")
@@ -184,6 +188,7 @@ func bindEnvVars(v *viper.Viper) {
 	// Server config
 	v.BindEnv("server.host", "SERVER_HOST")
 	v.BindEnv("server.port", "SERVER_PORT")
+	v.BindEnv("server.public_url", "SHOPPER_URL")
 
 	// Logging
 	v.BindEnv("logging.level", "LOG_LEVEL")

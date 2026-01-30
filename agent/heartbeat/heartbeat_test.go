@@ -173,7 +173,7 @@ func TestSender_TriggersFailsafe(t *testing.T) {
 	)
 
 	// Simulate enough failures to trigger failsafe
-	for i := 0; i < UnreachableThreshold; i++ {
+	for i := 0; i < DefaultUnreachableThreshold; i++ {
 		sender.sendHeartbeat()
 	}
 
@@ -266,5 +266,46 @@ func TestSender_OnlyStartsOnce(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if !sender.IsRunning() {
 		t.Error("sender should be running")
+	}
+}
+
+func TestSender_CustomUnreachableThreshold(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	failsafeTriggered := make(chan struct{}, 1)
+	customThreshold := 5
+
+	sender := New(
+		server.URL,
+		"test-session",
+		"test-token",
+		WithInterval(10*time.Millisecond),
+		WithUnreachableThreshold(customThreshold),
+		WithFailsafeHandler(func() {
+			select {
+			case failsafeTriggered <- struct{}{}:
+			default:
+			}
+		}),
+	)
+
+	// Verify threshold was set
+	if sender.GetUnreachableThreshold() != customThreshold {
+		t.Errorf("expected threshold %d, got %d", customThreshold, sender.GetUnreachableThreshold())
+	}
+
+	// Trigger failures up to threshold
+	for i := 0; i < customThreshold; i++ {
+		sender.sendHeartbeat()
+	}
+
+	select {
+	case <-failsafeTriggered:
+		// Success - failsafe triggered at custom threshold
+	case <-time.After(100 * time.Millisecond):
+		t.Error("failsafe was not triggered at custom threshold")
 	}
 }

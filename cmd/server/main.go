@@ -66,13 +66,24 @@ func main() {
 	}
 
 	if cfg.Providers.TensorDock.AuthID != "" && cfg.Providers.TensorDock.APIToken != "" {
-		tensordockClient := tensordock.NewClient(cfg.Providers.TensorDock.AuthID, cfg.Providers.TensorDock.APIToken)
+		tensordockClient := tensordock.NewClient(
+			cfg.Providers.TensorDock.AuthID,
+			cfg.Providers.TensorDock.APIToken,
+			tensordock.WithDefaultImage(cfg.Providers.TensorDock.DefaultImage),
+		)
 		providers = append(providers, tensordockClient)
-		logger.Info("initialized TensorDock provider")
+		logger.Info("initialized TensorDock provider",
+			slog.String("default_image", cfg.Providers.TensorDock.DefaultImage))
 	}
 
 	if len(providers) == 0 {
 		logger.Warn("no providers configured, running in demo mode")
+	}
+
+	if cfg.Server.PublicURL == "" {
+		logger.Warn("SHOPPER_URL not set - agents will not be able to send heartbeats")
+	} else {
+		logger.Info("agent heartbeat URL configured", slog.String("url", cfg.Server.PublicURL))
 	}
 
 	// Initialize services
@@ -80,7 +91,8 @@ func main() {
 
 	registry := provisioner.NewSimpleProviderRegistry(providers)
 	provService := provisioner.New(sessionStore, registry,
-		provisioner.WithLogger(logger))
+		provisioner.WithLogger(logger),
+		provisioner.WithShopperURL(cfg.Server.PublicURL))
 
 	lifecycleManager := lifecycle.New(sessionStore, provService,
 		lifecycle.WithLogger(logger))

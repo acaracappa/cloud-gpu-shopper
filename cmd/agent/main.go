@@ -97,7 +97,8 @@ func main() {
 		slog.String("session_id", config.SessionID),
 		slog.Time("expires_at", config.ExpiresAt),
 		slog.Time("self_destruct_at", config.SelfDestructAt),
-		slog.Int("agent_port", config.AgentPort))
+		slog.Int("agent_port", config.AgentPort),
+		slog.Int("failsafe_threshold", config.FailsafeThreshold))
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -128,6 +129,7 @@ func main() {
 		heartbeat.WithFailsafeHandler(func() {
 			triggerSelfDestruct(logger, "shopper unreachable")
 		}),
+		heartbeat.WithUnreachableThreshold(config.FailsafeThreshold),
 	)
 	status.heartbeatSender = hbSender
 
@@ -184,14 +186,15 @@ func main() {
 
 // Config holds the agent configuration
 type Config struct {
-	SessionID      string
-	DeploymentID   string
-	ExpiresAt      time.Time
-	SelfDestructAt time.Time
-	ConsumerID     string
-	AgentToken     string
-	AgentPort      int
-	ShopperURL     string
+	SessionID          string
+	DeploymentID       string
+	ExpiresAt          time.Time
+	SelfDestructAt     time.Time
+	ConsumerID         string
+	AgentToken         string
+	AgentPort          int
+	ShopperURL         string
+	FailsafeThreshold  int // Consecutive heartbeat failures before failsafe
 }
 
 // loadConfig loads configuration from environment variables
@@ -250,6 +253,19 @@ func loadConfig() (*Config, error) {
 		gracePeriod = grace
 	}
 	config.SelfDestructAt = config.ExpiresAt.Add(gracePeriod)
+
+	// Failsafe threshold (consecutive heartbeat failures)
+	// Default: 60 (~30 minutes at 30s interval)
+	config.FailsafeThreshold = 60
+	if thresholdStr := os.Getenv("SHOPPER_FAILSAFE_THRESHOLD"); thresholdStr != "" {
+		threshold, err := strconv.Atoi(thresholdStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid SHOPPER_FAILSAFE_THRESHOLD: %w", err)
+		}
+		if threshold > 0 {
+			config.FailsafeThreshold = threshold
+		}
+	}
 
 	return config, nil
 }

@@ -62,3 +62,28 @@ func (e *DuplicateSessionError) Error() string {
 	return fmt.Sprintf("consumer %s already has active session %s for offer %s (status: %s)",
 		e.ConsumerID, e.SessionID, e.OfferID, e.Status)
 }
+
+// StaleInventoryError indicates provisioning failed due to stale/outdated inventory
+// This suggests the offer appeared available but was not actually available.
+// Callers should consider retrying with a different offer.
+type StaleInventoryError struct {
+	OfferID      string
+	Provider     string
+	OriginalErr  error
+}
+
+func (e *StaleInventoryError) Error() string {
+	return fmt.Sprintf("offer %s from %s unavailable (stale inventory): %v - consider retrying with a different offer",
+		e.OfferID, e.Provider, e.OriginalErr)
+}
+
+func (e *StaleInventoryError) Unwrap() error {
+	return e.OriginalErr
+}
+
+// IsRetryableWithDifferentOffer returns true if the error indicates we should
+// automatically try a different offer (e.g., stale inventory errors)
+func IsRetryableWithDifferentOffer(err error) bool {
+	var staleErr *StaleInventoryError
+	return errors.As(err, &staleErr)
+}

@@ -221,19 +221,28 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	// 2. Downloads and runs the agent binary (if SHOPPER_AGENT_URL env var is set)
 	var onStartParts []string
 
-	// Add SSH key
+	// Add SSH key with proper permissions
 	if req.SSHPublicKey != "" {
-		onStartParts = append(onStartParts, fmt.Sprintf("mkdir -p ~/.ssh && echo '%s' >> ~/.ssh/authorized_keys", req.SSHPublicKey))
+		onStartParts = append(onStartParts, fmt.Sprintf("mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys", req.SSHPublicKey))
 	}
 
 	// Download and run agent if URL provided
 	if agentURL := req.EnvVars["SHOPPER_AGENT_URL"]; agentURL != "" {
+		// Build env var exports to ensure agent has all needed vars
+		shopperURL := req.EnvVars["SHOPPER_URL"]
+		sessionID := req.EnvVars["SHOPPER_SESSION_ID"]
+		agentToken := req.EnvVars["SHOPPER_AGENT_TOKEN"]
+		expiresAt := req.EnvVars["SHOPPER_EXPIRES_AT"]
+		deploymentID := req.EnvVars["SHOPPER_DEPLOYMENT_ID"]
+		consumerID := req.EnvVars["SHOPPER_CONSUMER_ID"]
+		agentPort := req.EnvVars["SHOPPER_AGENT_PORT"]
+
 		agentScript := fmt.Sprintf(`
 apt-get update && apt-get install -y curl 2>/dev/null || true
 curl -fsSL -L '%s' -o /usr/local/bin/gpu-agent && \
 chmod +x /usr/local/bin/gpu-agent && \
-nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &
-`, agentURL)
+SHOPPER_URL='%s' SHOPPER_SESSION_ID='%s' SHOPPER_AGENT_TOKEN='%s' SHOPPER_EXPIRES_AT='%s' SHOPPER_DEPLOYMENT_ID='%s' SHOPPER_CONSUMER_ID='%s' SHOPPER_AGENT_PORT='%s' nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &
+`, agentURL, shopperURL, sessionID, agentToken, expiresAt, deploymentID, consumerID, agentPort)
 		onStartParts = append(onStartParts, agentScript)
 	}
 
@@ -247,7 +256,12 @@ nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &
 	}
 
 	// Parse offer ID as bundle ID
-	bundleID, err := strconv.Atoi(req.OfferID)
+	// Offer IDs are in format "vastai-{id}" or just "{id}"
+	offerID := req.OfferID
+	if strings.HasPrefix(offerID, "vastai-") {
+		offerID = strings.TrimPrefix(offerID, "vastai-")
+	}
+	bundleID, err := strconv.Atoi(offerID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid offer ID: %w", err)
 	}
@@ -350,15 +364,22 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*pro
 		return nil, c.handleError(resp, "GetInstanceStatus")
 	}
 
-	var result Instance
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// The individual instance endpoint wraps the response in {"instances": {...}}
+	var wrapper struct {
+		Instances Instance `json:"instances"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
+	result := wrapper.Instances
 	return &provider.InstanceStatus{
 		Status:    result.ActualStatus,
 		Running:   result.ActualStatus == "running",
 		StartedAt: time.Unix(int64(result.StartDate), 0),
+		SSHHost:   result.SSHHost,
+		SSHPort:   result.SSHPort,
+		SSHUser:   "root",
 	}, nil
 }
 

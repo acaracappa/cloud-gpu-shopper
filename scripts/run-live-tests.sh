@@ -3,7 +3,7 @@ set -e
 
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "  LIVE TEST SUITE - Real GPU Servers (Multi-Provider)"
-echo "  Budget: \$3.00 total | Max Runtime: 60 minutes"
+echo "  Budget: \$5.00 total | Max Runtime: 90 minutes"
 echo "═══════════════════════════════════════════════════════════════════════════"
 
 # Check for at least one provider API key
@@ -91,16 +91,24 @@ else
 fi
 
 echo ""
+
+# Setup diagnostics directory
+DIAG_OUTPUT_DIR="${DIAG_OUTPUT_DIR:-./diagnostics/$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "$DIAG_OUTPUT_DIR"
+export DIAG_OUTPUT_DIR
+echo "Diagnostics directory: $DIAG_OUTPUT_DIR"
+
+echo ""
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "  RUNNING LIVE TESTS"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo ""
 
 # Run live tests with timeout
-# -timeout 65m allows 60 min of tests + 5 min margin
+# -timeout 95m allows 90 min of tests + 5 min margin
 # -v for verbose output
 # -count=1 to disable test caching
-timeout 65m go test -v -tags=live -timeout=60m -count=1 ./test/live/... 2>&1 | tee live-test.log
+timeout 95m go test -v -tags=live -timeout=90m -count=1 ./test/live/... 2>&1 | tee live-test.log
 
 TEST_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -112,5 +120,16 @@ else
     echo "  LIVE TESTS FAILED (exit code: $TEST_EXIT_CODE)"
 fi
 echo "═══════════════════════════════════════════════════════════════════════════"
+
+# Show diagnostics location
+if [ -d "$DIAG_OUTPUT_DIR" ]; then
+    DIAG_COUNT=$(find "$DIAG_OUTPUT_DIR" -name "*.json" 2>/dev/null | wc -l)
+    if [ "$DIAG_COUNT" -gt 0 ]; then
+        echo ""
+        echo "Diagnostics collected: $DIAG_COUNT files"
+        echo "Location: $DIAG_OUTPUT_DIR"
+        ls -la "$DIAG_OUTPUT_DIR" 2>/dev/null || true
+    fi
+fi
 
 exit $TEST_EXIT_CODE
