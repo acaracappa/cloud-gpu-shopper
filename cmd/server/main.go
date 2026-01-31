@@ -81,10 +81,6 @@ func main() {
 		logger.Warn("no providers configured, running in demo mode")
 	}
 
-	if cfg.Server.PublicURL != "" {
-		logger.Info("public URL configured", slog.String("url", cfg.Server.PublicURL))
-	}
-
 	// Initialize services
 	invService := inventory.New(providers, inventory.WithLogger(logger))
 

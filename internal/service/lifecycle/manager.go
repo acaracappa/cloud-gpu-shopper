@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/ssh"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
@@ -20,6 +21,9 @@ const (
 
 	// DefaultOrphanGracePeriod is how long past reservation before marking as orphan
 	DefaultOrphanGracePeriod = 15 * time.Minute
+
+	// DefaultSSHHealthCheckInterval is how often to run SSH health checks
+	DefaultSSHHealthCheckInterval = 2 * time.Minute
 )
 
 // SessionStore defines the interface for session persistence
@@ -62,6 +66,12 @@ type Manager struct {
 	hardMaxHours      int
 	orphanGracePeriod time.Duration
 
+	// SSH health check configuration (optional)
+	sshExecutor            *ssh.Executor
+	sshHealthCheckEnabled  bool
+	sshHealthCheckInterval time.Duration
+	lastSSHHealthCheck     time.Time
+
 	// For time mocking in tests
 	now func() time.Time
 
@@ -77,13 +87,15 @@ type Manager struct {
 
 // Metrics tracks lifecycle manager statistics
 type Metrics struct {
-	mu               sync.RWMutex
-	ChecksRun        int64
-	SessionsExpired  int64
-	HardMaxEnforced  int64
-	OrphansDetected  int64
-	DestroySuccesses int64
-	DestroyFailures  int64
+	mu                   sync.RWMutex
+	ChecksRun            int64
+	SessionsExpired      int64
+	HardMaxEnforced      int64
+	OrphansDetected      int64
+	DestroySuccesses     int64
+	DestroyFailures      int64
+	SSHHealthChecksRun   int64
+	SSHHealthChecksFailed int64
 }
 
 // Option configures the lifecycle manager
@@ -131,20 +143,42 @@ func WithTimeFunc(fn func() time.Time) Option {
 	}
 }
 
+// WithSSHExecutor sets the SSH executor for health checks
+func WithSSHExecutor(executor *ssh.Executor) Option {
+	return func(m *Manager) {
+		m.sshExecutor = executor
+	}
+}
+
+// WithSSHHealthCheck enables SSH-based health checking
+func WithSSHHealthCheck(enabled bool) Option {
+	return func(m *Manager) {
+		m.sshHealthCheckEnabled = enabled
+	}
+}
+
+// WithSSHHealthCheckInterval sets how often to run SSH health checks
+func WithSSHHealthCheckInterval(d time.Duration) Option {
+	return func(m *Manager) {
+		m.sshHealthCheckInterval = d
+	}
+}
+
 // New creates a new lifecycle manager
 func New(store SessionStore, destroyer SessionDestroyer, opts ...Option) *Manager {
 	m := &Manager{
-		store:             store,
-		destroyer:         destroyer,
-		handler:           &noopEventHandler{},
-		logger:            slog.Default(),
-		checkInterval:     DefaultCheckInterval,
-		hardMaxHours:      DefaultHardMaxHours,
-		orphanGracePeriod: DefaultOrphanGracePeriod,
-		now:               time.Now,
-		stopCh:            make(chan struct{}),
-		doneCh:            make(chan struct{}),
-		metrics:           &Metrics{},
+		store:                  store,
+		destroyer:              destroyer,
+		handler:                &noopEventHandler{},
+		logger:                 slog.Default(),
+		checkInterval:          DefaultCheckInterval,
+		hardMaxHours:           DefaultHardMaxHours,
+		orphanGracePeriod:      DefaultOrphanGracePeriod,
+		sshHealthCheckInterval: DefaultSSHHealthCheckInterval,
+		now:                    time.Now,
+		stopCh:                 make(chan struct{}),
+		doneCh:                 make(chan struct{}),
+		metrics:                &Metrics{},
 	}
 
 	for _, opt := range opts {
@@ -168,7 +202,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.logger.Info("lifecycle manager starting",
 		slog.Duration("check_interval", m.checkInterval),
-		slog.Int("hard_max_hours", m.hardMaxHours))
+		slog.Int("hard_max_hours", m.hardMaxHours),
+		slog.Bool("ssh_health_check_enabled", m.sshHealthCheckEnabled),
+		slog.Duration("ssh_health_check_interval", m.sshHealthCheckInterval))
 
 	go m.run(ctx)
 	return nil
@@ -228,6 +264,15 @@ func (m *Manager) runChecks(ctx context.Context) {
 	m.checkHardMax(ctx)
 	m.checkReservationExpiry(ctx)
 	m.checkOrphans(ctx)
+
+	// Run SSH health check if enabled and interval has passed
+	if m.sshHealthCheckEnabled && m.sshExecutor != nil {
+		now := m.now()
+		if now.Sub(m.lastSSHHealthCheck) >= m.sshHealthCheckInterval {
+			m.checkSSHHealth(ctx)
+			m.lastSSHHealthCheck = now
+		}
+	}
 }
 
 // checkHardMax enforces the 12-hour maximum session duration
@@ -342,6 +387,62 @@ func (m *Manager) checkOrphans(ctx context.Context) {
 	}
 }
 
+// checkSSHHealth performs SSH-based health checks on running sessions.
+// Note: This is a placeholder implementation. Full SSH health checks require
+// the session's private key, which is NOT stored in the database for security.
+// In production, this would need the private key passed from the client or
+// stored in a secure key management system.
+func (m *Manager) checkSSHHealth(ctx context.Context) {
+	m.logger.Debug("running SSH health checks")
+
+	sessions, err := m.store.GetSessionsByStatus(ctx, models.StatusRunning)
+	if err != nil {
+		m.logger.Error("failed to get running sessions for SSH health check",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	m.metrics.mu.Lock()
+	m.metrics.SSHHealthChecksRun++
+	m.metrics.mu.Unlock()
+
+	for _, session := range sessions {
+		// Skip sessions without SSH credentials
+		if session.SSHHost == "" || session.SSHPort == 0 {
+			continue
+		}
+
+		// Note: We cannot perform actual SSH health checks because the private key
+		// is not stored in the database (security pattern). The private key is only
+		// returned once at session creation and must be managed by the client.
+		//
+		// This is intentional: storing SSH private keys in the database would be
+		// a security risk. Instead, clients should:
+		// 1. Store their private keys securely
+		// 2. Use client-side health monitoring
+		// 3. Call the /api/v1/sessions/{id}/done endpoint when done
+		//
+		// For now, we log when health checks would run so operators can see
+		// which sessions are being monitored.
+		m.logger.Debug("SSH health check would run (private key not available)",
+			slog.String("session_id", session.ID),
+			slog.String("ssh_host", session.SSHHost),
+			slog.Int("ssh_port", session.SSHPort),
+			slog.String("ssh_user", session.SSHUser))
+
+		// In a future implementation with a key management system, we could:
+		// conn, err := m.sshExecutor.Connect(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
+		// if err != nil {
+		//     m.logger.Warn("SSH health check failed", ...)
+		//     m.metrics.mu.Lock()
+		//     m.metrics.SSHHealthChecksFailed++
+		//     m.metrics.mu.Unlock()
+		// }
+		// defer conn.Close()
+		// if err := m.sshExecutor.CheckHealth(ctx, conn); err != nil { ... }
+	}
+}
+
 // destroySession attempts to destroy a session
 func (m *Manager) destroySession(ctx context.Context, session *models.Session, reason string) {
 	m.logger.Info("destroying session",
@@ -438,12 +539,14 @@ func (m *Manager) GetMetrics() Metrics {
 	defer m.metrics.mu.RUnlock()
 
 	return Metrics{
-		ChecksRun:        m.metrics.ChecksRun,
-		SessionsExpired:  m.metrics.SessionsExpired,
-		HardMaxEnforced:  m.metrics.HardMaxEnforced,
-		OrphansDetected:  m.metrics.OrphansDetected,
-		DestroySuccesses: m.metrics.DestroySuccesses,
-		DestroyFailures:  m.metrics.DestroyFailures,
+		ChecksRun:             m.metrics.ChecksRun,
+		SessionsExpired:       m.metrics.SessionsExpired,
+		HardMaxEnforced:       m.metrics.HardMaxEnforced,
+		OrphansDetected:       m.metrics.OrphansDetected,
+		DestroySuccesses:      m.metrics.DestroySuccesses,
+		DestroyFailures:       m.metrics.DestroyFailures,
+		SSHHealthChecksRun:    m.metrics.SSHHealthChecksRun,
+		SSHHealthChecksFailed: m.metrics.SSHHealthChecksFailed,
 	}
 }
 

@@ -72,6 +72,26 @@ type CostQueryParams struct {
 	Period     string `form:"period"` // "daily", "monthly"
 }
 
+// SessionDiagnosticsResponse contains diagnostic information for a session
+type SessionDiagnosticsResponse struct {
+	SessionID    string                 `json:"session_id"`
+	Status       models.SessionStatus   `json:"status"`
+	Provider     string                 `json:"provider"`
+	GPUType      string                 `json:"gpu_type"`
+	GPUCount     int                    `json:"gpu_count"`
+	SSHHost      string                 `json:"ssh_host,omitempty"`
+	SSHPort      int                    `json:"ssh_port,omitempty"`
+	SSHUser      string                 `json:"ssh_user,omitempty"`
+	LaunchMode   string                 `json:"launch_mode,omitempty"`
+	APIEndpoint  string                 `json:"api_endpoint,omitempty"`
+	CreatedAt    time.Time              `json:"created_at"`
+	ExpiresAt    time.Time              `json:"expires_at"`
+	Uptime       string                 `json:"uptime"`
+	TimeToExpiry string                 `json:"time_to_expiry"`
+	SSHAvailable bool                   `json:"ssh_available"`
+	Note         string                 `json:"note"`
+}
+
 // Handlers
 
 func (s *Server) handleHealth(c *gin.Context) {
@@ -470,5 +490,72 @@ func (s *Server) handleGetCostSummary(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, summary)
+}
+
+func (s *Server) handleGetSessionDiagnostics(c *gin.Context) {
+	ctx := c.Request.Context()
+	sessionID := c.Param("id")
+
+	session, err := s.provisioner.GetSession(ctx, sessionID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Check if session is running
+	if session.Status != models.StatusRunning {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "session is not running; diagnostics only available for running sessions",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	now := time.Now()
+	uptime := now.Sub(session.CreatedAt)
+	timeToExpiry := session.ExpiresAt.Sub(now)
+
+	// Check if SSH connection info is available
+	sshAvailable := session.SSHHost != "" && session.SSHPort > 0
+
+	// Build diagnostics response
+	response := SessionDiagnosticsResponse{
+		SessionID:    session.ID,
+		Status:       session.Status,
+		Provider:     session.Provider,
+		GPUType:      session.GPUType,
+		GPUCount:     session.GPUCount,
+		SSHHost:      session.SSHHost,
+		SSHPort:      session.SSHPort,
+		SSHUser:      session.SSHUser,
+		LaunchMode:   string(session.LaunchMode),
+		APIEndpoint:  session.APIEndpoint,
+		CreatedAt:    session.CreatedAt,
+		ExpiresAt:    session.ExpiresAt,
+		Uptime:       formatDuration(uptime),
+		TimeToExpiry: formatDuration(timeToExpiry),
+		SSHAvailable: sshAvailable,
+		Note:         "Full SSH diagnostics (GPU status, health checks) require client-side SSH access. The private key is not stored server-side for security.",
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		return "expired"
+	}
+
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+
+	if hours > 0 {
+		return strconv.Itoa(hours) + "h " + strconv.Itoa(minutes) + "m"
+	}
+	return strconv.Itoa(minutes) + "m"
 }
 

@@ -21,9 +21,8 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Host      string `mapstructure:"host"`
-	Port      int    `mapstructure:"port"`
-	PublicURL string `mapstructure:"public_url"` // Public URL for agents to reach this server
+	Host string `mapstructure:"host"`
+	Port int    `mapstructure:"port"`
 }
 
 // DatabaseConfig holds database configuration
@@ -188,7 +187,6 @@ func bindEnvVars(v *viper.Viper) {
 	// Server config
 	v.BindEnv("server.host", "SERVER_HOST")
 	v.BindEnv("server.port", "SERVER_PORT")
-	v.BindEnv("server.public_url", "SHOPPER_URL")
 
 	// Logging
 	v.BindEnv("logging.level", "LOG_LEVEL")

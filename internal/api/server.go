@@ -129,6 +129,7 @@ func (s *Server) setupRouter() {
 		v1.POST("/sessions", s.handleCreateSession)
 		v1.GET("/sessions", s.handleListSessions)
 		v1.GET("/sessions/:id", s.handleGetSession)
+		v1.GET("/sessions/:id/diagnostics", s.handleGetSessionDiagnostics)
 		v1.POST("/sessions/:id/done", s.handleSessionDone)
 		v1.POST("/sessions/:id/extend", s.handleExtendSession)
 		v1.DELETE("/sessions/:id", s.handleDeleteSession)
