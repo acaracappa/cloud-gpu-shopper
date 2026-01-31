@@ -16,6 +16,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// =============================================================================
+// Progressive Backoff Tests
+// =============================================================================
+
+func TestProgressiveBackoff(t *testing.T) {
+	t.Run("returns initial value first", func(t *testing.T) {
+		pb := NewProgressiveBackoff(1*time.Second, 10*time.Second, 2.0)
+		assert.Equal(t, 1*time.Second, pb.Next())
+	})
+
+	t.Run("increases by multiplier", func(t *testing.T) {
+		pb := NewProgressiveBackoff(1*time.Second, 10*time.Second, 2.0)
+		pb.Next() // 1s
+		assert.Equal(t, 2*time.Second, pb.Next())
+		assert.Equal(t, 4*time.Second, pb.Next())
+	})
+
+	t.Run("caps at maximum", func(t *testing.T) {
+		pb := NewProgressiveBackoff(1*time.Second, 5*time.Second, 2.0)
+		pb.Next() // 1s
+		pb.Next() // 2s
+		pb.Next() // 4s
+		assert.Equal(t, 5*time.Second, pb.Next()) // capped at 5s
+		assert.Equal(t, 5*time.Second, pb.Next()) // stays at 5s
+	})
+
+	t.Run("reset returns to initial", func(t *testing.T) {
+		pb := NewProgressiveBackoff(1*time.Second, 10*time.Second, 2.0)
+		pb.Next() // 1s
+		pb.Next() // 2s
+		pb.Reset()
+		assert.Equal(t, 1*time.Second, pb.Next())
+	})
+
+	t.Run("current returns without advancing", func(t *testing.T) {
+		pb := NewProgressiveBackoff(1*time.Second, 10*time.Second, 2.0)
+		pb.Next() // advance to 2s
+		assert.Equal(t, 2*time.Second, pb.Current())
+		assert.Equal(t, 2*time.Second, pb.Current()) // still 2s
+		assert.Equal(t, 2*time.Second, pb.Next())    // returns 2s, advances to 4s
+	})
+
+	t.Run("works with fractional multiplier", func(t *testing.T) {
+		pb := NewProgressiveBackoff(100*time.Millisecond, 1*time.Second, 1.5)
+		pb.Next() // 100ms
+		// 100ms * 1.5 = 150ms
+		assert.Equal(t, 150*time.Millisecond, pb.Next())
+		// 150ms * 1.5 = 225ms
+		assert.Equal(t, 225*time.Millisecond, pb.Next())
+	})
+}
+
+// =============================================================================
+// Mock Types
+// =============================================================================
+
 // mockSessionStore implements SessionStore for testing
 type mockSessionStore struct {
 	mu       sync.RWMutex
@@ -54,29 +110,6 @@ func (m *mockSessionStore) Update(ctx context.Context, session *models.Session) 
 		return &SessionNotFoundError{ID: session.ID}
 	}
 	m.sessions[session.ID] = session
-	return nil
-}
-
-func (m *mockSessionStore) UpdateHeartbeat(ctx context.Context, id string, t time.Time) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	session, ok := m.sessions[id]
-	if !ok {
-		return &SessionNotFoundError{ID: id}
-	}
-	session.LastHeartbeat = t
-	return nil
-}
-
-func (m *mockSessionStore) UpdateHeartbeatWithIdle(ctx context.Context, id string, t time.Time, idleSeconds int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	session, ok := m.sessions[id]
-	if !ok {
-		return &SessionNotFoundError{ID: id}
-	}
-	session.LastHeartbeat = t
-	session.LastIdleSeconds = idleSeconds
 	return nil
 }
 
@@ -223,7 +256,6 @@ func TestService_CreateSession_Success(t *testing.T) {
 	assert.Equal(t, "root", session.SSHUser)
 	assert.NotEmpty(t, session.SSHPrivateKey)
 	assert.NotEmpty(t, session.SSHPublicKey)
-	assert.NotEmpty(t, session.AgentToken)
 	assert.Equal(t, 0.50, session.PricePerHour)
 	assert.Equal(t, 2, session.ReservationHrs)
 	assert.Equal(t, models.StorageDestroy, session.StoragePolicy)
@@ -234,7 +266,7 @@ func TestService_CreateSession_Success(t *testing.T) {
 
 	// Verify provider was called
 	assert.Equal(t, 1, prov.createCalls)
-	assert.Equal(t, "provider-offer-123", prov.lastCreateRequest.OfferID)
+	assert.Equal(t, "offer-123", prov.lastCreateRequest.OfferID) // Uses offer.ID, not offer.ProviderID
 	assert.Equal(t, session.ID, prov.lastCreateRequest.SessionID)
 	assert.NotEmpty(t, prov.lastCreateRequest.SSHPublicKey)
 }
@@ -293,37 +325,6 @@ func TestService_CreateSession_SetsInstanceTags(t *testing.T) {
 	assert.Equal(t, "test-deploy-123", tags.ShopperDeploymentID)
 	assert.Equal(t, "consumer-001", tags.ShopperConsumerID)
 	assert.WithinDuration(t, session.ExpiresAt, tags.ShopperExpiresAt, time.Second)
-}
-
-func TestService_CreateSession_SetsAgentEnv(t *testing.T) {
-	store := newMockSessionStore()
-	prov := newMockProvider("vastai")
-	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
-
-	svc := New(store, registry,
-		WithLogger(newTestLogger()),
-		WithDeploymentID("test-deploy"),
-		WithAgentPort(9000))
-
-	ctx := context.Background()
-	req := models.CreateSessionRequest{
-		ConsumerID:     "consumer-001",
-		OfferID:        "offer-123",
-		WorkloadType:   models.WorkloadLLM,
-		ReservationHrs: 1,
-	}
-	offer := &models.GPUOffer{Provider: "vastai", ProviderID: "123"}
-
-	session, err := svc.CreateSession(ctx, req, offer)
-	require.NoError(t, err)
-
-	env := prov.lastCreateRequest.EnvVars
-	assert.Equal(t, session.ID, env["SHOPPER_SESSION_ID"])
-	assert.Equal(t, "test-deploy", env["SHOPPER_DEPLOYMENT_ID"])
-	assert.Equal(t, "consumer-001", env["SHOPPER_CONSUMER_ID"])
-	assert.Equal(t, session.AgentToken, env["SHOPPER_AGENT_TOKEN"])
-	assert.Equal(t, "9000", env["SHOPPER_AGENT_PORT"])
-	assert.NotEmpty(t, env["SHOPPER_EXPIRES_AT"])
 }
 
 func TestService_CreateSession_ProviderError(t *testing.T) {
@@ -544,40 +545,6 @@ func TestService_DestroySession_NoProviderID(t *testing.T) {
 
 	updated, _ := store.Get(ctx, "sess-001")
 	assert.Equal(t, models.StatusStopped, updated.Status)
-}
-
-func TestService_RecordHeartbeat(t *testing.T) {
-	store := newMockSessionStore()
-	registry := NewSimpleProviderRegistry([]provider.Provider{})
-
-	session := &models.Session{
-		ID:     "sess-001",
-		Status: models.StatusProvisioning,
-	}
-	store.sessions[session.ID] = session
-
-	svc := New(store, registry, WithLogger(newTestLogger()))
-
-	ctx := context.Background()
-	err := svc.RecordHeartbeat(ctx, "sess-001", 120)
-
-	require.NoError(t, err)
-
-	updated, _ := store.Get(ctx, "sess-001")
-	assert.False(t, updated.LastHeartbeat.IsZero())
-	assert.Equal(t, 120, updated.LastIdleSeconds)
-}
-
-func TestService_RecordHeartbeat_NotFound(t *testing.T) {
-	store := newMockSessionStore()
-	registry := NewSimpleProviderRegistry([]provider.Provider{})
-
-	svc := New(store, registry, WithLogger(newTestLogger()))
-
-	ctx := context.Background()
-	err := svc.RecordHeartbeat(ctx, "nonexistent", 0)
-
-	require.Error(t, err)
 }
 
 func TestService_GetSession(t *testing.T) {

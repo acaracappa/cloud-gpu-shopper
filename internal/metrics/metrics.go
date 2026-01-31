@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -40,13 +42,40 @@ var (
 		},
 	)
 
-	// HeartbeatAge tracks the age of the last heartbeat for each session
-	HeartbeatAge = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "gpu_heartbeat_age_seconds",
-			Help: "Seconds since last heartbeat for each session",
+	// SSHVerifyDuration tracks how long SSH verification takes
+	SSHVerifyDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "gpu_ssh_verify_duration_seconds",
+			Help:    "Duration of SSH verification by provider",
+			Buckets: prometheus.ExponentialBuckets(1, 2, 10), // 1s to ~17min
 		},
-		[]string{"session_id"},
+		[]string{"provider"},
+	)
+
+	// SSHVerifyFailures counts SSH verification failures
+	SSHVerifyFailures = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "gpu_ssh_verify_failures_total",
+			Help: "Total number of SSH verification failures",
+		},
+	)
+
+	// APIVerifyDuration tracks how long API verification takes (entrypoint mode)
+	APIVerifyDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "gpu_api_verify_duration_seconds",
+			Help:    "Duration of API verification by provider (entrypoint mode)",
+			Buckets: prometheus.ExponentialBuckets(1, 2, 12), // 1s to ~68min (model loading can be slow)
+		},
+		[]string{"provider"},
+	)
+
+	// APIVerifyFailures counts API verification failures
+	APIVerifyFailures = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "gpu_api_verify_failures_total",
+			Help: "Total number of API verification failures (entrypoint mode)",
+		},
 	)
 
 	// ProviderAPIErrors counts API errors by provider and operation
@@ -86,14 +115,6 @@ var (
 		},
 	)
 
-	// IdleShutdowns counts idle shutdown events
-	IdleShutdowns = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "gpu_idle_shutdowns_total",
-			Help: "Total number of sessions terminated due to idle threshold exceeded",
-		},
-	)
-
 	// GhostsDetected counts ghost sessions (DB record without provider instance)
 	GhostsDetected = promauto.NewCounter(
 		prometheus.CounterOpts{
@@ -128,6 +149,37 @@ var (
 			Help: "Total number of budget alerts by type (warning, exceeded)",
 		},
 		[]string{"alert_type"},
+	)
+
+	// ProviderAPIResponseTime tracks API response times by provider and operation
+	// This helps identify slow operations and potential performance issues
+	ProviderAPIResponseTime = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "gpu_provider_api_response_time_seconds",
+			Help: "Response time of provider API calls by provider and operation",
+			// Buckets: 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s, 60s
+			Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0},
+		},
+		[]string{"provider", "operation"},
+	)
+
+	// ProviderAPICallsTotal counts total API calls by provider, operation, and status
+	ProviderAPICallsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gpu_provider_api_calls_total",
+			Help: "Total number of provider API calls by provider, operation, and status",
+		},
+		[]string{"provider", "operation", "status"},
+	)
+
+	// ProviderCircuitBreakerState tracks circuit breaker state by provider
+	// Values: 0 = closed, 1 = open, 2 = half-open
+	ProviderCircuitBreakerState = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "gpu_provider_circuit_breaker_state",
+			Help: "Current state of provider circuit breaker (0=closed, 1=open, 2=half-open)",
+		},
+		[]string{"provider"},
 	)
 )
 
@@ -175,24 +227,19 @@ func UpdateSessionStatus(provider, oldStatus, newStatus string) {
 	}
 }
 
-// UpdateHeartbeatAge updates the heartbeat age for a session
-func UpdateHeartbeatAge(sessionID string, ageSeconds float64) {
-	HeartbeatAge.WithLabelValues(sessionID).Set(ageSeconds)
+// RecordSSHVerifyDuration records how long SSH verification took
+func RecordSSHVerifyDuration(provider string, duration time.Duration) {
+	SSHVerifyDuration.WithLabelValues(provider).Observe(duration.Seconds())
 }
 
-// RemoveHeartbeatAge removes the heartbeat age metric for a session
-func RemoveHeartbeatAge(sessionID string) {
-	HeartbeatAge.DeleteLabelValues(sessionID)
+// RecordSSHVerifyFailure increments the SSH verify failure counter
+func RecordSSHVerifyFailure() {
+	SSHVerifyFailures.Inc()
 }
 
 // RecordHardMaxEnforced increments the hard max enforcement counter
 func RecordHardMaxEnforced() {
 	HardMaxEnforced.Inc()
-}
-
-// RecordIdleShutdown increments the idle shutdown counter
-func RecordIdleShutdown() {
-	IdleShutdowns.Inc()
 }
 
 // RecordCost adds to the cost accrued counter
@@ -203,4 +250,31 @@ func RecordCost(provider string, amount float64) {
 // RecordBudgetAlert increments the budget alert counter
 func RecordBudgetAlert(alertType string) {
 	BudgetAlerts.WithLabelValues(alertType).Inc()
+}
+
+// RecordAPIVerifyDuration records how long API verification took
+func RecordAPIVerifyDuration(provider string, duration time.Duration) {
+	APIVerifyDuration.WithLabelValues(provider).Observe(duration.Seconds())
+}
+
+// RecordAPIVerifyFailure increments the API verify failure counter
+func RecordAPIVerifyFailure() {
+	APIVerifyFailures.Inc()
+}
+
+// RecordProviderAPIResponseTime records the response time for a provider API call
+func RecordProviderAPIResponseTime(provider, operation string, duration time.Duration) {
+	ProviderAPIResponseTime.WithLabelValues(provider, operation).Observe(duration.Seconds())
+}
+
+// RecordProviderAPICall records a provider API call with its status
+// status should be "success", "error", or "circuit_open"
+func RecordProviderAPICall(provider, operation, status string) {
+	ProviderAPICallsTotal.WithLabelValues(provider, operation, status).Inc()
+}
+
+// UpdateProviderCircuitBreakerState updates the circuit breaker state metric
+// state should be 0 (closed), 1 (open), or 2 (half-open)
+func UpdateProviderCircuitBreakerState(provider string, state int) {
+	ProviderCircuitBreakerState.WithLabelValues(provider).Set(float64(state))
 }

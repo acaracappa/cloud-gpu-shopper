@@ -45,6 +45,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -54,16 +55,27 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
 	// defaultBaseURL is the TensorDock API v2 endpoint
 	defaultBaseURL = "https://dashboard.tensordock.com/api/v2"
 
-	// defaultTimeout for HTTP requests
-	defaultTimeout = 30 * time.Second
+	// Default timeouts for different operation types.
+	// Different operations may have different latency characteristics:
+	//   - ListOffers: Reading inventory is typically fast
+	//   - CreateInstance: Creating can take longer due to resource allocation
+	//   - GetInstanceStatus: Status checks should be quick
+	//   - DestroyInstance: Destruction should be quick but may need confirmation
+	defaultTimeoutListOffers     = 30 * time.Second
+	defaultTimeoutCreateInstance = 60 * time.Second
+	defaultTimeoutGetStatus      = 30 * time.Second
+	defaultTimeoutDestroy        = 30 * time.Second
+	defaultTimeoutListInstances  = 30 * time.Second
 
 	// defaultImageName is Ubuntu 24.04 - the most common choice for GPU workloads
 	defaultImageName = "ubuntu2404"
@@ -84,6 +96,168 @@ const (
 	defaultStorageGB = 100
 )
 
+// OperationTimeouts holds configurable timeouts for different API operations.
+// Each operation can have its own timeout to account for different latency
+// characteristics (e.g., create operations may need more time than status checks).
+type OperationTimeouts struct {
+	ListOffers     time.Duration
+	CreateInstance time.Duration
+	GetStatus      time.Duration
+	Destroy        time.Duration
+	ListInstances  time.Duration
+}
+
+// DefaultTimeouts returns the default timeout configuration.
+func DefaultTimeouts() OperationTimeouts {
+	return OperationTimeouts{
+		ListOffers:     defaultTimeoutListOffers,
+		CreateInstance: defaultTimeoutCreateInstance,
+		GetStatus:      defaultTimeoutGetStatus,
+		Destroy:        defaultTimeoutDestroy,
+		ListInstances:  defaultTimeoutListInstances,
+	}
+}
+
+// CircuitBreakerState represents the current state of the circuit breaker
+type CircuitBreakerState int
+
+const (
+	// CircuitClosed is the normal operating state - requests are allowed
+	CircuitClosed CircuitBreakerState = iota
+	// CircuitOpen means too many failures occurred - requests are blocked
+	CircuitOpen
+	// CircuitHalfOpen allows a test request through to check if service recovered
+	CircuitHalfOpen
+)
+
+// CircuitBreakerConfig configures the circuit breaker behavior
+type CircuitBreakerConfig struct {
+	// FailureThreshold is the number of consecutive failures before opening the circuit
+	FailureThreshold int
+	// ResetTimeout is how long to wait before transitioning from Open to HalfOpen
+	ResetTimeout time.Duration
+	// MaxBackoff is the maximum backoff duration for exponential backoff
+	MaxBackoff time.Duration
+	// BaseBackoff is the initial backoff duration
+	BaseBackoff time.Duration
+}
+
+// DefaultCircuitBreakerConfig returns sensible defaults for the circuit breaker
+func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
+	return CircuitBreakerConfig{
+		FailureThreshold: 5,
+		ResetTimeout:     30 * time.Second,
+		MaxBackoff:       2 * time.Minute,
+		BaseBackoff:      1 * time.Second,
+	}
+}
+
+// circuitBreaker implements a simple circuit breaker pattern with exponential backoff
+type circuitBreaker struct {
+	mu               sync.Mutex
+	state            CircuitBreakerState
+	failures         int
+	lastFailure      time.Time
+	lastStateChange  time.Time
+	config           CircuitBreakerConfig
+	consecutiveWaits int // For exponential backoff
+}
+
+// newCircuitBreaker creates a new circuit breaker with the given configuration
+func newCircuitBreaker(config CircuitBreakerConfig) *circuitBreaker {
+	return &circuitBreaker{
+		state:  CircuitClosed,
+		config: config,
+	}
+}
+
+// allow returns true if a request should be allowed, false if circuit is open
+func (cb *circuitBreaker) allow() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
+	case CircuitClosed:
+		return true
+	case CircuitOpen:
+		// Check if we should transition to half-open
+		if time.Since(cb.lastStateChange) > cb.config.ResetTimeout {
+			cb.state = CircuitHalfOpen
+			cb.lastStateChange = time.Now()
+			return true
+		}
+		return false
+	case CircuitHalfOpen:
+		// Allow one test request
+		return true
+	default:
+		return true
+	}
+}
+
+// recordSuccess records a successful request
+func (cb *circuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failures = 0
+	cb.consecutiveWaits = 0
+	if cb.state == CircuitHalfOpen {
+		cb.state = CircuitClosed
+		cb.lastStateChange = time.Now()
+	}
+}
+
+// recordFailure records a failed request and potentially opens the circuit
+func (cb *circuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failures++
+	cb.lastFailure = time.Now()
+
+	if cb.state == CircuitHalfOpen {
+		// Failed while testing - go back to open
+		cb.state = CircuitOpen
+		cb.lastStateChange = time.Now()
+		cb.consecutiveWaits++
+		return
+	}
+
+	if cb.failures >= cb.config.FailureThreshold {
+		cb.state = CircuitOpen
+		cb.lastStateChange = time.Now()
+		cb.consecutiveWaits++
+	}
+}
+
+// getBackoff returns the current backoff duration using exponential backoff
+func (cb *circuitBreaker) getBackoff() time.Duration {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.consecutiveWaits == 0 {
+		return cb.config.BaseBackoff
+	}
+
+	// Exponential backoff: base * 2^(waits-1), capped at maxBackoff
+	backoff := cb.config.BaseBackoff * time.Duration(1<<uint(cb.consecutiveWaits-1))
+	if backoff > cb.config.MaxBackoff {
+		backoff = cb.config.MaxBackoff
+	}
+	return backoff
+}
+
+// State returns the current circuit breaker state (for monitoring/testing)
+func (cb *circuitBreaker) State() CircuitBreakerState {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state
+}
+
+// ErrCircuitOpen is returned when the circuit breaker is open
+var ErrCircuitOpen = errors.New("circuit breaker is open")
+
 // Client implements the provider.Provider interface for TensorDock.
 // It handles authentication, rate limiting, and API communication.
 type Client struct {
@@ -92,9 +266,11 @@ type Client struct {
 	apiToken string // API Token from TensorDock dashboard
 
 	// Configuration
-	baseURL      string
-	httpClient   *http.Client
-	defaultImage string
+	baseURL        string
+	httpClient     *http.Client
+	defaultImage   string
+	timeouts       OperationTimeouts
+	circuitBreaker *circuitBreaker
 
 	// Rate limiting to avoid 429 errors
 	mu          sync.Mutex
@@ -151,11 +327,208 @@ func WithDebug(enabled bool) ClientOption {
 	}
 }
 
-// debugLog logs a message if debug mode is enabled
+// WithTimeouts sets custom timeouts for different API operations.
+// Pass a modified OperationTimeouts struct to customize specific operations.
+//
+// Example:
+//
+//	timeouts := tensordock.DefaultTimeouts()
+//	timeouts.CreateInstance = 2 * time.Minute
+//	client := tensordock.NewClient(key, token, tensordock.WithTimeouts(timeouts))
+func WithTimeouts(timeouts OperationTimeouts) ClientOption {
+	return func(c *Client) {
+		c.timeouts = timeouts
+	}
+}
+
+// WithCircuitBreaker configures the circuit breaker for API calls.
+// The circuit breaker helps prevent cascading failures by temporarily
+// blocking requests when the API is experiencing issues.
+//
+// Example:
+//
+//	config := tensordock.DefaultCircuitBreakerConfig()
+//	config.FailureThreshold = 3
+//	client := tensordock.NewClient(key, token, tensordock.WithCircuitBreaker(config))
+func WithCircuitBreaker(config CircuitBreakerConfig) ClientOption {
+	return func(c *Client) {
+		c.circuitBreaker = newCircuitBreaker(config)
+	}
+}
+
+// debugLog logs a message if debug mode is enabled.
+// SECURITY: This function redacts sensitive credentials before logging.
 func (c *Client) debugLog(format string, args ...interface{}) {
 	if c.debugEnabled {
-		log.Printf("[TensorDock DEBUG] "+format, args...)
+		// Redact any credentials that might appear in the log message
+		message := fmt.Sprintf(format, args...)
+		message = redactCredentials(message)
+		log.Printf("[TensorDock DEBUG] %s", message)
 	}
+}
+
+// redactCredentials removes sensitive credentials from log messages.
+// This handles both URL query parameters and JSON body fields.
+//
+// Redacted patterns:
+//   - api_key=xxx -> api_key=REDACTED (URL query params)
+//   - api_token=xxx -> api_token=REDACTED (URL query params)
+//   - "ssh_key":"xxx" -> "ssh_key":"REDACTED" (JSON body)
+//   - echo 'base64...' | base64 -d >> (cloud-init SSH key commands)
+func redactCredentials(s string) string {
+	// Redact URL query parameters
+	s = redactQueryParam(s, "api_key")
+	s = redactQueryParam(s, "api_token")
+
+	// Redact SSH keys in JSON body (handles "ssh_key":"value")
+	s = redactJSONField(s, "ssh_key")
+
+	// Redact base64-encoded SSH keys in cloud-init commands
+	// Pattern: echo 'base64data' | base64 -d >>
+	s = redactBase64EchoCommand(s)
+
+	return s
+}
+
+// redactJSONField replaces the value of a JSON string field with REDACTED.
+// Handles: "fieldName":"value" -> "fieldName":"REDACTED"
+func redactJSONField(s, fieldName string) string {
+	// Match "fieldName":"value" where value is a JSON string
+	// The pattern handles escaped quotes within the value
+	prefix := `"` + fieldName + `":"`
+	var result strings.Builder
+	remaining := s
+
+	for {
+		idx := strings.Index(remaining, prefix)
+		if idx == -1 {
+			result.WriteString(remaining)
+			break
+		}
+
+		// Write everything up to and including the prefix
+		result.WriteString(remaining[:idx+len(prefix)])
+
+		// Move past the prefix to find the end of the JSON string value
+		remaining = remaining[idx+len(prefix):]
+
+		// Find the closing quote (handling escaped quotes)
+		valueEnd := findJSONStringEnd(remaining)
+		if valueEnd == -1 {
+			// Malformed JSON, just write REDACTED and the rest
+			result.WriteString("REDACTED")
+			result.WriteString(remaining)
+			remaining = ""
+		} else {
+			result.WriteString("REDACTED")
+			remaining = remaining[valueEnd:]
+		}
+	}
+
+	return result.String()
+}
+
+// findJSONStringEnd finds the index of the closing quote of a JSON string,
+// handling escaped characters. Returns the index of the closing quote,
+// or -1 if not found.
+func findJSONStringEnd(s string) int {
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if s[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if s[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+// redactBase64EchoCommand redacts base64-encoded data in cloud-init echo commands.
+// Pattern: echo 'base64data' | base64 -d
+func redactBase64EchoCommand(s string) string {
+	// Look for echo 'xxx' | base64 pattern (single quotes)
+	prefix := "echo '"
+	suffix := "' | base64"
+	var result strings.Builder
+	remaining := s
+
+	for {
+		idx := strings.Index(remaining, prefix)
+		if idx == -1 {
+			result.WriteString(remaining)
+			break
+		}
+
+		// Check if this is followed by the base64 pipe
+		afterPrefix := remaining[idx+len(prefix):]
+		endQuote := strings.Index(afterPrefix, "'")
+		if endQuote == -1 {
+			// No closing quote, write and continue
+			result.WriteString(remaining[:idx+len(prefix)])
+			remaining = afterPrefix
+			continue
+		}
+
+		// Check if it's followed by | base64
+		afterQuote := afterPrefix[endQuote:]
+		if strings.HasPrefix(afterQuote, suffix) {
+			// This is a base64 echo command, redact it
+			result.WriteString(remaining[:idx+len(prefix)])
+			result.WriteString("REDACTED")
+			remaining = afterQuote
+		} else {
+			// Not a base64 command, keep the original
+			result.WriteString(remaining[:idx+len(prefix)])
+			remaining = afterPrefix
+		}
+	}
+
+	return result.String()
+}
+
+// redactQueryParam replaces the value of a URL query parameter with REDACTED.
+// Handles both middle-of-string (&param=value&) and end-of-string (&param=value) cases.
+func redactQueryParam(s, param string) string {
+	// Match param=value where value continues until & or end of string
+	// This handles: ?api_key=secret&other=val or &api_key=secret&other=val
+	prefix := param + "="
+	var result strings.Builder
+	remaining := s
+
+	for {
+		idx := strings.Index(remaining, prefix)
+		if idx == -1 {
+			// No more occurrences, write the rest
+			result.WriteString(remaining)
+			break
+		}
+
+		// Write everything up to and including the prefix
+		result.WriteString(remaining[:idx+len(prefix)])
+
+		// Move past the prefix
+		remaining = remaining[idx+len(prefix):]
+
+		// Find the end of the value (next & or end of string)
+		valueEnd := strings.Index(remaining, "&")
+		if valueEnd == -1 {
+			// Value goes to end of string
+			result.WriteString("REDACTED")
+			remaining = ""
+		} else {
+			// Value ends at &, skip the value but keep the &
+			result.WriteString("REDACTED")
+			remaining = remaining[valueEnd:]
+		}
+	}
+
+	return result.String()
 }
 
 // NewClient creates a new TensorDock API client.
@@ -174,12 +547,14 @@ func (c *Client) debugLog(format string, args ...interface{}) {
 //	)
 func NewClient(apiKey, apiToken string, opts ...ClientOption) *Client {
 	c := &Client{
-		apiKey:       apiKey,
-		apiToken:     apiToken,
-		baseURL:      defaultBaseURL,
-		httpClient:   &http.Client{Timeout: defaultTimeout},
-		defaultImage: defaultImageName,
-		minInterval:  time.Second, // Conservative rate limit
+		apiKey:         apiKey,
+		apiToken:       apiToken,
+		baseURL:        defaultBaseURL,
+		httpClient:     &http.Client{}, // Timeout set per-operation
+		defaultImage:   defaultImageName,
+		timeouts:       DefaultTimeouts(),
+		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()),
+		minInterval:    time.Second, // Conservative rate limit
 	}
 
 	for _, opt := range opts {
@@ -212,8 +587,26 @@ func (c *Client) SupportsFeature(feature provider.ProviderFeature) bool {
 // Note: The inventory data is frequently stale. GPUs shown as available may
 // fail to provision with "No available nodes found". We set AvailabilityConfidence
 // to 50% to reflect this uncertainty.
-func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]models.GPUOffer, error) {
+func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (offers []models.GPUOffer, err error) {
+	startTime := time.Now()
+
+	// Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("ListOffers", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListOffers", startTime, err)
+	}()
+
 	c.rateLimit()
+
+	// Apply operation-specific timeout
+	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.ListOffers)
+	defer cancel()
 
 	// /locations uses query parameter authentication
 	reqURL := c.buildURLWithQueryAuth("/locations")
@@ -243,7 +636,7 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]m
 	}
 
 	// Convert each location+GPU combination to a GPUOffer
-	offers := make([]models.GPUOffer, 0)
+	offers = make([]models.GPUOffer, 0)
 	for _, location := range result.Data.Locations {
 		for _, gpu := range location.GPUs {
 			offer := locationGPUToOffer(location, gpu)
@@ -265,8 +658,26 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]m
 //
 // Note: TensorDock's /instances endpoint returns an array directly in the "data"
 // field, not wrapped in {"instances": [...]}.
-func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInstance, error) {
+func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.ProviderInstance, err error) {
+	startTime := time.Now()
+
+	// Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("ListAllInstances", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListAllInstances", startTime, err)
+	}()
+
 	c.rateLimit()
+
+	// Apply operation-specific timeout
+	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.ListInstances)
+	defer cancel()
 
 	reqURL := c.buildURL("/instances")
 
@@ -287,10 +698,12 @@ func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInsta
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusUnauthorized {
+		// Authentication/authorization errors should be returned as errors,
+		// not silently ignored with an empty list
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			return nil, c.handleError(resp, "ListAllInstances")
 		}
-		// Return empty list for other errors (e.g., no instances)
+		// Return empty list for other errors (e.g., no instances, 404)
 		return []provider.ProviderInstance{}, nil
 	}
 
@@ -392,8 +805,26 @@ func (c *Client) instancesToProviderInstances(instances []Instance) []provider.P
 //
 // The create response does NOT include the IP address. You must poll
 // GetInstanceStatus until SSHHost is populated (typically 5-30 seconds).
-func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
+func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (info *provider.InstanceInfo, err error) {
+	startTime := time.Now()
+
+	// Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("CreateInstance", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("CreateInstance", startTime, err)
+	}()
+
 	c.rateLimit()
+
+	// Apply operation-specific timeout (create operations may take longer)
+	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.CreateInstance)
+	defer cancel()
 
 	// Parse offer ID to extract location UUID and GPU name
 	locationID, gpuName, err := parseOfferID(req.OfferID)
@@ -433,6 +864,10 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	// Configure SSH key installation via cloud-init
 	// The ssh_key API field is required but doesn't work, so we use runcmd
 	if req.SSHPublicKey != "" {
+		// Validate SSH public key before using it
+		if err := ValidateSSHPublicKey(req.SSHPublicKey); err != nil {
+			return nil, fmt.Errorf("SSH key validation failed: %w", err)
+		}
 		createReq.Data.Attributes.SSHKey = req.SSHPublicKey
 		createReq.Data.Attributes.CloudInit = buildSSHKeyCloudInit(req.SSHPublicKey)
 	}
@@ -509,8 +944,31 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 // TensorDock instances are billed by the minute, so prompt cleanup is important.
 // This method is idempotent - calling it on an already-deleted instance returns
 // success (HTTP 404 is not treated as an error).
-func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
+func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err error) {
+	startTime := time.Now()
+
+	// Validate instance ID to prevent path traversal and other attacks
+	if err := ValidateInstanceID(instanceID); err != nil {
+		return err
+	}
+
+	// Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("DestroyInstance", startTime, err)
+		return err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("DestroyInstance", startTime, err)
+	}()
+
 	c.rateLimit()
+
+	// Apply operation-specific timeout
+	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.Destroy)
+	defer cancel()
 
 	reqURL := c.buildURL(fmt.Sprintf("/instances/%s", instanceID))
 
@@ -567,8 +1025,31 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
 //	    }
 //	    time.Sleep(5 * time.Second)
 //	}
-func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
+func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (status *provider.InstanceStatus, err error) {
+	startTime := time.Now()
+
+	// Validate instance ID to prevent path traversal and other attacks
+	if err := ValidateInstanceID(instanceID); err != nil {
+		return nil, err
+	}
+
+	// Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
+	}()
+
 	c.rateLimit()
+
+	// Apply operation-specific timeout
+	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.GetStatus)
+	defer cancel()
 
 	reqURL := c.buildURL(fmt.Sprintf("/instances/%s", instanceID))
 
@@ -661,10 +1142,109 @@ func (c *Client) rateLimit() {
 	c.lastRequest = time.Now()
 }
 
+// contextWithTimeout creates a context with an operation-specific timeout.
+// If the parent context already has a deadline earlier than the timeout,
+// the parent's deadline is used instead.
+func (c *Client) contextWithTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	// If parent already has an earlier deadline, don't extend it
+	if deadline, ok := parent.Deadline(); ok {
+		if time.Until(deadline) < timeout {
+			return context.WithCancel(parent)
+		}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+// checkCircuitBreaker returns an error if the circuit breaker is open.
+// If the circuit is open, it also logs the current backoff duration.
+func (c *Client) checkCircuitBreaker() error {
+	if !c.circuitBreaker.allow() {
+		backoff := c.circuitBreaker.getBackoff()
+		c.debugLog("Circuit breaker is open, backoff: %v", backoff)
+		return fmt.Errorf("%w: retry after %v", ErrCircuitOpen, backoff)
+	}
+	return nil
+}
+
+// recordAPIResult records the result of an API call to the circuit breaker.
+// It should be called after each API request completes.
+func (c *Client) recordAPIResult(err error) {
+	if err == nil {
+		c.circuitBreaker.recordSuccess()
+		return
+	}
+
+	// Only count certain errors as failures for the circuit breaker
+	// Don't count validation errors, not found errors, etc.
+	var providerErr *provider.ProviderError
+	if errors.As(err, &providerErr) {
+		// Rate limits and server errors should trigger circuit breaker
+		if providerErr.StatusCode >= 500 || providerErr.StatusCode == 429 {
+			c.circuitBreaker.recordFailure()
+			return
+		}
+	}
+
+	// Network errors should trigger circuit breaker
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		// Don't trigger for context cancellation by caller
+		return
+	}
+
+	// Other network-level errors
+	if strings.Contains(err.Error(), "connection refused") ||
+		strings.Contains(err.Error(), "no such host") ||
+		strings.Contains(err.Error(), "network is unreachable") {
+		c.circuitBreaker.recordFailure()
+	}
+}
+
+// recordAPIMetrics records API call metrics including response time and call count.
+// This should be called after each API request completes.
+func (c *Client) recordAPIMetrics(operation string, startTime time.Time, err error) {
+	duration := time.Since(startTime)
+	metrics.RecordProviderAPIResponseTime("tensordock", operation, duration)
+
+	status := "success"
+	if err != nil {
+		if errors.Is(err, ErrCircuitOpen) {
+			status = "circuit_open"
+		} else {
+			status = "error"
+		}
+	}
+	metrics.RecordProviderAPICall("tensordock", operation, status)
+
+	// Update circuit breaker state metric
+	metrics.UpdateProviderCircuitBreakerState("tensordock", int(c.circuitBreaker.State()))
+}
+
+// maxErrorMessageLength is the maximum length for error messages.
+// Longer messages are truncated to prevent memory issues and log bloat.
+const maxErrorMessageLength = 1000
+
+// sanitizeErrorMessage truncates and cleans error messages for safe logging and storage.
+// - Truncates to maxErrorMessageLength characters
+// - Adds truncation indicator if message was cut
+// - Removes potentially sensitive data patterns
+func sanitizeErrorMessage(message string) string {
+	// Truncate if too long
+	if len(message) > maxErrorMessageLength {
+		message = message[:maxErrorMessageLength] + "... [truncated]"
+	}
+
+	// Clean up common problematic patterns
+	// Remove any embedded newlines that could cause log injection
+	message = strings.ReplaceAll(message, "\n", " ")
+	message = strings.ReplaceAll(message, "\r", " ")
+
+	return message
+}
+
 // handleError converts HTTP error responses to provider errors
 func (c *Client) handleError(resp *http.Response, operation string) error {
 	body, _ := io.ReadAll(resp.Body)
-	message := string(body)
+	message := sanitizeErrorMessage(string(body))
 
 	c.debugLog("%s error (HTTP %d): %s", operation, resp.StatusCode, message)
 
@@ -706,11 +1286,77 @@ func parseOfferID(offerID string) (locationID, gpuName string, err error) {
 	return locationID, gpuName, nil
 }
 
+// ErrInvalidSSHKey is returned when the provided SSH public key is invalid
+var ErrInvalidSSHKey = errors.New("invalid SSH public key")
+
+// ErrInvalidInstanceID is returned when the provided instance ID is invalid
+var ErrInvalidInstanceID = errors.New("invalid instance ID")
+
+// maxInstanceIDLength is the maximum allowed length for instance IDs.
+// TensorDock uses UUIDs (36 chars) but we allow some extra for safety.
+const maxInstanceIDLength = 128
+
+// ValidateInstanceID validates that an instance ID is well-formed.
+// Instance IDs must be:
+//   - Non-empty
+//   - Not exceed maxInstanceIDLength characters
+//   - Not contain path traversal characters
+//
+// Returns nil if valid, or an error describing the validation failure.
+func ValidateInstanceID(instanceID string) error {
+	if instanceID == "" {
+		return fmt.Errorf("%w: empty instance ID", ErrInvalidInstanceID)
+	}
+
+	if len(instanceID) > maxInstanceIDLength {
+		return fmt.Errorf("%w: instance ID too long (max %d characters)", ErrInvalidInstanceID, maxInstanceIDLength)
+	}
+
+	// Check for path traversal attempts
+	if strings.Contains(instanceID, "/") || strings.Contains(instanceID, "\\") {
+		return fmt.Errorf("%w: instance ID contains invalid characters", ErrInvalidInstanceID)
+	}
+
+	// Check for URL-encoded path traversal
+	if strings.Contains(instanceID, "%2f") || strings.Contains(instanceID, "%2F") ||
+		strings.Contains(instanceID, "%5c") || strings.Contains(instanceID, "%5C") {
+		return fmt.Errorf("%w: instance ID contains invalid characters", ErrInvalidInstanceID)
+	}
+
+	return nil
+}
+
+// ValidateSSHPublicKey validates that a string is a valid SSH public key.
+// It uses golang.org/x/crypto/ssh.ParseAuthorizedKey which supports the
+// authorized_keys format (e.g., "ssh-rsa AAAA... comment").
+//
+// Returns nil if valid, or an error describing the validation failure.
+func ValidateSSHPublicKey(publicKey string) error {
+	if publicKey == "" {
+		return fmt.Errorf("%w: empty key", ErrInvalidSSHKey)
+	}
+
+	// Trim whitespace that might cause parsing issues
+	publicKey = strings.TrimSpace(publicKey)
+
+	// ParseAuthorizedKey parses the authorized_keys format which includes
+	// the key type, base64-encoded key data, and optional comment
+	_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(publicKey))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSSHKey, err)
+	}
+
+	return nil
+}
+
 // buildSSHKeyCloudInit creates cloud-init configuration for SSH key installation.
 //
 // TensorDock's ssh_key API field doesn't actually install the key, and the
 // ssh_authorized_keys cloud-init field is unreliable. The only reliable method
 // is using runcmd with base64 encoding to avoid issues with special characters.
+//
+// IMPORTANT: The caller should validate the SSH key using ValidateSSHPublicKey
+// before calling this function.
 func buildSSHKeyCloudInit(publicKey string) *CloudInit {
 	encodedKey := base64.StdEncoding.EncodeToString([]byte(publicKey))
 	return &CloudInit{
@@ -737,12 +1383,14 @@ func (c *Client) parseCreateError(body []byte, statusCode int) error {
 		for i, e := range validationErrors {
 			messages[i] = e.Message
 		}
+		msg := sanitizeErrorMessage(strings.Join(messages, "; "))
 		return provider.NewProviderError("tensordock", "CreateInstance", statusCode,
-			strings.Join(messages, "; "), provider.ErrProviderError)
+			msg, provider.ErrProviderError)
 	}
 
+	msg := sanitizeErrorMessage(string(body))
 	return provider.NewProviderError("tensordock", "CreateInstance", statusCode,
-		string(body), provider.ErrProviderError)
+		msg, provider.ErrProviderError)
 }
 
 // checkBodyForError checks if a successful HTTP response contains an error in the body
@@ -752,11 +1400,12 @@ func (c *Client) checkBodyForError(body []byte) error {
 		Error  string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Status >= 400 {
+		msg := sanitizeErrorMessage(errResp.Error)
 		if isStaleInventoryErrorMessage(errResp.Error) {
 			return provider.NewProviderError("tensordock", "CreateInstance", errResp.Status,
-				errResp.Error, provider.ErrOfferStaleInventory)
+				msg, provider.ErrOfferStaleInventory)
 		}
-		return fmt.Errorf("TensorDock CreateInstance failed: %s", errResp.Error)
+		return fmt.Errorf("TensorDock CreateInstance failed: %s", msg)
 	}
 	return nil
 }
@@ -786,13 +1435,55 @@ func locationGPUToOffer(loc Location, gpu LocationGPU) models.GPUOffer {
 // isStaleInventoryErrorMessage checks if an error indicates stale inventory data.
 // These errors occur when TensorDock's /locations shows availability but
 // the actual resources aren't available for provisioning.
+//
+// Extended patterns cover:
+//   - Direct unavailability messages (no nodes, insufficient capacity)
+//   - Resource constraints (GPU unavailable, memory limits)
+//   - Datacenter/location issues (temporarily unavailable, maintenance)
+//   - Demand-related issues (high demand, sold out)
 func isStaleInventoryErrorMessage(msg string) bool {
 	staleIndicators := []string{
+		// Direct unavailability
 		"no available nodes",
 		"insufficient capacity",
 		"not enough capacity",
 		"resource unavailable",
 		"out of stock",
+		"no nodes available",
+		"nodes unavailable",
+
+		// GPU-specific
+		"gpu unavailable",
+		"gpu not available",
+		"no gpus available",
+		"requested gpu",       // "requested GPU not available"
+		"gpu capacity",        // "GPU capacity exceeded"
+		"no matching gpu",
+		"gpu is not available",
+
+		// Location/datacenter issues
+		"datacenter unavailable",
+		"location unavailable",
+		"temporarily unavailable",
+		"under maintenance",
+		"region unavailable",
+		"site unavailable",
+
+		// Demand-related
+		"high demand",
+		"sold out",
+		"fully allocated",
+		"at capacity",
+		"no capacity",
+		"capacity limit",
+		"cannot allocate",
+		"allocation failed",
+
+		// Resource limits
+		"resource limit",
+		"quota exceeded",
+		"limit reached",
+		"maximum",  // covers "maximum reached", "maximum instances reached"
 	}
 	msgLower := strings.ToLower(msg)
 	for _, indicator := range staleIndicators {

@@ -31,8 +31,15 @@ const (
 	// Increased to 8 minutes to accommodate TensorDock cloud-init delays
 	DefaultSSHVerifyTimeout = 8 * time.Minute
 
-	// DefaultSSHCheckInterval is how often to retry SSH connection
+	// DefaultSSHCheckInterval is the initial interval for SSH polling
+	// This will increase with progressive backoff
 	DefaultSSHCheckInterval = 15 * time.Second
+
+	// DefaultSSHMaxInterval is the maximum interval between SSH poll attempts
+	DefaultSSHMaxInterval = 60 * time.Second
+
+	// DefaultSSHBackoffMultiplier is the multiplier for progressive backoff
+	DefaultSSHBackoffMultiplier = 1.5
 
 	// DefaultAPIVerifyTimeout is how long to wait for API verification (entrypoint mode)
 	DefaultAPIVerifyTimeout = 10 * time.Minute
@@ -49,6 +56,49 @@ const (
 	// DefaultSSHKeyBits is the RSA key size
 	DefaultSSHKeyBits = 4096
 )
+
+// ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
+// This reduces load on providers when instances take a long time to become ready.
+type ProgressiveBackoff struct {
+	Initial    time.Duration // Initial interval
+	Max        time.Duration // Maximum interval cap
+	Multiplier float64       // Multiplier for each step
+	current    time.Duration // Current interval
+}
+
+// NewProgressiveBackoff creates a new progressive backoff with sensible defaults
+func NewProgressiveBackoff(initial, max time.Duration, multiplier float64) *ProgressiveBackoff {
+	return &ProgressiveBackoff{
+		Initial:    initial,
+		Max:        max,
+		Multiplier: multiplier,
+		current:    initial,
+	}
+}
+
+// Next returns the current interval and advances to the next one
+func (pb *ProgressiveBackoff) Next() time.Duration {
+	current := pb.current
+
+	// Calculate next interval
+	next := time.Duration(float64(pb.current) * pb.Multiplier)
+	if next > pb.Max {
+		next = pb.Max
+	}
+	pb.current = next
+
+	return current
+}
+
+// Reset resets the backoff to the initial interval
+func (pb *ProgressiveBackoff) Reset() {
+	pb.current = pb.Initial
+}
+
+// Current returns the current interval without advancing
+func (pb *ProgressiveBackoff) Current() time.Duration {
+	return pb.current
+}
 
 // SessionStore defines the interface for session persistence
 type SessionStore interface {
@@ -83,9 +133,11 @@ type Service struct {
 	deploymentID string
 
 	// SSH verification
-	sshVerifier      SSHVerifier
-	sshVerifyTimeout time.Duration
-	sshCheckInterval time.Duration
+	sshVerifier          SSHVerifier
+	sshVerifyTimeout     time.Duration
+	sshCheckInterval     time.Duration
+	sshMaxInterval       time.Duration
+	sshBackoffMultiplier float64
 
 	// API verification (for entrypoint mode)
 	httpVerifier     HTTPVerifier
@@ -122,10 +174,24 @@ func WithSSHVerifyTimeout(d time.Duration) Option {
 	}
 }
 
-// WithSSHCheckInterval sets how often to retry SSH connection
+// WithSSHCheckInterval sets the initial interval for SSH connection retries
 func WithSSHCheckInterval(d time.Duration) Option {
 	return func(s *Service) {
 		s.sshCheckInterval = d
+	}
+}
+
+// WithSSHMaxInterval sets the maximum interval between SSH poll attempts
+func WithSSHMaxInterval(d time.Duration) Option {
+	return func(s *Service) {
+		s.sshMaxInterval = d
+	}
+}
+
+// WithSSHBackoffMultiplier sets the multiplier for progressive backoff
+func WithSSHBackoffMultiplier(m float64) Option {
+	return func(s *Service) {
+		s.sshBackoffMultiplier = m
 	}
 }
 
@@ -167,17 +233,19 @@ func WithAPICheckInterval(d time.Duration) Option {
 // New creates a new provisioner service
 func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Service {
 	s := &Service{
-		store:            store,
-		providers:        providers,
-		logger:           slog.Default(),
-		deploymentID:     uuid.New().String(),
-		sshVerifyTimeout: DefaultSSHVerifyTimeout,
-		sshCheckInterval: DefaultSSHCheckInterval,
-		apiVerifyTimeout: DefaultAPIVerifyTimeout,
-		apiCheckInterval: DefaultAPICheckInterval,
-		destroyTimeout:   DefaultDestroyTimeout,
-		destroyRetries:   DefaultDestroyRetries,
-		sshKeyBits:       DefaultSSHKeyBits,
+		store:                store,
+		providers:            providers,
+		logger:               slog.Default(),
+		deploymentID:         uuid.New().String(),
+		sshVerifyTimeout:     DefaultSSHVerifyTimeout,
+		sshCheckInterval:     DefaultSSHCheckInterval,
+		sshMaxInterval:       DefaultSSHMaxInterval,
+		sshBackoffMultiplier: DefaultSSHBackoffMultiplier,
+		apiVerifyTimeout:     DefaultAPIVerifyTimeout,
+		apiCheckInterval:     DefaultAPICheckInterval,
+		destroyTimeout:       DefaultDestroyTimeout,
+		destroyRetries:       DefaultDestroyRetries,
+		sshKeyBits:           DefaultSSHKeyBits,
 	}
 
 	for _, opt := range opts {
@@ -368,14 +436,16 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		go s.waitForAPIVerifyAsync(context.Background(), session.ID, prov)
 	} else {
 		// SSH mode: wait for SSH connectivity
-		go s.waitForSSHVerifyAsync(context.Background(), session.ID, prov)
+		// Note: We pass the private key directly because it's not stored in the database
+		go s.waitForSSHVerifyAsync(context.Background(), session.ID, privateKey, prov)
 	}
 
 	return session, nil
 }
 
 // waitForSSHVerifyAsync waits for SSH verification in the background
-func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, prov provider.Provider) {
+// privateKey is passed directly because it's not stored in the database for security
+func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, privateKey string, prov provider.Provider) {
 	logger := s.logger.With(slog.String("session_id", sessionID))
 	logger.Info("waiting for SSH verification")
 
@@ -393,18 +463,25 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 		}
 	}
 
-	// Poll for SSH info and verify connectivity
-	ticker := time.NewTicker(s.sshCheckInterval)
-	defer ticker.Stop()
+	// Create progressive backoff for SSH polling
+	// This reduces provider API load when instances take a long time to be ready
+	backoff := NewProgressiveBackoff(s.sshCheckInterval, s.sshMaxInterval, s.sshBackoffMultiplier)
+
+	// Use a timer instead of ticker for progressive backoff
+	nextInterval := backoff.Next()
+	pollTimer := time.NewTimer(nextInterval)
+	defer pollTimer.Stop()
 
 	timeout := time.NewTimer(s.sshVerifyTimeout)
 	defer timeout.Stop()
 
+	attemptCount := 0
 	for {
 		select {
 		case <-timeout.C:
 			// SSH verification timeout - destroy instance and fail session
-			logger.Error("SSH verification timeout, destroying instance")
+			logger.Error("SSH verification timeout, destroying instance",
+				slog.Int("attempts", attemptCount))
 			session, err := s.store.Get(ctx, sessionID)
 			if err != nil {
 				logger.Error("failed to get session", slog.String("error", err.Error()))
@@ -422,11 +499,22 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 			metrics.RecordSSHVerifyFailure()
 			return
 
-		case <-ticker.C:
+		case <-pollTimer.C:
+			attemptCount++
+
+			// Log the current backoff interval
+			currentInterval := backoff.Current()
+			logger.Debug("SSH poll attempt",
+				slog.Int("attempt", attemptCount),
+				slog.Duration("next_interval", currentInterval))
+
 			// Get current session state
 			session, err := s.store.Get(ctx, sessionID)
 			if err != nil {
 				logger.Error("failed to get session", slog.String("error", err.Error()))
+				// Schedule next poll with progressive backoff
+				nextInterval = backoff.Next()
+				pollTimer.Reset(nextInterval)
 				continue
 			}
 
@@ -441,6 +529,9 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
 				if err != nil {
 					logger.Debug("failed to get instance status", slog.String("error", err.Error()))
+					// Schedule next poll with progressive backoff
+					nextInterval = backoff.Next()
+					pollTimer.Reset(nextInterval)
 					continue
 				}
 				if status.SSHHost != "" {
@@ -457,6 +548,8 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 						logger.Info("SSH info updated",
 							slog.String("ssh_host", session.SSHHost),
 							slog.Int("ssh_port", session.SSHPort))
+						// Reset backoff when we get new SSH info
+						backoff.Reset()
 					}
 				}
 			}
@@ -467,13 +560,14 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					slog.String("host", session.SSHHost),
 					slog.Int("port", session.SSHPort))
 
-				// Try a single connection attempt
-				err := s.sshVerifier.VerifyOnce(ctx, session.SSHHost, session.SSHPort, session.SSHUser, session.SSHPrivateKey)
+				// Try a single connection attempt using the private key passed to this function
+				err := s.sshVerifier.VerifyOnce(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
 				if err == nil {
 					// SSH verified successfully
 					duration := time.Since(start)
 					logger.Info("SSH verification successful",
-						slog.Duration("duration", duration))
+						slog.Duration("duration", duration),
+						slog.Int("attempts", attemptCount))
 
 					session.Status = models.StatusRunning
 					if err := s.store.Update(ctx, session); err != nil {
@@ -486,6 +580,10 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 
 				logger.Debug("SSH verification attempt failed", slog.String("error", err.Error()))
 			}
+
+			// Schedule next poll with progressive backoff
+			nextInterval = backoff.Next()
+			pollTimer.Reset(nextInterval)
 
 		case <-ctx.Done():
 			logger.Warn("context cancelled while waiting for SSH verification")

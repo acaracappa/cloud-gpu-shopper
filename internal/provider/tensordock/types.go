@@ -276,13 +276,16 @@ func normalizeGPUName(name string) string {
 }
 
 // parseVRAMFromName extracts VRAM in GB from a GPU display name.
+// The search is case-insensitive, matching GB, Gb, gb, etc.
 // Examples:
 //   - "NVIDIA GeForce RTX 4090 PCIe 24GB" -> 24
 //   - "NVIDIA A100 PCIe 80GB" -> 80
+//   - "RTX 3090 24gb" -> 24
+//   - "Some GPU 48Gb" -> 48
 //   - "Some GPU" -> 0 (no VRAM found)
 func parseVRAMFromName(name string) int {
-	// Look for patterns like "24GB", "48GB", etc.
-	re := regexp.MustCompile(`(\d+)\s*GB`)
+	// Look for patterns like "24GB", "48GB", "24gb", "48Gb", etc. (case-insensitive)
+	re := regexp.MustCompile(`(?i)(\d+)\s*GB`)
 	matches := re.FindStringSubmatch(name)
 	if len(matches) >= 2 {
 		if vram, err := strconv.Atoi(matches[1]); err == nil {
