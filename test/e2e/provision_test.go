@@ -47,7 +47,6 @@ func TestProvisionDestroy(t *testing.T) {
 	sessionID := createResp.Session.ID
 	require.NotEmpty(t, sessionID, "Session ID should not be empty")
 	require.NotEmpty(t, createResp.SSHPrivateKey, "SSH private key should be provided")
-	require.NotEmpty(t, createResp.AgentToken, "Agent token should be provided")
 	t.Logf("Created session: %s", sessionID)
 
 	// Cleanup on test end
@@ -59,34 +58,26 @@ func TestProvisionDestroy(t *testing.T) {
 	assert.Equal(t, consumerID, session.ConsumerID)
 	assert.Contains(t, []string{"pending", "provisioning"}, session.Status)
 
-	// Step 4: Send heartbeat to transition to running (simulates agent startup)
-	t.Log("Step 4: Sending initial heartbeat...")
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Step 5: Wait for running status
-	t.Log("Step 5: Waiting for running status...")
+	// Step 4: Wait for running status (SSH verification completes automatically)
+	t.Log("Step 4: Waiting for running status...")
 	session = env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	assert.Equal(t, "running", session.Status)
 	assert.NotEmpty(t, session.SSHHost, "SSH host should be set")
 	t.Logf("Session running: SSH=%s:%d", session.SSHHost, session.SSHPort)
 
-	// Step 6: Verify session details
-	t.Log("Step 6: Verifying session details...")
+	// Step 5: Verify session details
+	t.Log("Step 5: Verifying session details...")
 	assert.Equal(t, offer.GPUType, session.GPUType)
 	assert.Equal(t, 2, session.ReservationHrs)
 	assert.False(t, session.ExpiresAt.IsZero(), "ExpiresAt should be set")
 	assert.True(t, session.ExpiresAt.After(time.Now()), "ExpiresAt should be in the future")
 
-	// Step 7: Delete session
-	t.Log("Step 7: Deleting session...")
+	// Step 6: Delete session
+	t.Log("Step 6: Deleting session...")
 	env.DeleteSession(t, sessionID)
 
-	// Step 8: Verify stopped status
-	t.Log("Step 8: Verifying stopped status...")
+	// Step 7: Verify stopped status
+	t.Log("Step 7: Verifying stopped status...")
 	session = env.WaitForStatusWithRetry(t, sessionID, "stopped", 30*time.Second)
 	assert.Equal(t, "stopped", session.Status)
 
@@ -117,14 +108,7 @@ func TestProvisionWithStoragePolicy(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Verify session was created
@@ -159,14 +143,7 @@ func TestProvisionWithIdleThreshold(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	session := env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	assert.Equal(t, "running", session.Status)
 
@@ -195,14 +172,7 @@ func TestSignalDone(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Signal done
@@ -236,14 +206,7 @@ func TestExtendSession(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	session := env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	originalExpiry := session.ExpiresAt
 
@@ -273,7 +236,6 @@ func TestMultipleSessions(t *testing.T) {
 
 	consumerID := GenerateConsumerID()
 	var sessionIDs []string
-	var agentTokens []string
 
 	// Create multiple sessions with different offers
 	for i := 0; i < 2; i++ {
@@ -284,22 +246,12 @@ func TestMultipleSessions(t *testing.T) {
 			ReservationHrs: 1,
 		})
 		sessionIDs = append(sessionIDs, createResp.Session.ID)
-		agentTokens = append(agentTokens, createResp.AgentToken)
 		t.Logf("Created session %d: %s", i+1, createResp.Session.ID)
 	}
 
 	defer env.Cleanup(t, sessionIDs...)
 
-	// Send heartbeats for all sessions
-	for i, sessionID := range sessionIDs {
-		env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-			SessionID:  sessionID,
-			AgentToken: agentTokens[i],
-			Status:     "running",
-		})
-	}
-
-	// Wait for all to be running
+	// Wait for all to be running (SSH verification completes automatically)
 	for _, sessionID := range sessionIDs {
 		env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	}

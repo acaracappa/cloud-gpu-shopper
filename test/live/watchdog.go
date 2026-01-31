@@ -23,6 +23,7 @@ type Watchdog struct {
 	timeByProv  map[Provider]time.Duration
 	instances   map[string]InstanceInfo // instanceID -> info
 	diagManager *DiagnosticsManager     // optional diagnostics manager
+	providers   *ProviderFactory        // provider factory for direct API access
 }
 
 // InstanceInfo tracks a live instance for cleanup
@@ -42,7 +43,15 @@ func NewWatchdog(config *TestConfig) *Watchdog {
 		spendByProv: make(map[Provider]float64),
 		timeByProv:  make(map[Provider]time.Duration),
 		instances:   make(map[string]InstanceInfo),
+		providers:   NewProviderFactory(config),
 	}
+}
+
+// SetProviderFactory sets the provider factory for direct API access
+func (w *Watchdog) SetProviderFactory(pf *ProviderFactory) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.providers = pf
 }
 
 // SetDiagnosticsManager sets the diagnostics manager for automatic collection
@@ -50,6 +59,13 @@ func (w *Watchdog) SetDiagnosticsManager(dm *DiagnosticsManager) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.diagManager = dm
+}
+
+// GetProviderFactory returns the provider factory for direct API access
+func (w *Watchdog) GetProviderFactory() *ProviderFactory {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.providers
 }
 
 // Start begins watchdog monitoring with a parent context
@@ -257,22 +273,41 @@ func (w *Watchdog) cleanupAllInstances() {
 
 	log.Printf("WATCHDOG: Cleaning up %d instances...", len(instances))
 
+	// Use a timeout for cleanup operations
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	for _, info := range instances {
 		log.Printf("WATCHDOG: Force destroying instance %s (session=%s, provider=%s)",
 			info.InstanceID, info.SessionID, info.Provider)
 
-		// Try to destroy via API
-		if err := forceDestroyInstance(info.SessionID); err != nil {
-			log.Printf("WATCHDOG: Failed to destroy session %s: %v", info.SessionID, err)
+		// Try to destroy directly via provider API
+		if err := w.forceDestroyInstance(ctx, info); err != nil {
+			log.Printf("WATCHDOG: Failed to destroy instance %s: %v", info.InstanceID, err)
+		} else {
+			log.Printf("WATCHDOG: Successfully destroyed instance %s", info.InstanceID)
 		}
 	}
 
 	log.Println("WATCHDOG: Cleanup complete")
 }
 
-// forceDestroyInstance destroys an instance via the shopper API
-func forceDestroyInstance(sessionID string) error {
-	// This will be implemented in helpers.go
+// forceDestroyInstance destroys an instance directly via the provider API.
+// This is a fallback when the HTTP API is unavailable.
+func (w *Watchdog) forceDestroyInstance(ctx context.Context, info InstanceInfo) error {
+	if w.providers == nil {
+		return fmt.Errorf("provider factory not initialized")
+	}
+
+	prov, err := w.providers.GetProvider(info.Provider)
+	if err != nil {
+		return fmt.Errorf("failed to get provider %s: %w", info.Provider, err)
+	}
+
+	if err := prov.DestroyInstance(ctx, info.InstanceID); err != nil {
+		return fmt.Errorf("failed to destroy instance %s: %w", info.InstanceID, err)
+	}
+
 	return nil
 }
 

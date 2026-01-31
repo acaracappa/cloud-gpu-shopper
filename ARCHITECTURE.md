@@ -32,9 +32,9 @@ Cloud GPU Shopper is a Go service that provides unified inventory and orchestrat
 │  │  │  Service    │ │   Service   │ │   Manager   │ │   Tracker   │ │   │
 │  │  │             │ │             │ │             │ │             │ │   │
 │  │  │ - Fetch     │ │ - Create    │ │ - Timers    │ │ - Sessions  │ │   │
-│  │  │ - Cache     │ │ - Deploy    │ │ - Heartbeat │ │ - Consumers │ │   │
+│  │  │ - Cache     │ │ - Deploy    │ │ - SSH Check │ │ - Consumers │ │   │
 │  │  │ - Filter    │ │ - Teardown  │ │ - Orphans   │ │ - Alerts    │ │   │
-│  │  │ - Adaptive  │ │ - Creds     │ │ - Idle      │ │ - Webhooks  │ │   │
+│  │  │ - Adaptive  │ │ - Creds     │ │ - Hard Max  │ │ - Webhooks  │ │   │
 │  │  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └─────────────┘ │   │
 │  │         │               │               │                        │   │
 │  └─────────┼───────────────┼───────────────┼────────────────────────┘   │
@@ -63,29 +63,15 @@ Cloud GPU Shopper is a Go service that provides unified inventory and orchestrat
 └─────────────────────────────────────────────────────────────────────────┘
 
                                     │
-                     SSH + Container Deployment
+                            SSH Verification
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         GPU NODE (Remote)                                │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                     NODE AGENT (Docker)                           │   │
-│  │                                                                   │   │
-│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ │   │
-│  │  │  LLM Proxy  │ │ File Server │ │ ML Command  │ │  Heartbeat  │ │   │
-│  │  │             │ │             │ │   Handler   │ │  + Status   │ │   │
-│  │  │ POST /chat  │ │ POST/GET    │ │ POST /cmd   │ │ GET /health │ │   │
-│  │  │             │ │ /files/*    │ │             │ │             │ │   │
-│  │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘ │   │
-│  │                                                                   │   │
-│  │  ┌─────────────────────────────────────────────────────────────┐ │   │
-│  │  │                    Idle Detector                             │ │   │
-│  │  │  - Track last activity                                       │ │   │
-│  │  │  - Report idle status in heartbeat                           │ │   │
-│  │  └─────────────────────────────────────────────────────────────┘ │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
+│  Provider's base image with SSH access enabled                          │
+│  (Shopper verifies SSH connectivity, consumer runs their workloads)     │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                 GPU WORKLOAD (Consumer's)                         │   │
@@ -104,9 +90,7 @@ cloud-gpu-shopper/
 ├── cmd/
 │   ├── server/           # Main API server
 │   │   └── main.go
-│   ├── cli/              # CLI tool
-│   │   └── main.go
-│   └── agent/            # Node agent (deployed to GPU nodes)
+│   └── cli/              # CLI tool
 │       └── main.go
 │
 ├── internal/
@@ -128,7 +112,10 @@ cloud-gpu-shopper/
 │   │   ├── manager.go
 │   │   ├── timer.go
 │   │   ├── orphan.go
-│   │   └── idle.go
+│   │   └── reconciler.go
+│   │
+│   ├── ssh/              # SSH verification
+│   │   └── verifier.go
 │   │
 │   ├── cost/             # Cost tracking
 │   │   ├── tracker.go
@@ -150,7 +137,7 @@ cloud-gpu-shopper/
 │       ├── costs.go
 │       └── migrations.go
 │
-├── pkg/                  # Public packages (shared with agent)
+├── pkg/                  # Public packages
 │   ├── models/           # Shared data models
 │   │   ├── gpu.go
 │   │   ├── session.go
@@ -158,22 +145,8 @@ cloud-gpu-shopper/
 │   └── client/           # Go client for the API
 │       └── client.go
 │
-├── agent/                # Node agent code
-│   ├── api/
-│   │   ├── handlers.go
-│   │   └── routes.go
-│   ├── llm/
-│   │   └── proxy.go
-│   ├── files/
-│   │   └── server.go
-│   ├── ml/
-│   │   └── command.go
-│   └── heartbeat/
-│       └── heartbeat.go
-│
 ├── deploy/
 │   ├── Dockerfile.server
-│   ├── Dockerfile.agent
 │   └── docker-compose.yml
 │
 ├── scripts/
@@ -225,17 +198,14 @@ type Session struct {
     SSHHost         string        `json:"ssh_host"`
     SSHPort         int           `json:"ssh_port"`
     SSHUser         string        `json:"ssh_user"`
-    SSHKey          string        `json:"ssh_key,omitempty"`  // Private key (only returned once)
-    AgentEndpoint   string        `json:"agent_endpoint"`
-    AgentToken      string        `json:"agent_token,omitempty"`
+    SSHPrivateKey   string        `json:"ssh_private_key,omitempty"`  // Private key (only returned once)
+    SSHPublicKey    string        `json:"ssh_public_key,omitempty"`
     WorkloadType    string        `json:"workload_type"`  // "llm", "training", "batch"
     ReservationHrs  int           `json:"reservation_hours"`
     HardMaxOverride bool          `json:"hard_max_override"`
     PricePerHour    float64       `json:"price_per_hour"`
     CreatedAt       time.Time     `json:"created_at"`
     ExpiresAt       time.Time     `json:"expires_at"`
-    LastHeartbeat   time.Time     `json:"last_heartbeat"`
-    IdleThreshold   int           `json:"idle_threshold_minutes"`  // 0 = disabled
     StoragePolicy   string        `json:"storage_policy"`  // "preserve" | "destroy"
 }
 
@@ -309,10 +279,9 @@ type OfferFilter struct {
 
 type CreateInstanceRequest struct {
     OfferID      string
+    SessionID    string
     SSHPublicKey string
-    DockerImage  string            // Our agent image
-    EnvVars      map[string]string // Agent config
-    OnStartCmd   string            // Startup command
+    Tags         InstanceTags
 }
 
 type InstanceInfo struct {
@@ -365,7 +334,6 @@ func (lm *LifecycleManager) Run(ctx context.Context) {
         case <-ticker.C:
             lm.checkReservations()  // Check expired reservations
             lm.checkOrphans()       // Detect orphaned instances
-            lm.checkIdleSessions()  // Check idle threshold
             lm.checkHardMax()       // Enforce 12-hour limit
         case <-ctx.Done():
             return
@@ -446,15 +414,12 @@ inventory:
 lifecycle:
   check_interval: 60s
   hard_max_hours: 12
-  default_idle_threshold: 0  # Disabled by default
-  heartbeat_timeout: 5m
   orphan_grace_period: 15m
   reconciliation_interval: 5m
 
-agent:
-  docker_image: "ghcr.io/your-org/gpu-shopper-agent:latest"
-  default_port: 8081
-  self_destruct_grace: 30m
+ssh:
+  verify_timeout: 5m
+  check_interval: 15s
 ```
 
 ---
@@ -537,18 +502,9 @@ func (p *Provisioner) CreateSession(ctx context.Context, req CreateSessionReques
         return nil, err
     }
 
-    // PHASE 4: Wait for agent heartbeat
-    if err := p.waitForHeartbeat(ctx, session, 5*time.Minute); err != nil {
-        // Agent didn't come up - destroy and fail
-        p.provider.DestroyInstance(ctx, instance.ProviderInstanceID)
-        session.Status = StatusFailed
-        session.Error = "Agent failed to start: " + err.Error()
-        p.store.UpdateSession(session)
-        return nil, err
-    }
+    // PHASE 4: Verify SSH connectivity (async)
+    go p.waitForSSHVerifyAsync(ctx, session)
 
-    session.Status = StatusRunning
-    p.store.UpdateSession(session)
     return session, nil
 }
 ```
@@ -707,7 +663,7 @@ func (s *Server) Start(ctx context.Context) error {
             s.store.UpdateSession(session)
         } else if status.Running {
             if session.Status == StatusProvisioning {
-                // Check for heartbeat, maybe it's actually running
+                // Verify SSH works, then mark as running
                 session.Status = StatusRunning
             } else {
                 // Was stopping - retry destroy
@@ -728,55 +684,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 ```
 
-### 6. Agent Self-Destruct Timer
-
-The node agent has an independent safety mechanism:
-
-```go
-// In agent/main.go
-func main() {
-    expiresAt := parseExpiresAt(os.Getenv("SHOPPER_EXPIRES_AT"))
-    gracePeriod := parseDuration(os.Getenv("SHOPPER_SELF_DESTRUCT_GRACE"), 30*time.Minute)
-
-    selfDestructAt := expiresAt.Add(gracePeriod)
-
-    log.Info("Agent starting",
-        "expires_at", expiresAt,
-        "self_destruct_at", selfDestructAt,
-    )
-
-    // Start self-destruct timer (independent of shopper connectivity)
-    go func() {
-        timer := time.NewTimer(time.Until(selfDestructAt))
-        <-timer.C
-        log.Error("SELF-DESTRUCT: Expiration time reached, shutting down")
-        exec.Command("shutdown", "-h", "now").Run()
-    }()
-
-    // Start heartbeat with shopper-unreachable failsafe
-    go func() {
-        unreachableCount := 0
-        for {
-            if err := sendHeartbeat(); err != nil {
-                unreachableCount++
-                log.Warn("Heartbeat failed", "consecutive_failures", unreachableCount)
-
-                if unreachableCount >= 60 { // 30 minutes at 30s interval
-                    log.Error("SELF-DESTRUCT: Shopper unreachable for 30 minutes")
-                    exec.Command("shutdown", "-h", "now").Run()
-                }
-            } else {
-                unreachableCount = 0
-            }
-            time.Sleep(30 * time.Second)
-        }
-    }()
-
-    // ... rest of agent startup
-}
-```
-
-### 7. Enhanced Directory Structure
+### 6. Enhanced Directory Structure
 
 Updated to include reconciliation and safety systems:
 
@@ -786,16 +694,17 @@ internal/
 │   ├── manager.go           # Main lifecycle manager
 │   ├── timer.go             # Timer-based checks
 │   ├── orphan.go            # Orphan detection (DB-based)
-│   ├── reconciler.go        # NEW: Provider reconciliation
-│   ├── recovery.go          # NEW: Startup recovery
-│   └── idle.go              # Idle detection
+│   ├── reconciler.go        # Provider reconciliation
+│   └── recovery.go          # Startup recovery
 ├── provisioner/
 │   ├── service.go           # Two-phase provisioning
-│   ├── destroyer.go         # NEW: Verified destruction
+│   ├── destroyer.go         # Verified destruction
 │   └── types.go
+├── ssh/
+│   └── verifier.go          # SSH verification
 ```
 
-### 8. Observability Requirements
+### 7. Observability Requirements
 
 Mandatory metrics for safety monitoring:
 
@@ -815,9 +724,11 @@ var (
     ReconciliationMismatches = prometheus.NewCounter(
         prometheus.CounterOpts{Name: "gpu_reconciliation_mismatches_total"},
     )
-    HeartbeatAge = prometheus.NewGaugeVec(
-        prometheus.GaugeOpts{Name: "gpu_heartbeat_age_seconds"},
-        []string{"session_id"},
+    SSHVerifyDuration = prometheus.NewHistogram(
+        prometheus.HistogramOpts{Name: "gpu_ssh_verify_duration_seconds"},
+    )
+    SSHVerifyFailures = prometheus.NewCounter(
+        prometheus.CounterOpts{Name: "gpu_ssh_verify_failures_total"},
     )
     ProviderAPIErrors = prometheus.NewCounterVec(
         prometheus.CounterOpts{Name: "gpu_provider_api_errors_total"},
@@ -826,12 +737,12 @@ var (
 )
 ```
 
-### 9. Critical Alerts
+### 8. Critical Alerts
 
 | Alert | Condition | Severity |
 |-------|-----------|----------|
 | OrphanDetected | `gpu_orphans_detected_total` increases | Critical |
 | DestroyFailed | `gpu_destroy_failures_total` increases | Critical |
 | ReconciliationMismatch | `gpu_reconciliation_mismatches_total` increases | Critical |
-| HeartbeatStale | `gpu_heartbeat_age_seconds > 1800` | Warning |
+| SSHVerifyFailed | `gpu_ssh_verify_failures_total` increases | Warning |
 | ProviderAPIDown | `gpu_provider_api_errors_total` rate > 10/5m | Warning |

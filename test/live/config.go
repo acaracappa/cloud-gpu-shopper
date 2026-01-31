@@ -43,10 +43,10 @@ type TestConfig struct {
 // DefaultTestConfig returns the default configuration for live tests
 func DefaultTestConfig() *TestConfig {
 	cfg := &TestConfig{
-		MaxTotalSpendUSD:   5.00,  // Increased for agent testing
-		MaxTotalRuntime:    90 * time.Minute, // Extended for agent tests
-		MaxPerProviderUSD:  2.50,  // Increased for agent testing
-		MaxPerProviderTime: 45 * time.Minute, // Extended for agent tests
+		MaxTotalSpendUSD:   5.00,
+		MaxTotalRuntime:    90 * time.Minute,
+		MaxPerProviderUSD:  2.50,
+		MaxPerProviderTime: 45 * time.Minute,
 		ServerURL:          getEnvOrDefault("SHOPPER_URL", "http://localhost:8080"),
 		Providers:          make(map[Provider]ProviderConfig),
 	}

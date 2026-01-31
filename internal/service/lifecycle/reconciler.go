@@ -368,7 +368,6 @@ func (r *Reconciler) handleGhost(ctx context.Context, session *models.Session) {
 			"provider", session.Provider)
 
 		metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusStopped))
-		metrics.RemoveHeartbeatAge(session.ID)
 
 		r.metrics.mu.Lock()
 		r.metrics.GhostsFixed++

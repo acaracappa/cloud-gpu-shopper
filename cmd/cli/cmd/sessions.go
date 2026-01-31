@@ -187,10 +187,6 @@ func runSessionsGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  ssh -p %d %s@%s\n", session.SSHPort, session.SSHUser, session.SSHHost)
 	}
 
-	if session.AgentEndpoint != "" {
-		fmt.Printf("\nAgent Endpoint: %s\n", session.AgentEndpoint)
-	}
-
 	if session.Error != "" {
 		fmt.Printf("\nError: %s\n", session.Error)
 	}

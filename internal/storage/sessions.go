@@ -26,18 +26,16 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 			id, consumer_id, provider, provider_instance_id, offer_id,
 			gpu_type, gpu_count, status, error,
 			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			agent_endpoint, agent_token,
 			workload_type, reservation_hours, hard_max_override,
 			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, last_heartbeat, stopped_at
+			price_per_hour, created_at, expires_at, stopped_at
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?,
 			?, ?, ?,
 			?, ?,
-			?, ?, ?, ?, ?
+			?, ?, ?, ?
 		)
 	`
 
@@ -45,10 +43,9 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 		session.ID, session.ConsumerID, session.Provider, session.ProviderID, session.OfferID,
 		session.GPUType, session.GPUCount, session.Status, session.Error,
 		session.SSHHost, session.SSHPort, session.SSHUser, session.SSHPublicKey,
-		session.AgentEndpoint, session.AgentToken,
 		session.WorkloadType, session.ReservationHrs, session.HardMaxOverride,
 		session.IdleThreshold, session.StoragePolicy,
-		session.PricePerHour, session.CreatedAt, session.ExpiresAt, nullTime(session.LastHeartbeat), nullTime(session.StoppedAt),
+		session.PricePerHour, session.CreatedAt, session.ExpiresAt, nullTime(session.StoppedAt),
 	)
 
 	if err != nil {
@@ -65,27 +62,25 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*models.Session, err
 			id, consumer_id, provider, provider_instance_id, offer_id,
 			gpu_type, gpu_count, status, error,
 			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			agent_endpoint, agent_token,
 			workload_type, reservation_hours, hard_max_override,
 			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, last_heartbeat, last_idle_seconds, stopped_at
+			price_per_hour, created_at, expires_at, stopped_at
 		FROM sessions
 		WHERE id = ?
 	`
 
 	session := &models.Session{}
-	var lastHeartbeat, stoppedAt sql.NullTime
-	var providerID, sshHost, sshUser, sshPublicKey, agentEndpoint, agentToken, errorStr sql.NullString
+	var stoppedAt sql.NullTime
+	var providerID, sshHost, sshUser, sshPublicKey, errorStr sql.NullString
 	var sshPort sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
 		&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
 		&sshHost, &sshPort, &sshUser, &sshPublicKey,
-		&agentEndpoint, &agentToken,
 		&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
 		&session.IdleThreshold, &session.StoragePolicy,
-		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &lastHeartbeat, &session.LastIdleSeconds, &stoppedAt,
+		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &stoppedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -101,12 +96,7 @@ func (s *SessionStore) Get(ctx context.Context, id string) (*models.Session, err
 	session.SSHPort = int(sshPort.Int64)
 	session.SSHUser = sshUser.String
 	session.SSHPublicKey = sshPublicKey.String
-	session.AgentEndpoint = agentEndpoint.String
-	session.AgentToken = agentToken.String
 	session.Error = errorStr.String
-	if lastHeartbeat.Valid {
-		session.LastHeartbeat = lastHeartbeat.Time
-	}
 	if stoppedAt.Valid {
 		session.StoppedAt = stoppedAt.Time
 	}
@@ -124,11 +114,9 @@ func (s *SessionStore) Update(ctx context.Context, session *models.Session) erro
 			ssh_host = ?,
 			ssh_port = ?,
 			ssh_user = ?,
-			agent_endpoint = ?,
 			hard_max_override = ?,
 			reservation_hours = ?,
 			expires_at = ?,
-			last_heartbeat = ?,
 			stopped_at = ?
 		WHERE id = ?
 	`
@@ -140,11 +128,9 @@ func (s *SessionStore) Update(ctx context.Context, session *models.Session) erro
 		session.SSHHost,
 		session.SSHPort,
 		session.SSHUser,
-		session.AgentEndpoint,
 		session.HardMaxOverride,
 		session.ReservationHrs,
 		session.ExpiresAt,
-		nullTime(session.LastHeartbeat),
 		nullTime(session.StoppedAt),
 		session.ID,
 	)
@@ -171,10 +157,9 @@ func (s *SessionStore) List(ctx context.Context, filter SessionFilter) ([]*model
 			id, consumer_id, provider, provider_instance_id, offer_id,
 			gpu_type, gpu_count, status, error,
 			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			agent_endpoint, agent_token,
 			workload_type, reservation_hours, hard_max_override,
 			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, last_heartbeat, last_idle_seconds, stopped_at
+			price_per_hour, created_at, expires_at, stopped_at
 		FROM sessions
 		WHERE 1=1
 	`
@@ -225,18 +210,17 @@ func (s *SessionStore) List(ctx context.Context, filter SessionFilter) ([]*model
 	var sessions []*models.Session
 	for rows.Next() {
 		session := &models.Session{}
-		var lastHeartbeat, stoppedAt sql.NullTime
-		var providerID, sshHost, sshUser, sshPublicKey, agentEndpoint, agentToken, errorStr sql.NullString
+		var stoppedAt sql.NullTime
+		var providerID, sshHost, sshUser, sshPublicKey, errorStr sql.NullString
 		var sshPort sql.NullInt64
 
 		err := rows.Scan(
 			&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
 			&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
 			&sshHost, &sshPort, &sshUser, &sshPublicKey,
-			&agentEndpoint, &agentToken,
 			&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
 			&session.IdleThreshold, &session.StoragePolicy,
-			&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &lastHeartbeat, &session.LastIdleSeconds, &stoppedAt,
+			&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &stoppedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
@@ -248,12 +232,7 @@ func (s *SessionStore) List(ctx context.Context, filter SessionFilter) ([]*model
 		session.SSHPort = int(sshPort.Int64)
 		session.SSHUser = sshUser.String
 		session.SSHPublicKey = sshPublicKey.String
-		session.AgentEndpoint = agentEndpoint.String
-		session.AgentToken = agentToken.String
 		session.Error = errorStr.String
-		if lastHeartbeat.Valid {
-			session.LastHeartbeat = lastHeartbeat.Time
-		}
 		if stoppedAt.Valid {
 			session.StoppedAt = stoppedAt.Time
 		}
@@ -304,46 +283,6 @@ func (s *SessionStore) GetSessionsByStatus(ctx context.Context, statuses ...mode
 	})
 }
 
-// UpdateHeartbeat updates the last heartbeat time for a session
-func (s *SessionStore) UpdateHeartbeat(ctx context.Context, id string, heartbeatTime time.Time) error {
-	query := `UPDATE sessions SET last_heartbeat = ? WHERE id = ?`
-
-	result, err := s.db.ExecContext(ctx, query, heartbeatTime, id)
-	if err != nil {
-		return fmt.Errorf("failed to update heartbeat: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return ErrNotFound
-	}
-
-	return nil
-}
-
-// UpdateHeartbeatWithIdle updates the last heartbeat time and idle seconds for a session
-func (s *SessionStore) UpdateHeartbeatWithIdle(ctx context.Context, id string, heartbeatTime time.Time, idleSeconds int) error {
-	query := `UPDATE sessions SET last_heartbeat = ?, last_idle_seconds = ? WHERE id = ?`
-
-	result, err := s.db.ExecContext(ctx, query, heartbeatTime, idleSeconds, id)
-	if err != nil {
-		return fmt.Errorf("failed to update heartbeat with idle: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return ErrNotFound
-	}
-
-	return nil
-}
-
 // SessionFilter defines criteria for filtering sessions
 type SessionFilter struct {
 	ConsumerID        string
@@ -383,10 +322,9 @@ func (s *SessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, c
 			id, consumer_id, provider, provider_instance_id, offer_id,
 			gpu_type, gpu_count, status, error,
 			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			agent_endpoint, agent_token,
 			workload_type, reservation_hours, hard_max_override,
 			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, last_heartbeat, last_idle_seconds, stopped_at
+			price_per_hour, created_at, expires_at, stopped_at
 		FROM sessions
 		WHERE consumer_id = ? AND offer_id = ?
 		  AND status IN ('pending', 'provisioning', 'running')
@@ -395,18 +333,17 @@ func (s *SessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, c
 	`
 
 	session := &models.Session{}
-	var lastHeartbeat, stoppedAt sql.NullTime
-	var providerID, sshHost, sshUser, sshPublicKey, agentEndpoint, agentToken, errorStr sql.NullString
+	var stoppedAt sql.NullTime
+	var providerID, sshHost, sshUser, sshPublicKey, errorStr sql.NullString
 	var sshPort sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx, query, consumerID, offerID).Scan(
 		&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
 		&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
 		&sshHost, &sshPort, &sshUser, &sshPublicKey,
-		&agentEndpoint, &agentToken,
 		&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
 		&session.IdleThreshold, &session.StoragePolicy,
-		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &lastHeartbeat, &session.LastIdleSeconds, &stoppedAt,
+		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &stoppedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -422,12 +359,7 @@ func (s *SessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, c
 	session.SSHPort = int(sshPort.Int64)
 	session.SSHUser = sshUser.String
 	session.SSHPublicKey = sshPublicKey.String
-	session.AgentEndpoint = agentEndpoint.String
-	session.AgentToken = agentToken.String
 	session.Error = errorStr.String
-	if lastHeartbeat.Valid {
-		session.LastHeartbeat = lastHeartbeat.Time
-	}
 	if stoppedAt.Valid {
 		session.StoppedAt = stoppedAt.Time
 	}

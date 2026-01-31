@@ -58,13 +58,18 @@ func (db *DB) Migrate(ctx context.Context) error {
 		}
 	}
 
-	// Run ALTER TABLE migrations (ignore "duplicate column" errors)
-	alterMigrations := []string{
-		migrationIdleTracking,
-		migrationAgentToken,
+	// Run DROP COLUMN migrations to remove unused agent-related columns
+	// These columns were used by the removed Node Agent functionality
+	// DROP COLUMN is supported in SQLite 3.35.0+ (requires no indexes on the column)
+	// We ignore errors for idempotency (column may not exist in new databases)
+	dropColumnMigrations := []string{
+		migrationDropAgentEndpoint,
+		migrationDropAgentToken,
+		migrationDropLastHeartbeat,
+		migrationDropLastIdleSeconds,
 	}
 
-	for _, migration := range alterMigrations {
+	for _, migration := range dropColumnMigrations {
 		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
 	}
 
@@ -103,9 +108,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 	ssh_user TEXT,
 	ssh_public_key TEXT,
 
-	-- Agent connection
-	agent_endpoint TEXT,
-
 	-- Configuration
 	workload_type TEXT NOT NULL,
 	reservation_hours INTEGER NOT NULL,
@@ -119,7 +121,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 	-- Timestamps
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	expires_at DATETIME NOT NULL,
-	last_heartbeat DATETIME,
 	stopped_at DATETIME
 );
 `
@@ -172,10 +173,25 @@ ON sessions(consumer_id, offer_id)
 WHERE status IN ('pending', 'provisioning', 'running');
 `
 
-const migrationIdleTracking = `
-ALTER TABLE sessions ADD COLUMN last_idle_seconds INTEGER NOT NULL DEFAULT 0;
+// Migration to drop unused agent-related columns
+// These columns were part of the removed Node Agent functionality:
+// - agent_endpoint: Was used to store the agent's HTTP endpoint
+// - agent_token: Was used for agent authentication
+// - last_heartbeat: Was used to track agent heartbeats
+// - last_idle_seconds: Was used for idle detection via agent
+
+const migrationDropAgentEndpoint = `
+ALTER TABLE sessions DROP COLUMN agent_endpoint;
 `
 
-const migrationAgentToken = `
-ALTER TABLE sessions ADD COLUMN agent_token TEXT;
+const migrationDropAgentToken = `
+ALTER TABLE sessions DROP COLUMN agent_token;
+`
+
+const migrationDropLastHeartbeat = `
+ALTER TABLE sessions DROP COLUMN last_heartbeat;
+`
+
+const migrationDropLastIdleSeconds = `
+ALTER TABLE sessions DROP COLUMN last_idle_seconds;
 `

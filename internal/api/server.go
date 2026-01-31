@@ -35,6 +35,9 @@ type Server struct {
 	// Configuration
 	host string
 	port int
+
+	// Readiness state
+	ready bool
 }
 
 // Option configures the server
@@ -87,6 +90,17 @@ func New(
 	return s
 }
 
+// SetReady sets the server readiness state
+func (s *Server) SetReady(ready bool) {
+	s.ready = ready
+	s.logger.Info("server readiness changed", slog.Bool("ready", ready))
+}
+
+// IsReady returns whether the server is ready to accept traffic
+func (s *Server) IsReady() bool {
+	return s.ready
+}
+
 // setupRouter configures the Gin router
 func (s *Server) setupRouter() {
 	gin.SetMode(gin.ReleaseMode)
@@ -97,8 +111,9 @@ func (s *Server) setupRouter() {
 	router.Use(s.loggingMiddleware())
 	router.Use(s.recoveryMiddleware())
 
-	// Health endpoint
+	// Health and readiness endpoints
 	router.GET("/health", s.handleHealth)
+	router.GET("/ready", s.handleReady)
 
 	// Prometheus metrics endpoint
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
@@ -121,9 +136,6 @@ func (s *Server) setupRouter() {
 		// Costs
 		v1.GET("/costs", s.handleGetCosts)
 		v1.GET("/costs/summary", s.handleGetCostSummary)
-
-		// Agent endpoints
-		v1.POST("/sessions/:id/heartbeat", s.handleHeartbeat)
 	}
 
 	s.router = router

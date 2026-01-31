@@ -15,7 +15,7 @@ type Config struct {
 	Providers ProvidersConfig `mapstructure:"providers"`
 	Inventory InventoryConfig `mapstructure:"inventory"`
 	Lifecycle LifecycleConfig `mapstructure:"lifecycle"`
-	Agent     AgentConfig     `mapstructure:"agent"`
+	SSH       SSHConfig       `mapstructure:"ssh"`
 	Logging   LoggingConfig   `mapstructure:"logging"`
 }
 
@@ -61,17 +61,17 @@ type InventoryConfig struct {
 type LifecycleConfig struct {
 	CheckInterval          time.Duration `mapstructure:"check_interval"`
 	HardMaxHours           int           `mapstructure:"hard_max_hours"`
-	DefaultIdleThreshold   int           `mapstructure:"default_idle_threshold"`
-	HeartbeatTimeout       time.Duration `mapstructure:"heartbeat_timeout"`
 	OrphanGracePeriod      time.Duration `mapstructure:"orphan_grace_period"`
 	ReconciliationInterval time.Duration `mapstructure:"reconciliation_interval"`
+	StartupSweepEnabled    bool          `mapstructure:"startup_sweep_enabled"`
+	StartupSweepTimeout    time.Duration `mapstructure:"startup_sweep_timeout"`
+	ShutdownTimeout        time.Duration `mapstructure:"shutdown_timeout"`
 }
 
-// AgentConfig holds node agent configuration
-type AgentConfig struct {
-	DockerImage       string        `mapstructure:"docker_image"`
-	DefaultPort       int           `mapstructure:"default_port"`
-	SelfDestructGrace time.Duration `mapstructure:"self_destruct_grace"`
+// SSHConfig holds SSH verification configuration
+type SSHConfig struct {
+	VerifyTimeout time.Duration `mapstructure:"verify_timeout"`
+	CheckInterval time.Duration `mapstructure:"check_interval"`
 }
 
 // LoggingConfig holds logging configuration
@@ -160,15 +160,15 @@ func setDefaults(v *viper.Viper) {
 	// Lifecycle defaults
 	v.SetDefault("lifecycle.check_interval", time.Minute)
 	v.SetDefault("lifecycle.hard_max_hours", 12)
-	v.SetDefault("lifecycle.default_idle_threshold", 0)
-	v.SetDefault("lifecycle.heartbeat_timeout", 5*time.Minute)
 	v.SetDefault("lifecycle.orphan_grace_period", 15*time.Minute)
 	v.SetDefault("lifecycle.reconciliation_interval", 5*time.Minute)
+	v.SetDefault("lifecycle.startup_sweep_enabled", true)
+	v.SetDefault("lifecycle.startup_sweep_timeout", 2*time.Minute)
+	v.SetDefault("lifecycle.shutdown_timeout", 60*time.Second)
 
-	// Agent defaults
-	v.SetDefault("agent.docker_image", "ghcr.io/cloud-gpu-shopper/agent:latest")
-	v.SetDefault("agent.default_port", 8081)
-	v.SetDefault("agent.self_destruct_grace", 30*time.Minute)
+	// SSH verification defaults
+	v.SetDefault("ssh.verify_timeout", 5*time.Minute)
+	v.SetDefault("ssh.check_interval", 15*time.Second)
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")

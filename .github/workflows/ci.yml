@@ -42,7 +42,6 @@ jobs:
       - name: Build all binaries
         run: |
           go build -o gpu-shopper-server ./cmd/server
-          go build -o gpu-shopper-agent ./cmd/agent
           go build -o gpu-shopper-cli ./cmd/cli
 
   lint:

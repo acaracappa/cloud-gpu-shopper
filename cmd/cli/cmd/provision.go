@@ -119,11 +119,6 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	if result.AgentToken != "" {
-		fmt.Printf("Agent Token: %s\n", result.AgentToken)
-		fmt.Println()
-	}
-
 	fmt.Println("Note: The session is provisioning. Check status with:")
 	fmt.Printf("  gpu-shopper sessions get %s\n", result.Session.ID)
 
@@ -134,7 +129,6 @@ func runProvision(cmd *cobra.Command, args []string) error {
 type SessionResponse struct {
 	Session       Session `json:"session"`
 	SSHPrivateKey string  `json:"ssh_private_key,omitempty"`
-	AgentToken    string  `json:"agent_token,omitempty"`
 }
 
 // Session represents a session from the API
@@ -146,11 +140,10 @@ type Session struct {
 	GPUCount      int     `json:"gpu_count"`
 	Status        string  `json:"status"`
 	Error         string  `json:"error,omitempty"`
-	SSHHost       string  `json:"ssh_host,omitempty"`
-	SSHPort       int     `json:"ssh_port,omitempty"`
-	SSHUser       string  `json:"ssh_user,omitempty"`
-	AgentEndpoint string  `json:"agent_endpoint,omitempty"`
-	WorkloadType  string  `json:"workload_type"`
+	SSHHost      string `json:"ssh_host,omitempty"`
+	SSHPort      int    `json:"ssh_port,omitempty"`
+	SSHUser      string `json:"ssh_user,omitempty"`
+	WorkloadType string `json:"workload_type"`
 	PricePerHour  float64 `json:"price_per_hour"`
 	CreatedAt     string  `json:"created_at"`
 	ExpiresAt     string  `json:"expires_at"`

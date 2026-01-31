@@ -19,11 +19,6 @@ jobs:
             goos: linux
             goarch: amd64
 
-          # Agent - Linux only (runs on GPU instances)
-          - binary: agent
-            goos: linux
-            goarch: amd64
-
           # CLI - Multiple platforms
           - binary: cli
             goos: linux

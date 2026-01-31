@@ -14,7 +14,6 @@ A Go service that provides unified inventory and orchestration over commodity GP
 |-----------|---------|----------|
 | API Server | REST API for inventory, sessions, costs | `cmd/server/` |
 | CLI | Operator tool | `cmd/cli/` |
-| Node Agent | Runs on GPU nodes, handles consumer requests | `cmd/agent/` |
 | Providers | Vast.ai, TensorDock adapters | `internal/provider/` |
 
 ## Core Services
@@ -22,8 +21,8 @@ A Go service that provides unified inventory and orchestration over commodity GP
 | Service | Responsibility |
 |---------|---------------|
 | Inventory | Fetch, cache, filter GPU offers |
-| Provisioner | Create/destroy instances, credential handoff |
-| Lifecycle | Timers, orphan detection, idle detection, 12h hard max |
+| Provisioner | Create/destroy instances, credential handoff, SSH verification |
+| Lifecycle | Timers, orphan detection, 12h hard max |
 | Cost | Track hourly costs, per-consumer, alerts |
 
 ## Safety Rules

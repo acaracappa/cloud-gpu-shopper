@@ -8,7 +8,7 @@ type SessionStatus string
 const (
 	StatusPending      SessionStatus = "pending"      // Session created, not yet provisioned
 	StatusProvisioning SessionStatus = "provisioning" // Provider instance being created
-	StatusRunning      SessionStatus = "running"      // Instance running and agent responding
+	StatusRunning      SessionStatus = "running"      // Instance running and SSH accessible
 	StatusStopping     SessionStatus = "stopping"     // Destruction in progress
 	StatusStopped      SessionStatus = "stopped"      // Successfully terminated
 	StatusFailed       SessionStatus = "failed"       // Failed to provision or crashed
@@ -18,9 +18,22 @@ const (
 type WorkloadType string
 
 const (
-	WorkloadLLM      WorkloadType = "llm"      // LLM inference hosting
-	WorkloadTraining WorkloadType = "training" // ML model training
-	WorkloadBatch    WorkloadType = "batch"    // Batch processing job
+	WorkloadLLM         WorkloadType = "llm"          // LLM inference hosting (generic)
+	WorkloadLLMVLLM     WorkloadType = "llm_vllm"     // LLM inference via vLLM
+	WorkloadLLMTGI      WorkloadType = "llm_tgi"      // LLM inference via TGI
+	WorkloadTraining    WorkloadType = "training"     // ML model training
+	WorkloadBatch       WorkloadType = "batch"        // Batch processing job
+	WorkloadInteractive WorkloadType = "interactive"  // Interactive SSH session
+)
+
+// LaunchMode determines how the instance is configured
+type LaunchMode string
+
+const (
+	// LaunchModeSSH configures the instance for interactive SSH access
+	LaunchModeSSH LaunchMode = "ssh"
+	// LaunchModeEntrypoint configures the instance to run a specific workload
+	LaunchModeEntrypoint LaunchMode = "entrypoint"
 )
 
 // StoragePolicy determines what happens to storage after session ends
@@ -43,16 +56,23 @@ type Session struct {
 	Status     SessionStatus `json:"status"`
 	Error      string        `json:"error,omitempty"`
 
-	// Connection details
+	// Connection details (SSH mode)
 	SSHHost       string `json:"ssh_host,omitempty"`
 	SSHPort       int    `json:"ssh_port,omitempty"`
 	SSHUser       string `json:"ssh_user,omitempty"`
 	SSHPrivateKey string `json:"ssh_private_key,omitempty"` // Only returned once at creation
 	SSHPublicKey  string `json:"-"`                         // Stored but not exposed
 
-	// Agent connection
-	AgentEndpoint string `json:"agent_endpoint,omitempty"`
-	AgentToken    string `json:"agent_token,omitempty"` // Only returned once at creation
+	// API endpoint details (entrypoint mode)
+	LaunchMode  LaunchMode `json:"launch_mode,omitempty"`
+	APIEndpoint string     `json:"api_endpoint,omitempty"` // Full URL to API (e.g., http://host:port)
+	APIPort     int        `json:"api_port,omitempty"`     // Mapped API port
+
+	// Workload configuration (entrypoint mode)
+	DockerImage  string `json:"docker_image,omitempty"`
+	ModelID      string `json:"model_id,omitempty"`      // HuggingFace model ID
+	Quantization string `json:"quantization,omitempty"` // Quantization method
+	ExposedPorts []int  `json:"exposed_ports,omitempty"`
 
 	// Configuration
 	WorkloadType    WorkloadType  `json:"workload_type"`
@@ -65,11 +85,9 @@ type Session struct {
 	PricePerHour float64 `json:"price_per_hour"`
 
 	// Timestamps
-	CreatedAt       time.Time `json:"created_at"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	LastHeartbeat   time.Time `json:"last_heartbeat,omitempty"`
-	LastIdleSeconds int       `json:"last_idle_seconds,omitempty"`
-	StoppedAt       time.Time `json:"stopped_at,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	StoppedAt time.Time `json:"stopped_at,omitempty"`
 }
 
 // CreateSessionRequest is the request to create a new session
@@ -80,6 +98,13 @@ type CreateSessionRequest struct {
 	ReservationHrs int           `json:"reservation_hours" binding:"required,min=1,max=12"`
 	IdleThreshold  int           `json:"idle_threshold_minutes,omitempty"`
 	StoragePolicy  StoragePolicy `json:"storage_policy,omitempty"`
+
+	// Entrypoint mode configuration
+	LaunchMode   LaunchMode `json:"launch_mode,omitempty"`   // "ssh" or "entrypoint"
+	DockerImage  string     `json:"docker_image,omitempty"`  // Custom Docker image
+	ModelID      string     `json:"model_id,omitempty"`      // HuggingFace model ID
+	ExposedPorts []int      `json:"exposed_ports,omitempty"` // Ports to expose (e.g., 8000)
+	Quantization string     `json:"quantization,omitempty"`  // Quantization method
 }
 
 // SessionResponse is the API response for a session (hides sensitive fields after creation)
@@ -94,13 +119,15 @@ type SessionResponse struct {
 	SSHHost        string        `json:"ssh_host,omitempty"`
 	SSHPort        int           `json:"ssh_port,omitempty"`
 	SSHUser        string        `json:"ssh_user,omitempty"`
-	AgentEndpoint  string        `json:"agent_endpoint,omitempty"`
+	LaunchMode     LaunchMode    `json:"launch_mode,omitempty"`
+	APIEndpoint    string        `json:"api_endpoint,omitempty"`
+	APIPort        int           `json:"api_port,omitempty"`
+	ModelID        string        `json:"model_id,omitempty"`
 	WorkloadType   WorkloadType  `json:"workload_type"`
 	ReservationHrs int           `json:"reservation_hours"`
 	PricePerHour   float64       `json:"price_per_hour"`
 	CreatedAt      time.Time     `json:"created_at"`
 	ExpiresAt      time.Time     `json:"expires_at"`
-	LastHeartbeat  time.Time     `json:"last_heartbeat,omitempty"`
 }
 
 // ToResponse converts a Session to a SessionResponse (without secrets)
@@ -116,13 +143,15 @@ func (s *Session) ToResponse() SessionResponse {
 		SSHHost:        s.SSHHost,
 		SSHPort:        s.SSHPort,
 		SSHUser:        s.SSHUser,
-		AgentEndpoint:  s.AgentEndpoint,
+		LaunchMode:     s.LaunchMode,
+		APIEndpoint:    s.APIEndpoint,
+		APIPort:        s.APIPort,
+		ModelID:        s.ModelID,
 		WorkloadType:   s.WorkloadType,
 		ReservationHrs: s.ReservationHrs,
 		PricePerHour:   s.PricePerHour,
 		CreatedAt:      s.CreatedAt,
 		ExpiresAt:      s.ExpiresAt,
-		LastHeartbeat:  s.LastHeartbeat,
 	}
 }
 

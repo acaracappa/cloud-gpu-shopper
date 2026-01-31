@@ -135,17 +135,10 @@ func (m *mockDestroyer) getDestroyCalls() []string {
 
 // mockEventHandler implements EventHandler for testing
 type mockEventHandler struct {
-	mu                sync.Mutex
-	expiredSessions   []*models.Session
-	hardMaxSessions   []*models.Session
-	heartbeatSessions []*models.Session
-	orphanSessions    []*models.Session
-	idleShutdowns     []idleShutdownEvent
-}
-
-type idleShutdownEvent struct {
-	SessionID   string
-	IdleSeconds int
+	mu              sync.Mutex
+	expiredSessions []*models.Session
+	hardMaxSessions []*models.Session
+	orphanSessions  []*models.Session
 }
 
 func newMockEventHandler() *mockEventHandler {
@@ -164,25 +157,10 @@ func (m *mockEventHandler) OnHardMaxReached(session *models.Session) {
 	m.hardMaxSessions = append(m.hardMaxSessions, session)
 }
 
-func (m *mockEventHandler) OnHeartbeatTimeout(session *models.Session) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.heartbeatSessions = append(m.heartbeatSessions, session)
-}
-
 func (m *mockEventHandler) OnOrphanDetected(session *models.Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.orphanSessions = append(m.orphanSessions, session)
-}
-
-func (m *mockEventHandler) OnIdleShutdown(sessionID string, idleSeconds int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.idleShutdowns = append(m.idleShutdowns, idleShutdownEvent{
-		SessionID:   sessionID,
-		IdleSeconds: idleSeconds,
-	})
 }
 
 func newTestLogger() *slog.Logger {
@@ -198,7 +176,6 @@ func TestManager_New(t *testing.T) {
 	assert.NotNil(t, m)
 	assert.Equal(t, DefaultCheckInterval, m.checkInterval)
 	assert.Equal(t, DefaultHardMaxHours, m.hardMaxHours)
-	assert.Equal(t, DefaultHeartbeatTimeout, m.heartbeatTimeout)
 	assert.False(t, m.IsRunning())
 }
 
@@ -387,57 +364,6 @@ func (m *mockSessionStoreWithExpiry) Update(ctx context.Context, session *models
 	defer m.mu.Unlock()
 	m.sessions[session.ID] = session
 	return nil
-}
-
-func TestManager_CheckHeartbeatTimeout(t *testing.T) {
-	store := newMockSessionStore()
-	destroyer := newMockDestroyer()
-	handler := newMockEventHandler()
-
-	now := time.Now()
-
-	// Create session with stale heartbeat (10 minutes ago)
-	staleSession := &models.Session{
-		ID:            "sess-stale",
-		Status:        models.StatusRunning,
-		CreatedAt:     now.Add(-1 * time.Hour),
-		ExpiresAt:     now.Add(1 * time.Hour),
-		LastHeartbeat: now.Add(-10 * time.Minute),
-	}
-	store.add(staleSession)
-
-	// Create session with fresh heartbeat (1 minute ago)
-	freshSession := &models.Session{
-		ID:            "sess-fresh",
-		Status:        models.StatusRunning,
-		CreatedAt:     now.Add(-1 * time.Hour),
-		ExpiresAt:     now.Add(1 * time.Hour),
-		LastHeartbeat: now.Add(-1 * time.Minute),
-	}
-	store.add(freshSession)
-
-	// Create session with no heartbeat yet (just provisioned)
-	newSession := &models.Session{
-		ID:        "sess-new",
-		Status:    models.StatusRunning,
-		CreatedAt: now.Add(-1 * time.Minute),
-		ExpiresAt: now.Add(1 * time.Hour),
-		// LastHeartbeat is zero
-	}
-	store.add(newSession)
-
-	m := New(store, destroyer,
-		WithLogger(newTestLogger()),
-		WithHeartbeatTimeout(5*time.Minute),
-		WithEventHandler(handler),
-		WithTimeFunc(func() time.Time { return now }))
-
-	ctx := context.Background()
-	m.checkHeartbeatTimeout(ctx)
-
-	// Only stale session should be destroyed
-	assert.Equal(t, []string{"sess-stale"}, destroyer.getDestroyCalls())
-	assert.Len(t, handler.heartbeatSessions, 1)
 }
 
 func TestManager_CheckOrphans(t *testing.T) {
@@ -696,109 +622,3 @@ func TestManager_RunsAllChecks(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.ChecksRun, int64(2))
 }
 
-func TestCheckIdleSessions_DestroyIdleSession(t *testing.T) {
-	store := newMockSessionStore()
-	destroyer := newMockDestroyer()
-	handler := newMockEventHandler()
-
-	now := time.Now()
-
-	// Create session with IdleThreshold=5 (minutes) and LastIdleSeconds=400 (> 300 seconds)
-	idleSession := &models.Session{
-		ID:              "sess-idle",
-		Status:          models.StatusRunning,
-		CreatedAt:       now.Add(-1 * time.Hour),
-		ExpiresAt:       now.Add(1 * time.Hour),
-		IdleThreshold:   5,   // 5 minutes = 300 seconds
-		LastIdleSeconds: 400, // 400 seconds > 300 seconds threshold
-	}
-	store.add(idleSession)
-
-	m := New(store, destroyer,
-		WithLogger(newTestLogger()),
-		WithEventHandler(handler),
-		WithTimeFunc(func() time.Time { return now }))
-
-	ctx := context.Background()
-	m.checkIdleSessions(ctx)
-
-	// Idle session should be destroyed
-	assert.Equal(t, []string{"sess-idle"}, destroyer.getDestroyCalls())
-
-	// Event handler should be notified
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	assert.Len(t, handler.idleShutdowns, 1)
-	assert.Equal(t, "sess-idle", handler.idleShutdowns[0].SessionID)
-	assert.Equal(t, 400, handler.idleShutdowns[0].IdleSeconds)
-}
-
-func TestCheckIdleSessions_KeepActiveSession(t *testing.T) {
-	store := newMockSessionStore()
-	destroyer := newMockDestroyer()
-	handler := newMockEventHandler()
-
-	now := time.Now()
-
-	// Create session with IdleThreshold=5 (minutes) and LastIdleSeconds=100 (< 300 seconds)
-	activeSession := &models.Session{
-		ID:              "sess-active",
-		Status:          models.StatusRunning,
-		CreatedAt:       now.Add(-1 * time.Hour),
-		ExpiresAt:       now.Add(1 * time.Hour),
-		IdleThreshold:   5,   // 5 minutes = 300 seconds
-		LastIdleSeconds: 100, // 100 seconds < 300 seconds threshold
-	}
-	store.add(activeSession)
-
-	m := New(store, destroyer,
-		WithLogger(newTestLogger()),
-		WithEventHandler(handler),
-		WithTimeFunc(func() time.Time { return now }))
-
-	ctx := context.Background()
-	m.checkIdleSessions(ctx)
-
-	// Session should NOT be destroyed (still active)
-	assert.Empty(t, destroyer.getDestroyCalls())
-
-	// Event handler should NOT be notified
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	assert.Empty(t, handler.idleShutdowns)
-}
-
-func TestCheckIdleSessions_IgnoreZeroThreshold(t *testing.T) {
-	store := newMockSessionStore()
-	destroyer := newMockDestroyer()
-	handler := newMockEventHandler()
-
-	now := time.Now()
-
-	// Create session with IdleThreshold=0 (idle detection disabled)
-	noThresholdSession := &models.Session{
-		ID:              "sess-no-threshold",
-		Status:          models.StatusRunning,
-		CreatedAt:       now.Add(-1 * time.Hour),
-		ExpiresAt:       now.Add(1 * time.Hour),
-		IdleThreshold:   0,    // Disabled
-		LastIdleSeconds: 1000, // Very idle, but threshold is disabled
-	}
-	store.add(noThresholdSession)
-
-	m := New(store, destroyer,
-		WithLogger(newTestLogger()),
-		WithEventHandler(handler),
-		WithTimeFunc(func() time.Time { return now }))
-
-	ctx := context.Background()
-	m.checkIdleSessions(ctx)
-
-	// Session should NOT be destroyed (threshold disabled)
-	assert.Empty(t, destroyer.getDestroyCalls())
-
-	// Event handler should NOT be notified
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	assert.Empty(t, handler.idleShutdowns)
-}

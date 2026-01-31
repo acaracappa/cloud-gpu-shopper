@@ -79,7 +79,13 @@ func TestMain(m *testing.M) {
 
 	inv := inventory.New([]provider.Provider{mockProviderAdapter})
 	registry := provisioner.NewSimpleProviderRegistry([]provider.Provider{mockProviderAdapter})
-	prov := provisioner.New(sessionStore, registry)
+
+	// Use mock SSH verifier for E2E tests since we don't have real SSH servers
+	mockSSHVerifier := &provisioner.AlwaysSucceedSSHVerifier{}
+	prov := provisioner.New(sessionStore, registry,
+		provisioner.WithSSHVerifier(mockSSHVerifier),
+		provisioner.WithSSHVerifyTimeout(5*time.Second),
+		provisioner.WithSSHCheckInterval(500*time.Millisecond))
 	lm := lifecycle.New(sessionStore, prov)
 	ct := cost.New(costStore, sessionStore, nil)
 

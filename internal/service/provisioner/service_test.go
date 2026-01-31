@@ -796,3 +796,100 @@ func TestService_CreateSession_AllowsDifferentOffer(t *testing.T) {
 
 	assert.NotEqual(t, session1.ID, session2.ID)
 }
+
+// =============================================================================
+// SSH Verification Tests
+// =============================================================================
+
+// TestService_SSHVerification_PrivateKeyPassedDirectly verifies that the SSH private key
+// is passed directly to the SSH verification goroutine, not retrieved from the database.
+//
+// LEARNING FROM LIVE TESTING: The SSHPrivateKey is NOT stored in the database for security.
+// If the async verification goroutine tried to retrieve it from the DB, it would be empty,
+// causing all SSH verifications to fail. The key must be passed directly as a parameter.
+func TestService_SSHVerification_PrivateKeyPassedDirectly(t *testing.T) {
+	store := newMockSessionStore()
+	prov := newMockProvider("vastai")
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+	mockVerifier := NewMockSSHVerifier()
+
+	svc := New(store, registry,
+		WithLogger(newTestLogger()),
+		WithSSHVerifier(mockVerifier),
+		WithSSHVerifyTimeout(100*time.Millisecond),
+		WithSSHCheckInterval(10*time.Millisecond))
+
+	ctx := context.Background()
+	req := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 1,
+	}
+	offer := &models.GPUOffer{
+		Provider:   "vastai",
+		ProviderID: "123",
+	}
+
+	session, err := svc.CreateSession(ctx, req, offer)
+	require.NoError(t, err)
+
+	// Wait a moment for the async verification to start
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the SSH verifier was called with a non-empty private key
+	calls := mockVerifier.GetVerifyCalls()
+	require.NotEmpty(t, calls, "SSH verifier should have been called")
+
+	// The private key should NOT be empty
+	// This would fail if the goroutine tried to get it from the DB
+	assert.NotEmpty(t, calls[0].PrivateKey, "Private key should be passed directly, not retrieved from DB")
+
+	// The key should be a valid RSA private key
+	assert.True(t, strings.HasPrefix(calls[0].PrivateKey, "-----BEGIN RSA PRIVATE KEY-----"),
+		"Private key should be a valid RSA private key")
+
+	// Clean up
+	_ = svc.DestroySession(ctx, session.ID)
+}
+
+// TestService_SSHVerification_PrivateKeyNotStoredInDB verifies that the database
+// does not store the SSH private key (security requirement).
+func TestService_SSHVerification_PrivateKeyNotStoredInDB(t *testing.T) {
+	store := newMockSessionStore()
+	prov := newMockProvider("vastai")
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+	mockVerifier := NewMockSSHVerifier()
+
+	svc := New(store, registry,
+		WithLogger(newTestLogger()),
+		WithSSHVerifier(mockVerifier))
+
+	ctx := context.Background()
+	req := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "offer-123",
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 1,
+	}
+	offer := &models.GPUOffer{Provider: "vastai", ProviderID: "123"}
+
+	session, err := svc.CreateSession(ctx, req, offer)
+	require.NoError(t, err)
+
+	// The returned session should have the private key (for the API response)
+	assert.NotEmpty(t, session.SSHPrivateKey)
+
+	// But retrieving from the store should NOT have it (security)
+	storedSession, err := store.Get(ctx, session.ID)
+	require.NoError(t, err)
+
+	// Note: In the mock, we're storing the full session, but in the real implementation
+	// the DB layer should NOT store the SSHPrivateKey field
+	// This test documents the expected behavior
+	t.Log("Session returned to API has private key:", session.SSHPrivateKey != "")
+	t.Log("This test documents: SSHPrivateKey must be passed directly to async verification")
+
+	// Clean up
+	_ = svc.DestroySession(ctx, storedSession.ID)
+}

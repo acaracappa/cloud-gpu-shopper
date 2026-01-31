@@ -40,16 +40,6 @@ func (e *SessionNotFoundError) Error() string {
 	return fmt.Sprintf("session not found: %s", e.ID)
 }
 
-// HeartbeatTimeoutError indicates the agent failed to send heartbeat in time
-type HeartbeatTimeoutError struct {
-	SessionID string
-	Timeout   string
-}
-
-func (e *HeartbeatTimeoutError) Error() string {
-	return fmt.Sprintf("agent heartbeat timeout for session %s after %s", e.SessionID, e.Timeout)
-}
-
 // DuplicateSessionError indicates a consumer already has an active session for the given offer
 type DuplicateSessionError struct {
 	ConsumerID string

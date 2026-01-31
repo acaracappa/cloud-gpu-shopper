@@ -12,7 +12,6 @@ A unified inventory and orchestration service for commodity GPU providers (Vast.
 - **Session Management**: Provision, monitor, and destroy GPU sessions
 - **Safety Systems**: 12-hour hard max, orphan detection, verified destruction
 - **Cost Tracking**: Per-session and per-consumer cost aggregation with budget alerts
-- **Node Agent**: Heartbeat monitoring with self-destruct failsafe
 
 ## Supported Providers
 
@@ -113,7 +112,6 @@ Access points:
 | `/api/v1/sessions/:id` | DELETE | Force destroy session |
 | `/api/v1/sessions/:id/done` | POST | Signal session complete |
 | `/api/v1/sessions/:id/extend` | POST | Extend session |
-| `/api/v1/sessions/:id/heartbeat` | POST | Agent heartbeat |
 | `/api/v1/costs` | GET | Get costs |
 | `/api/v1/costs/summary` | GET | Monthly cost summary |
 
@@ -134,13 +132,12 @@ See [docs/API.md](docs/API.md) for full API documentation.
 │                     SQLite Storage                           │
 └─────────────────────────────────────────────────────────────┘
                               │
-                    SSH + Container Deploy
+                    Provider API + SSH Verification
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      GPU NODE (Remote)                       │
 ├─────────────────────────────────────────────────────────────┤
-│  Node Agent: Heartbeat + Health + Self-Destruct Timer        │
 │  Consumer Workload: vLLM, Training, Batch Jobs               │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -154,7 +151,7 @@ The service is designed with "zero orphaned instances" as the primary goal:
 3. **Instance Tagging**: All instances tagged for reconciliation
 4. **Provider Reconciliation**: Compares DB vs provider every 5 minutes
 5. **12-Hour Hard Max**: Automatic shutdown (CLI override available)
-6. **Agent Self-Destruct**: Node shuts down if shopper unreachable for 30min
+6. **SSH Verification**: Validates instance readiness via SSH connectivity
 7. **Orphan Detection**: Alerts and auto-destroys orphaned instances
 
 ## Development
@@ -171,7 +168,6 @@ go test -cover ./...
 
 # Build all binaries
 go build -o bin/server ./cmd/server
-go build -o bin/agent ./cmd/agent
 go build -o bin/gpu-shopper ./cmd/cli
 ```
 
@@ -180,11 +176,7 @@ go build -o bin/gpu-shopper ./cmd/cli
 ```
 ├── cmd/
 │   ├── server/     # API server
-│   ├── agent/      # Node agent
 │   └── cli/        # CLI tool
-├── agent/          # Agent packages
-│   ├── api/        # Agent health endpoints
-│   └── heartbeat/  # Heartbeat sender
 ├── internal/
 │   ├── api/        # REST API handlers
 │   ├── config/     # Configuration

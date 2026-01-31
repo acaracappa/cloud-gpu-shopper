@@ -36,13 +36,19 @@ type CreateSessionRequest struct {
 	ReservationHrs int    `json:"reservation_hours" binding:"required,min=1,max=12"`
 	IdleThreshold  int    `json:"idle_threshold_minutes,omitempty"`
 	StoragePolicy  string `json:"storage_policy,omitempty"`
+
+	// Entrypoint mode configuration
+	LaunchMode   string `json:"launch_mode,omitempty"`   // "ssh" or "entrypoint"
+	DockerImage  string `json:"docker_image,omitempty"`  // Custom Docker image
+	ModelID      string `json:"model_id,omitempty"`      // HuggingFace model ID
+	ExposedPorts []int  `json:"exposed_ports,omitempty"` // Ports to expose (e.g., 8000)
+	Quantization string `json:"quantization,omitempty"`  // Quantization method
 }
 
 // CreateSessionResponse is the response after creating a session
 type CreateSessionResponse struct {
 	Session       models.SessionResponse `json:"session"`
 	SSHPrivateKey string                 `json:"ssh_private_key,omitempty"`
-	AgentToken    string                 `json:"agent_token,omitempty"`
 }
 
 // ExtendSessionRequest is the request to extend a session
@@ -84,6 +90,35 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 	if s.inventory != nil {
 		response.Services["inventory"] = "ok"
+	}
+
+	// Return 503 if not ready (e.g., during startup sweep)
+	if !s.ready {
+		response.Status = "unavailable"
+		response.Services["ready"] = "false"
+		c.JSON(http.StatusServiceUnavailable, response)
+		return
+	}
+
+	response.Services["ready"] = "true"
+	c.JSON(http.StatusOK, response)
+}
+
+// ReadyResponse is the readiness check response
+type ReadyResponse struct {
+	Ready     bool      `json:"ready"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func (s *Server) handleReady(c *gin.Context) {
+	response := ReadyResponse{
+		Ready:     s.ready,
+		Timestamp: time.Now(),
+	}
+
+	if !s.ready {
+		c.JSON(http.StatusServiceUnavailable, response)
+		return
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -188,6 +223,15 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		storagePolicy = models.StorageDestroy
 	}
 
+	// Convert launch mode
+	var launchMode models.LaunchMode
+	switch req.LaunchMode {
+	case "entrypoint":
+		launchMode = models.LaunchModeEntrypoint
+	default:
+		launchMode = models.LaunchModeSSH
+	}
+
 	// Create session
 	createReq := models.CreateSessionRequest{
 		ConsumerID:     req.ConsumerID,
@@ -196,6 +240,11 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		ReservationHrs: req.ReservationHrs,
 		IdleThreshold:  req.IdleThreshold,
 		StoragePolicy:  storagePolicy,
+		LaunchMode:     launchMode,
+		DockerImage:    req.DockerImage,
+		ModelID:        req.ModelID,
+		ExposedPorts:   req.ExposedPorts,
+		Quantization:   req.Quantization,
 	}
 
 	session, err := s.provisioner.CreateSession(ctx, createReq, offer)
@@ -236,7 +285,6 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 	c.JSON(http.StatusCreated, CreateSessionResponse{
 		Session:       session.ToResponse(),
 		SSHPrivateKey: session.SSHPrivateKey,
-		AgentToken:    session.AgentToken,
 	})
 }
 
@@ -424,59 +472,3 @@ func (s *Server) handleGetCostSummary(c *gin.Context) {
 	c.JSON(http.StatusOK, summary)
 }
 
-// HeartbeatRequest is the request from an agent heartbeat
-type HeartbeatRequest struct {
-	SessionID    string  `json:"session_id"`
-	AgentToken   string  `json:"agent_token"`
-	Status       string  `json:"status,omitempty"`
-	IdleSeconds  int     `json:"idle_seconds,omitempty"`
-	GPUUtilPct   float64 `json:"gpu_util_pct,omitempty"`
-	MemoryUsedMB int     `json:"memory_used_mb,omitempty"`
-}
-
-func (s *Server) handleHeartbeat(c *gin.Context) {
-	ctx := c.Request.Context()
-	sessionID := c.Param("id")
-
-	var req HeartbeatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:     err.Error(),
-			RequestID: c.GetString("request_id"),
-		})
-		return
-	}
-
-	// Verify session exists and token matches
-	session, err := s.provisioner.GetSession(ctx, sessionID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "session not found",
-			RequestID: c.GetString("request_id"),
-		})
-		return
-	}
-
-	// Validate agent token
-	if session.AgentToken != req.AgentToken {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:     "invalid agent token",
-			RequestID: c.GetString("request_id"),
-		})
-		return
-	}
-
-	// Record heartbeat with idle tracking
-	if err := s.provisioner.RecordHeartbeat(ctx, sessionID, req.IdleSeconds); err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:     err.Error(),
-			RequestID: c.GetString("request_id"),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":     "ok",
-		"session_id": sessionID,
-	})
-}

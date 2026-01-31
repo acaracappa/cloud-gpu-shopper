@@ -24,14 +24,16 @@ type LiveTestEnv struct {
 	Config      *TestConfig
 	Watchdog    *Watchdog
 	Diagnostics *DiagnosticsManager
+	Providers   *ProviderFactory
 	client      *http.Client
 }
 
 // NewLiveTestEnv creates a new live test environment
 func NewLiveTestEnv(config *TestConfig, watchdog *Watchdog) *LiveTestEnv {
 	env := &LiveTestEnv{
-		Config:   config,
-		Watchdog: watchdog,
+		Config:    config,
+		Watchdog:  watchdog,
+		Providers: NewProviderFactory(config),
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -76,7 +78,6 @@ type Session struct {
 	SSHUser            string    `json:"ssh_user"`
 	ReservationHrs     int       `json:"reservation_hours"`
 	ExpiresAt          time.Time `json:"expires_at"`
-	LastHeartbeat      time.Time `json:"last_heartbeat"`
 	Error              string    `json:"error,omitempty"`
 }
 
@@ -92,7 +93,6 @@ type CreateSessionRequest struct {
 // CreateSessionResponse represents a session creation response
 type CreateSessionResponse struct {
 	Session       Session `json:"session"`
-	AgentToken    string  `json:"agent_token"`
 	SSHPrivateKey string  `json:"ssh_private_key,omitempty"`
 }
 
@@ -420,6 +420,119 @@ func (e *LiveTestEnv) Cleanup(t *testing.T, sessionID string) {
 	t.Logf("Cleanup: Destroyed session %s", sessionID)
 }
 
+// CleanupWithFallback destroys a session via HTTP API with fallback to direct provider API.
+// This ensures cleanup even if the shopper server is unavailable.
+func (e *LiveTestEnv) CleanupWithFallback(t *testing.T, sessionID, instanceID string, provider Provider) {
+	if sessionID == "" && instanceID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// First, try HTTP API if we have a session ID
+	if sessionID != "" {
+		url := fmt.Sprintf("%s/api/v1/sessions/%s", e.Config.ServerURL, sessionID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+		if err == nil {
+			resp, err := e.client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+					t.Logf("CleanupWithFallback: Destroyed session %s via HTTP API", sessionID)
+					// Untrack from watchdog
+					if e.Watchdog != nil && instanceID != "" {
+						e.Watchdog.UntrackInstance(instanceID)
+					}
+					return
+				}
+			}
+		}
+		t.Logf("CleanupWithFallback: HTTP API cleanup failed for session %s, trying direct provider API", sessionID)
+	}
+
+	// Fallback to direct provider API
+	if instanceID == "" || provider == "" {
+		t.Logf("CleanupWithFallback: Cannot use fallback - missing instanceID or provider")
+		return
+	}
+
+	if e.Providers == nil {
+		t.Logf("CleanupWithFallback: Provider factory not initialized")
+		return
+	}
+
+	prov, err := e.Providers.GetProvider(provider)
+	if err != nil {
+		t.Logf("CleanupWithFallback: Failed to get provider %s: %v", provider, err)
+		return
+	}
+
+	if err := prov.DestroyInstance(ctx, instanceID); err != nil {
+		t.Logf("CleanupWithFallback: Failed to destroy instance %s via provider: %v", instanceID, err)
+		return
+	}
+
+	t.Logf("CleanupWithFallback: Destroyed instance %s via direct provider API", instanceID)
+
+	// Untrack from watchdog
+	if e.Watchdog != nil {
+		e.Watchdog.UntrackInstance(instanceID)
+	}
+}
+
+// CleanupOrphanedInstances scans all providers for instances with "shopper-" prefix
+// and destroys them. This is used at test startup to clean up any orphaned instances
+// from previous test runs.
+func (e *LiveTestEnv) CleanupOrphanedInstances(t *testing.T) {
+	t.Log("Scanning for orphaned instances...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	totalCleaned := 0
+
+	for provName := range e.Config.Providers {
+		if !e.Config.HasProvider(provName) {
+			continue
+		}
+
+		prov, err := e.Providers.GetProvider(provName)
+		if err != nil {
+			t.Logf("CleanupOrphanedInstances: Failed to get provider %s: %v", provName, err)
+			continue
+		}
+
+		instances, err := prov.ListAllInstances(ctx)
+		if err != nil {
+			t.Logf("CleanupOrphanedInstances: Failed to list instances from %s: %v", provName, err)
+			continue
+		}
+
+		t.Logf("CleanupOrphanedInstances: Found %d shopper instances on %s", len(instances), provName)
+
+		for _, inst := range instances {
+			// All instances returned by ListAllInstances already have our prefix
+			// (filtered by provider implementation)
+			t.Logf("CleanupOrphanedInstances: Destroying orphaned instance %s (%s) from %s",
+				inst.ID, inst.Name, provName)
+
+			if err := prov.DestroyInstance(ctx, inst.ID); err != nil {
+				t.Logf("CleanupOrphanedInstances: Failed to destroy %s: %v", inst.ID, err)
+			} else {
+				t.Logf("CleanupOrphanedInstances: Destroyed orphaned instance %s", inst.ID)
+				totalCleaned++
+			}
+		}
+	}
+
+	if totalCleaned > 0 {
+		t.Logf("CleanupOrphanedInstances: Cleaned up %d orphaned instances", totalCleaned)
+	} else {
+		t.Log("CleanupOrphanedInstances: No orphaned instances found")
+	}
+}
+
 // ConnectSSH creates and connects an SSH helper for a session
 func (e *LiveTestEnv) ConnectSSH(t *testing.T, session *Session, privateKey string) *SSHHelper {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -431,65 +544,6 @@ func (e *LiveTestEnv) ConnectSSH(t *testing.T, session *Session, privateKey stri
 
 	t.Logf("SSH connected to %s@%s:%d", session.SSHUser, session.SSHHost, session.SSHPort)
 	return ssh
-}
-
-// WaitForAgentReady waits for the agent to be ready and responding
-func (e *LiveTestEnv) WaitForAgentReady(t *testing.T, ssh *SSHHelper, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		// Check if agent process is running
-		running, err := ssh.ProcessRunning(ctx, "gpu-agent")
-		if err == nil && running {
-			// Try to hit the health endpoint
-			output, err := ssh.CurlEndpoint(ctx, "http://localhost:8081/health")
-			if err == nil && output != "" {
-				t.Log("Agent is ready and responding")
-				return nil
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-			// Continue waiting
-		}
-	}
-
-	return fmt.Errorf("timeout waiting for agent to be ready")
-}
-
-// SendHeartbeat sends a manual heartbeat for testing
-func (e *LiveTestEnv) SendHeartbeat(t *testing.T, sessionID, agentToken string, req HeartbeatRequest) {
-	body, err := json.Marshal(req)
-	require.NoError(t, err)
-
-	url := fmt.Sprintf("%s/api/v1/sessions/%s/heartbeat", e.Config.ServerURL, sessionID)
-	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	require.NoError(t, err)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := e.client.Do(httpReq)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Heartbeat failed: %d - %s", resp.StatusCode, string(respBody))
-	}
-}
-
-// HeartbeatRequest represents a heartbeat request
-type HeartbeatRequest struct {
-	SessionID    string  `json:"session_id"`
-	AgentToken   string  `json:"agent_token"`
-	Status       string  `json:"status"`
-	IdleSeconds  int     `json:"idle_seconds,omitempty"`
-	GPUUtilPct   float64 `json:"gpu_util_pct,omitempty"`
-	MemoryUsedMB int     `json:"memory_used_mb,omitempty"`
 }
 
 // GetDiagnosticsCollector returns or creates a diagnostics collector for a session

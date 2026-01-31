@@ -188,7 +188,6 @@ type CreateSessionRequest struct {
 type CreateSessionResponse struct {
 	Session       SessionResponse `json:"session"`
 	SSHPrivateKey string          `json:"ssh_private_key"`
-	AgentToken    string          `json:"agent_token"`
 }
 
 // SessionResponse is the session data in responses
@@ -203,22 +202,11 @@ type SessionResponse struct {
 	SSHHost        string    `json:"ssh_host,omitempty"`
 	SSHPort        int       `json:"ssh_port,omitempty"`
 	SSHUser        string    `json:"ssh_user,omitempty"`
-	AgentEndpoint  string    `json:"agent_endpoint,omitempty"`
 	WorkloadType   string    `json:"workload_type"`
 	ReservationHrs int       `json:"reservation_hours"`
 	PricePerHour   float64   `json:"price_per_hour"`
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
-	LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
-}
-
-// HeartbeatRequest is the request to send a heartbeat
-type HeartbeatRequest struct {
-	SessionID   string  `json:"session_id"`
-	AgentToken  string  `json:"agent_token"`
-	Status      string  `json:"status,omitempty"`
-	IdleSeconds int     `json:"idle_seconds,omitempty"`
-	GPUUtilPct  float64 `json:"gpu_util_pct,omitempty"`
 }
 
 // ErrorResponse is the standard error response
@@ -324,25 +312,6 @@ func (e *TestEnv) SignalDone(t *testing.T, sessionID string) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("SignalDone failed: status=%d body=%s", resp.StatusCode, string(body))
-	}
-}
-
-// SendHeartbeat sends a heartbeat for a session
-func (e *TestEnv) SendHeartbeat(t *testing.T, sessionID string, req HeartbeatRequest) {
-	t.Helper()
-
-	body, err := json.Marshal(req)
-	require.NoError(t, err)
-
-	resp, err := e.HTTPClient.Post(e.ServerURL+"/api/v1/sessions/"+sessionID+"/heartbeat", "application/json", bytes.NewReader(body))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("SendHeartbeat failed: status=%d body=%s", resp.StatusCode, string(respBody))
 	}
 }
 

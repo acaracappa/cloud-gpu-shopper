@@ -5,7 +5,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
+)
+
+// Predefined Docker images for different launch modes
+const (
+	// ImageSSHBase is the default SSH-enabled base image for interactive access
+	// Using NVIDIA CUDA Ubuntu 22.04 image - stable and widely supported on Vast.ai
+	ImageSSHBase = "nvidia/cuda:12.2.0-runtime-ubuntu22.04"
+
+	// ImageVLLM is the vLLM inference server image
+	ImageVLLM = "vllm/vllm-openai:latest"
+
+	// ImageTGI is the Text Generation Inference server image
+	ImageTGI = "ghcr.io/huggingface/text-generation-inference:latest"
+)
+
+// Default ports for inference servers
+const (
+	DefaultVLLMPort = 8000
+	DefaultTGIPort  = 80
 )
 
 // BundlesResponse is the response from GET /bundles/
@@ -148,6 +168,11 @@ type CreateInstanceRequest struct {
 	OnStart   string            `json:"onstart,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	RunType   string            `json:"runtype,omitempty"`
+	SSHKey    string            `json:"ssh_key,omitempty"` // SSH public key for instance access
+
+	// Entrypoint mode fields
+	Args  string `json:"args,omitempty"`  // Container arguments (for runtype=args)
+	Ports string `json:"ports,omitempty"` // Port mappings (e.g., "8000/http")
 }
 
 // CreateInstanceResponse is the response from creating an instance
@@ -173,4 +198,109 @@ func normalizeGPUName(name string) string {
 	}
 
 	return name
+}
+
+// BuildVLLMArgs builds container arguments for vLLM server
+func BuildVLLMArgs(config *provider.WorkloadConfig) string {
+	if config == nil || config.ModelID == "" {
+		return ""
+	}
+
+	args := []string{
+		"--model", config.ModelID,
+		"--host", "0.0.0.0",
+		"--port", fmt.Sprintf("%d", DefaultVLLMPort),
+	}
+
+	// GPU memory utilization (default 0.9)
+	gpuMemUtil := config.GPUMemoryUtil
+	if gpuMemUtil <= 0 {
+		gpuMemUtil = 0.9
+	}
+	args = append(args, "--gpu-memory-utilization", fmt.Sprintf("%.2f", gpuMemUtil))
+
+	// Quantization
+	if config.Quantization != "" {
+		args = append(args, "--quantization", config.Quantization)
+	}
+
+	// Max model length
+	if config.MaxModelLen > 0 {
+		args = append(args, "--max-model-len", fmt.Sprintf("%d", config.MaxModelLen))
+	}
+
+	// Tensor parallelism
+	if config.TensorParallel > 1 {
+		args = append(args, "--tensor-parallel-size", fmt.Sprintf("%d", config.TensorParallel))
+	}
+
+	return strings.Join(args, " ")
+}
+
+// BuildTGIArgs builds container arguments for Text Generation Inference server
+func BuildTGIArgs(config *provider.WorkloadConfig) string {
+	if config == nil || config.ModelID == "" {
+		return ""
+	}
+
+	args := []string{
+		"--model-id", config.ModelID,
+		"--hostname", "0.0.0.0",
+		"--port", fmt.Sprintf("%d", DefaultTGIPort),
+	}
+
+	// Quantization
+	if config.Quantization != "" {
+		args = append(args, "--quantize", config.Quantization)
+	}
+
+	// Max model length (TGI uses max-input-length and max-total-tokens)
+	if config.MaxModelLen > 0 {
+		args = append(args, "--max-input-length", fmt.Sprintf("%d", config.MaxModelLen/2))
+		args = append(args, "--max-total-tokens", fmt.Sprintf("%d", config.MaxModelLen))
+	}
+
+	// Tensor parallelism (TGI uses num-shard)
+	if config.TensorParallel > 1 {
+		args = append(args, "--num-shard", fmt.Sprintf("%d", config.TensorParallel))
+	}
+
+	return strings.Join(args, " ")
+}
+
+// GetImageForWorkload returns the appropriate Docker image for a workload type
+func GetImageForWorkload(workloadType provider.WorkloadType) string {
+	switch workloadType {
+	case provider.WorkloadTypeVLLM:
+		return ImageVLLM
+	case provider.WorkloadTypeTGI:
+		return ImageTGI
+	default:
+		return ImageSSHBase
+	}
+}
+
+// GetPortForWorkload returns the default port for a workload type
+func GetPortForWorkload(workloadType provider.WorkloadType) int {
+	switch workloadType {
+	case provider.WorkloadTypeVLLM:
+		return DefaultVLLMPort
+	case provider.WorkloadTypeTGI:
+		return DefaultTGIPort
+	default:
+		return 0
+	}
+}
+
+// FormatPortsString formats ports for the Vast.ai API
+func FormatPortsString(ports []int) string {
+	if len(ports) == 0 {
+		return ""
+	}
+
+	var portStrs []string
+	for _, p := range ports {
+		portStrs = append(portStrs, fmt.Sprintf("%d/http", p))
+	}
+	return strings.Join(portStrs, ",")
 }

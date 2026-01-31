@@ -24,24 +24,6 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Mock Agent (for local testing)
-  agent:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.agent
-    ports:
-      - "8081:8081"
-    environment:
-      - SHOPPER_SESSION_ID=test-session
-      - SHOPPER_AGENT_TOKEN=test-token
-      - SHOPPER_EXPIRES_AT=2099-12-31T23:59:59Z
-      - SHOPPER_URL=http://server:8080
-      - SHOPPER_AGENT_PORT=8081
-    depends_on:
-      server:
-        condition: service_healthy
-    restart: unless-stopped
-
   # Prometheus for metrics (optional)
   prometheus:
     image: prom/prometheus:v2.47.0

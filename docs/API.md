@@ -34,7 +34,8 @@ Key metrics:
 - `gpu_sessions_active{provider,status}` - Active session count
 - `gpu_orphans_detected_total` - Orphaned instances detected
 - `gpu_destroy_failures_total` - Failed destruction attempts
-- `gpu_heartbeat_age_seconds{session_id}` - Time since last heartbeat
+- `gpu_ssh_verify_duration_seconds` - SSH verification duration
+- `gpu_ssh_verify_failures_total` - SSH verification failures
 - `gpu_provider_api_errors_total{provider,operation}` - Provider API errors
 
 ---
@@ -144,19 +145,17 @@ Create a new GPU session.
     "ssh_host": "192.168.1.100",
     "ssh_port": 22,
     "ssh_user": "root",
-    "agent_endpoint": "http://192.168.1.100:8081",
     "workload_type": "llm",
     "reservation_hours": 2,
     "price_per_hour": 0.45,
     "created_at": "2026-01-29T12:00:00Z",
     "expires_at": "2026-01-29T14:00:00Z"
   },
-  "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\n...",
-  "agent_token": "token-xyz789"
+  "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\n..."
 }
 ```
 
-**Note**: `ssh_private_key` and `agent_token` are only returned once at creation.
+**Note**: `ssh_private_key` is only returned once at creation. Poll the session status until it transitions to "running" (SSH verification complete) before connecting.
 
 ### GET /api/v1/sessions
 
@@ -193,13 +192,11 @@ Get session details.
   "ssh_host": "192.168.1.100",
   "ssh_port": 22,
   "ssh_user": "root",
-  "agent_endpoint": "http://192.168.1.100:8081",
   "workload_type": "llm",
   "reservation_hours": 2,
   "price_per_hour": 0.45,
   "created_at": "2026-01-29T12:00:00Z",
-  "expires_at": "2026-01-29T14:00:00Z",
-  "last_heartbeat": "2026-01-29T12:05:00Z"
+  "expires_at": "2026-01-29T14:00:00Z"
 }
 ```
 
@@ -207,8 +204,8 @@ Get session details.
 | Status | Description |
 |--------|-------------|
 | pending | Session created, not yet provisioned |
-| provisioning | Provider instance being created |
-| running | Instance running and agent responding |
+| provisioning | Provider instance being created, awaiting SSH verification |
+| running | Instance running and SSH verified |
 | stopping | Destruction in progress |
 | stopped | Successfully terminated |
 | failed | Failed to provision or crashed |
@@ -256,34 +253,6 @@ Force destroy a session immediately.
   "session_id": "sess-abc123"
 }
 ```
-
-### POST /api/v1/sessions/:id/heartbeat
-
-Record agent heartbeat (called by the node agent).
-
-**Request Body**
-```json
-{
-  "session_id": "sess-abc123",
-  "agent_token": "token-xyz789",
-  "status": "running",
-  "idle_seconds": 120,
-  "gpu_util_pct": 85.5,
-  "memory_used_mb": 20480
-}
-```
-
-**Response**
-```json
-{
-  "status": "ok",
-  "session_id": "sess-abc123"
-}
-```
-
-**Errors**
-- `401 Unauthorized` - Invalid agent token
-- `404 Not Found` - Session not found
 
 ---
 
@@ -375,41 +344,3 @@ Common HTTP status codes:
 - `404 Not Found` - Resource not found
 - `500 Internal Server Error` - Server error
 
----
-
-## Agent API (Node Agent Endpoints)
-
-The node agent exposes these endpoints on port 8081 by default.
-
-### GET /health
-
-Agent health check.
-
-**Response**
-```json
-{
-  "status": "ok",
-  "session_id": "sess-abc123",
-  "uptime": "2h30m15s",
-  "timestamp": "2026-01-29T14:30:00Z"
-}
-```
-
-### GET /status
-
-Detailed agent status.
-
-**Response**
-```json
-{
-  "session_id": "sess-abc123",
-  "status": "running",
-  "idle_seconds": 120,
-  "gpu_utilization_pct": 85.5,
-  "memory_used_mb": 20480,
-  "uptime": "2h30m15s",
-  "shopper_reachable": true,
-  "heartbeat_failures": 0,
-  "timestamp": "2026-01-29T14:30:00Z"
-}
-```

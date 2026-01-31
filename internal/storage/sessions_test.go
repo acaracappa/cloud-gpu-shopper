@@ -84,7 +84,6 @@ func TestSessionStore_Update(t *testing.T) {
 	session.SSHHost = "192.168.1.100"
 	session.SSHPort = 22
 	session.SSHUser = "root"
-	session.AgentEndpoint = "http://192.168.1.100:8080"
 
 	err = store.Update(ctx, session)
 	require.NoError(t, err)
@@ -96,7 +95,6 @@ func TestSessionStore_Update(t *testing.T) {
 	assert.Equal(t, "provider-instance-123", retrieved.ProviderID)
 	assert.Equal(t, "192.168.1.100", retrieved.SSHHost)
 	assert.Equal(t, 22, retrieved.SSHPort)
-	assert.Equal(t, "http://192.168.1.100:8080", retrieved.AgentEndpoint)
 }
 
 func TestSessionStore_Update_NotFound(t *testing.T) {
@@ -297,52 +295,6 @@ func TestSessionStore_GetExpiredSessions(t *testing.T) {
 	assert.Equal(t, "sess-expired", results[0].ID)
 }
 
-func TestSessionStore_UpdateHeartbeat(t *testing.T) {
-	db := newTestDB(t)
-	store := NewSessionStore(db)
-	ctx := context.Background()
-
-	now := time.Now()
-
-	// Create session
-	session := &models.Session{
-		ID:             "sess-heartbeat",
-		ConsumerID:     "consumer-001",
-		Provider:       "vastai",
-		OfferID:        "offer-1",
-		GPUType:        "RTX4090",
-		GPUCount:       1,
-		Status:         models.StatusRunning,
-		WorkloadType:   "ml-training",
-		ReservationHrs: 4,
-		StoragePolicy:  "destroy",
-		PricePerHour:   0.50,
-		CreatedAt:      now,
-		ExpiresAt:      now.Add(4 * time.Hour),
-	}
-	err := store.Create(ctx, session)
-	require.NoError(t, err)
-
-	// Update heartbeat
-	heartbeatTime := now.Add(time.Minute)
-	err = store.UpdateHeartbeat(ctx, "sess-heartbeat", heartbeatTime)
-	require.NoError(t, err)
-
-	// Verify
-	retrieved, err := store.Get(ctx, "sess-heartbeat")
-	require.NoError(t, err)
-	assert.WithinDuration(t, heartbeatTime, retrieved.LastHeartbeat, time.Second)
-}
-
-func TestSessionStore_UpdateHeartbeat_NotFound(t *testing.T) {
-	db := newTestDB(t)
-	store := NewSessionStore(db)
-	ctx := context.Background()
-
-	err := store.UpdateHeartbeat(ctx, "nonexistent", time.Now())
-	assert.ErrorIs(t, err, ErrNotFound)
-}
-
 func TestSessionStore_NullableFields(t *testing.T) {
 	db := newTestDB(t)
 	store := NewSessionStore(db)
@@ -377,9 +329,7 @@ func TestSessionStore_NullableFields(t *testing.T) {
 	assert.Empty(t, retrieved.SSHHost)
 	assert.Zero(t, retrieved.SSHPort)
 	assert.Empty(t, retrieved.SSHUser)
-	assert.Empty(t, retrieved.AgentEndpoint)
 	assert.Empty(t, retrieved.Error)
-	assert.True(t, retrieved.LastHeartbeat.IsZero())
 	assert.True(t, retrieved.StoppedAt.IsZero())
 }
 

@@ -34,14 +34,7 @@ func TestHardMaxOverride(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Session is created successfully - hard max behavior will be enforced
@@ -77,14 +70,7 @@ func TestSessionExpiresAtIsSet(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Verify expiration is set correctly (approximately 2 hours from now)
@@ -124,14 +110,7 @@ func TestSessionExtensionWithinLimits(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Get original expiry
@@ -176,14 +155,7 @@ func TestReservationHoursPreserved(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Verify reservation hours

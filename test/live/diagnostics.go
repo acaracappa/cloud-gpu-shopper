@@ -23,40 +23,17 @@ type DiagnosticsCollector struct {
 	snapshots  []string
 }
 
-// AgentHealthResponse represents the agent /health endpoint response
-type AgentHealthResponse struct {
-	Status    string    `json:"status"`
-	SessionID string    `json:"session_id"`
-	Uptime    string    `json:"uptime"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// AgentStatusResponse represents the agent /status endpoint response
-type AgentStatusResponse struct {
-	SessionID          string  `json:"session_id"`
-	Status             string  `json:"status"`
-	IdleSeconds        int     `json:"idle_seconds"`
-	GPUUtilization     float64 `json:"gpu_utilization_pct"`
-	MemoryUsedMB       int     `json:"memory_used_mb"`
-	Uptime             string  `json:"uptime"`
-	HeartbeatFailures  int     `json:"heartbeat_failures"`
-	ShopperReachable   bool    `json:"shopper_reachable"`
-}
-
 // DiagnosticSnapshot contains all collected diagnostic data
 type DiagnosticSnapshot struct {
-	Timestamp       time.Time              `json:"timestamp"`
-	Label           string                 `json:"label"`
-	SessionID       string                 `json:"session_id"`
-	SessionState    *Session               `json:"session_state,omitempty"`
-	AgentHealth     *AgentHealthResponse   `json:"agent_health,omitempty"`
-	AgentStatus     *AgentStatusResponse   `json:"agent_status,omitempty"`
-	AgentLogs       string                 `json:"agent_logs,omitempty"`
-	Processes       string                 `json:"processes,omitempty"`
-	Environment     string                 `json:"environment,omitempty"`
-	NvidiaSMI       string                 `json:"nvidia_smi,omitempty"`
-	Network         string                 `json:"network,omitempty"`
-	Errors          []string               `json:"errors,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
+	Label        string    `json:"label"`
+	SessionID    string    `json:"session_id"`
+	SessionState *Session  `json:"session_state,omitempty"`
+	Processes    string    `json:"processes,omitempty"`
+	Environment  string    `json:"environment,omitempty"`
+	NvidiaSMI    string    `json:"nvidia_smi,omitempty"`
+	Network      string    `json:"network,omitempty"`
+	Errors       []string  `json:"errors,omitempty"`
 }
 
 // NewDiagnosticsCollector creates a new diagnostics collector
@@ -100,32 +77,8 @@ func (d *DiagnosticsCollector) CollectSnapshot(ctx context.Context, label string
 		}
 	}
 
-	// Collect from agent via SSH if connected
+	// Collect from instance via SSH if connected
 	if d.sshHelper != nil && d.sshHelper.IsConnected() {
-		// Agent health endpoint
-		health, err := d.collectAgentHealth(ctx)
-		if err != nil {
-			snapshot.Errors = append(snapshot.Errors, fmt.Sprintf("agent health: %v", err))
-		} else {
-			snapshot.AgentHealth = health
-		}
-
-		// Agent status endpoint
-		status, err := d.collectAgentStatus(ctx)
-		if err != nil {
-			snapshot.Errors = append(snapshot.Errors, fmt.Sprintf("agent status: %v", err))
-		} else {
-			snapshot.AgentStatus = status
-		}
-
-		// Agent logs
-		logs, err := d.collectAgentLogs(ctx)
-		if err != nil {
-			snapshot.Errors = append(snapshot.Errors, fmt.Sprintf("agent logs: %v", err))
-		} else {
-			snapshot.AgentLogs = logs
-		}
-
 		// Process list
 		procs, err := d.sshHelper.GetProcessList(ctx)
 		if err != nil {
@@ -191,56 +144,6 @@ func (d *DiagnosticsCollector) getSessionSafe(ctx context.Context) (*Session, er
 	return &session, nil
 }
 
-func (d *DiagnosticsCollector) collectAgentHealth(ctx context.Context) (*AgentHealthResponse, error) {
-	output, err := d.sshHelper.CurlEndpoint(ctx, "http://localhost:8081/health")
-	if err != nil {
-		return nil, err
-	}
-
-	var health AgentHealthResponse
-	if err := json.Unmarshal([]byte(output), &health); err != nil {
-		return nil, fmt.Errorf("parse error: %w (output: %s)", err, output)
-	}
-	return &health, nil
-}
-
-func (d *DiagnosticsCollector) collectAgentStatus(ctx context.Context) (*AgentStatusResponse, error) {
-	output, err := d.sshHelper.CurlEndpoint(ctx, "http://localhost:8081/status")
-	if err != nil {
-		return nil, err
-	}
-
-	var status AgentStatusResponse
-	if err := json.Unmarshal([]byte(output), &status); err != nil {
-		return nil, fmt.Errorf("parse error: %w (output: %s)", err, output)
-	}
-	return &status, nil
-}
-
-func (d *DiagnosticsCollector) collectAgentLogs(ctx context.Context) (string, error) {
-	// Try common log locations
-	locations := []string{
-		"/var/log/gpu-agent.log",
-		"/tmp/gpu-agent.log",
-		"/var/log/shopper-agent.log",
-	}
-
-	for _, loc := range locations {
-		exists, err := d.sshHelper.FileExists(ctx, loc)
-		if err == nil && exists {
-			return d.sshHelper.TailFile(ctx, loc, 200)
-		}
-	}
-
-	// Try journalctl if available
-	output, err := d.sshHelper.RunCommandWithOutput(ctx, "journalctl -u gpu-agent --no-pager -n 200 2>/dev/null || echo 'No journalctl logs'")
-	if err == nil && output != "No journalctl logs" {
-		return output, nil
-	}
-
-	return "No agent logs found", nil
-}
-
 func (d *DiagnosticsCollector) saveSnapshot(snapshot *DiagnosticSnapshot) error {
 	filename := fmt.Sprintf("%s_%s.json", snapshot.Timestamp.Format("20060102_150405"), snapshot.Label)
 	path := filepath.Join(d.outputDir, filename)
@@ -274,31 +177,6 @@ func (d *DiagnosticsCollector) CollectProvisionData(request *CreateSessionReques
 	}
 
 	return d.SaveTextFile("provision.json", string(content))
-}
-
-// CollectHeartbeatData saves heartbeat timeline data
-func (d *DiagnosticsCollector) CollectHeartbeatData(heartbeats []HeartbeatRecord) error {
-	data := map[string]interface{}{
-		"timestamp":  time.Now(),
-		"count":      len(heartbeats),
-		"heartbeats": heartbeats,
-	}
-
-	content, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return d.SaveTextFile("heartbeats.json", string(content))
-}
-
-// HeartbeatRecord represents a recorded heartbeat
-type HeartbeatRecord struct {
-	Timestamp     time.Time `json:"timestamp"`
-	GPUUtilPct    float64   `json:"gpu_util_pct"`
-	IdleSeconds   int       `json:"idle_seconds"`
-	MemoryUsedMB  int       `json:"memory_used_mb"`
-	FailureCount  int       `json:"failure_count,omitempty"`
 }
 
 // GenerateSummary creates a summary file for the test

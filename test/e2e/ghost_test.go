@@ -32,14 +32,7 @@ func TestGhostDetection(t *testing.T) {
 	sessionID := createResp.Session.ID
 	t.Logf("Created session: %s", sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	session := env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	t.Logf("Session is running")
 
@@ -110,14 +103,7 @@ func TestGhostDetectionPreservesRunningInstances(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Get initial metrics
@@ -154,7 +140,6 @@ func TestMultipleGhostDetection(t *testing.T) {
 
 	// Create multiple sessions
 	var sessionIDs []string
-	var agentTokens []string
 	for i := 0; i < 2; i++ {
 		createResp := env.CreateSession(t, CreateSessionRequest{
 			ConsumerID:     GenerateConsumerID(),
@@ -163,20 +148,10 @@ func TestMultipleGhostDetection(t *testing.T) {
 			ReservationHrs: 1,
 		})
 		sessionIDs = append(sessionIDs, createResp.Session.ID)
-		agentTokens = append(agentTokens, createResp.AgentToken)
 		t.Logf("Created session %d: %s", i+1, createResp.Session.ID)
 	}
 
-	// Send heartbeats to transition all to running
-	for i, sessionID := range sessionIDs {
-		env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-			SessionID:  sessionID,
-			AgentToken: agentTokens[i],
-			Status:     "running",
-		})
-	}
-
-	// Wait for all running
+	// Wait for all running (SSH verification completes automatically)
 	for _, sessionID := range sessionIDs {
 		env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	}

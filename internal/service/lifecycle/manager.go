@@ -18,9 +18,6 @@ const (
 	// DefaultHardMaxHours is the maximum session duration without override
 	DefaultHardMaxHours = 12
 
-	// DefaultHeartbeatTimeout is how long before a missing heartbeat triggers action
-	DefaultHeartbeatTimeout = 5 * time.Minute
-
 	// DefaultOrphanGracePeriod is how long past reservation before marking as orphan
 	DefaultOrphanGracePeriod = 15 * time.Minute
 )
@@ -43,19 +40,15 @@ type SessionDestroyer interface {
 type EventHandler interface {
 	OnSessionExpired(session *models.Session)
 	OnHardMaxReached(session *models.Session)
-	OnHeartbeatTimeout(session *models.Session)
 	OnOrphanDetected(session *models.Session)
-	OnIdleShutdown(sessionID string, idleSeconds int)
 }
 
 // noopEventHandler is a default handler that does nothing
 type noopEventHandler struct{}
 
-func (n *noopEventHandler) OnSessionExpired(session *models.Session)         {}
-func (n *noopEventHandler) OnHardMaxReached(session *models.Session)         {}
-func (n *noopEventHandler) OnHeartbeatTimeout(session *models.Session)       {}
-func (n *noopEventHandler) OnOrphanDetected(session *models.Session)         {}
-func (n *noopEventHandler) OnIdleShutdown(sessionID string, idleSeconds int) {}
+func (n *noopEventHandler) OnSessionExpired(session *models.Session) {}
+func (n *noopEventHandler) OnHardMaxReached(session *models.Session) {}
+func (n *noopEventHandler) OnOrphanDetected(session *models.Session) {}
 
 // Manager handles session lifecycle operations
 type Manager struct {
@@ -67,7 +60,6 @@ type Manager struct {
 	// Configuration
 	checkInterval     time.Duration
 	hardMaxHours      int
-	heartbeatTimeout  time.Duration
 	orphanGracePeriod time.Duration
 
 	// For time mocking in tests
@@ -85,15 +77,13 @@ type Manager struct {
 
 // Metrics tracks lifecycle manager statistics
 type Metrics struct {
-	mu                sync.RWMutex
-	ChecksRun         int64
-	SessionsExpired   int64
-	HardMaxEnforced   int64
-	HeartbeatTimeouts int64
-	OrphansDetected   int64
-	IdleShutdowns     int64
-	DestroySuccesses  int64
-	DestroyFailures   int64
+	mu               sync.RWMutex
+	ChecksRun        int64
+	SessionsExpired  int64
+	HardMaxEnforced  int64
+	OrphansDetected  int64
+	DestroySuccesses int64
+	DestroyFailures  int64
 }
 
 // Option configures the lifecycle manager
@@ -117,13 +107,6 @@ func WithCheckInterval(d time.Duration) Option {
 func WithHardMaxHours(hours int) Option {
 	return func(m *Manager) {
 		m.hardMaxHours = hours
-	}
-}
-
-// WithHeartbeatTimeout sets the heartbeat timeout duration
-func WithHeartbeatTimeout(d time.Duration) Option {
-	return func(m *Manager) {
-		m.heartbeatTimeout = d
 	}
 }
 
@@ -157,7 +140,6 @@ func New(store SessionStore, destroyer SessionDestroyer, opts ...Option) *Manage
 		logger:            slog.Default(),
 		checkInterval:     DefaultCheckInterval,
 		hardMaxHours:      DefaultHardMaxHours,
-		heartbeatTimeout:  DefaultHeartbeatTimeout,
 		orphanGracePeriod: DefaultOrphanGracePeriod,
 		now:               time.Now,
 		stopCh:            make(chan struct{}),
@@ -245,9 +227,7 @@ func (m *Manager) runChecks(ctx context.Context) {
 	// Run checks in order of priority
 	m.checkHardMax(ctx)
 	m.checkReservationExpiry(ctx)
-	m.checkHeartbeatTimeout(ctx)
 	m.checkOrphans(ctx)
-	m.checkIdleSessions(ctx)
 }
 
 // checkHardMax enforces the 12-hour maximum session duration
@@ -331,50 +311,6 @@ func (m *Manager) checkReservationExpiry(ctx context.Context) {
 	}
 }
 
-// checkHeartbeatTimeout detects sessions with stale heartbeats
-func (m *Manager) checkHeartbeatTimeout(ctx context.Context) {
-	sessions, err := m.store.GetSessionsByStatus(ctx, models.StatusRunning)
-	if err != nil {
-		m.logger.Error("failed to get running sessions for heartbeat check",
-			slog.String("error", err.Error()))
-		return
-	}
-
-	now := m.now()
-
-	for _, session := range sessions {
-		// Skip sessions that never received a heartbeat (still starting up)
-		if session.LastHeartbeat.IsZero() {
-			continue
-		}
-
-		// Check heartbeat age
-		heartbeatAge := now.Sub(session.LastHeartbeat)
-		if heartbeatAge > m.heartbeatTimeout {
-			m.logger.Warn("session heartbeat timeout",
-				slog.String("session_id", session.ID),
-				slog.Duration("heartbeat_age", heartbeatAge),
-				slog.Duration("timeout", m.heartbeatTimeout))
-
-			m.metrics.mu.Lock()
-			m.metrics.HeartbeatTimeouts++
-			m.metrics.mu.Unlock()
-
-			// Record audit log and metrics
-			logging.Audit(ctx, "heartbeat_timeout",
-				"session_id", session.ID,
-				"consumer_id", session.ConsumerID,
-				"provider", session.Provider,
-				"heartbeat_age_seconds", heartbeatAge.Seconds(),
-				"timeout_seconds", m.heartbeatTimeout.Seconds())
-			metrics.RecordSessionDestroyed(session.Provider, "heartbeat_timeout")
-
-			m.handler.OnHeartbeatTimeout(session)
-			m.destroySession(ctx, session, "heartbeat timeout")
-		}
-	}
-}
-
 // checkOrphans detects sessions running past reservation without extension
 func (m *Manager) checkOrphans(ctx context.Context) {
 	sessions, err := m.store.GetSessionsByStatus(ctx, models.StatusRunning)
@@ -402,51 +338,6 @@ func (m *Manager) checkOrphans(ctx context.Context) {
 			m.handler.OnOrphanDetected(session)
 			// Note: We don't auto-destroy orphans here - that's handled by reconciliation
 			// This is just for alerting. The actual orphan detection compares provider state.
-		}
-	}
-}
-
-// checkIdleSessions destroys sessions that have exceeded their idle threshold
-func (m *Manager) checkIdleSessions(ctx context.Context) {
-	sessions, err := m.store.GetSessionsByStatus(ctx, models.StatusRunning)
-	if err != nil {
-		m.logger.Error("failed to get running sessions for idle check",
-			slog.String("error", err.Error()))
-		return
-	}
-
-	for _, session := range sessions {
-		// Skip sessions without idle threshold configured
-		if session.IdleThreshold <= 0 {
-			continue
-		}
-
-		// Convert threshold from minutes to seconds
-		thresholdSeconds := session.IdleThreshold * 60
-
-		// Check if idle time exceeds threshold
-		if session.LastIdleSeconds > thresholdSeconds {
-			m.logger.Warn("session exceeded idle threshold",
-				slog.String("session_id", session.ID),
-				slog.Int("idle_seconds", session.LastIdleSeconds),
-				slog.Int("threshold_seconds", thresholdSeconds))
-
-			m.metrics.mu.Lock()
-			m.metrics.IdleShutdowns++
-			m.metrics.mu.Unlock()
-
-			// Record audit log and metrics
-			logging.Audit(ctx, "idle_shutdown",
-				"session_id", session.ID,
-				"consumer_id", session.ConsumerID,
-				"provider", session.Provider,
-				"idle_seconds", session.LastIdleSeconds,
-				"threshold_minutes", session.IdleThreshold)
-			metrics.RecordIdleShutdown()
-			metrics.RecordSessionDestroyed(session.Provider, "idle")
-
-			m.handler.OnIdleShutdown(session.ID, session.LastIdleSeconds)
-			m.destroySession(ctx, session, "idle threshold exceeded")
 		}
 	}
 }
@@ -547,14 +438,12 @@ func (m *Manager) GetMetrics() Metrics {
 	defer m.metrics.mu.RUnlock()
 
 	return Metrics{
-		ChecksRun:         m.metrics.ChecksRun,
-		SessionsExpired:   m.metrics.SessionsExpired,
-		HardMaxEnforced:   m.metrics.HardMaxEnforced,
-		HeartbeatTimeouts: m.metrics.HeartbeatTimeouts,
-		OrphansDetected:   m.metrics.OrphansDetected,
-		IdleShutdowns:     m.metrics.IdleShutdowns,
-		DestroySuccesses:  m.metrics.DestroySuccesses,
-		DestroyFailures:   m.metrics.DestroyFailures,
+		ChecksRun:        m.metrics.ChecksRun,
+		SessionsExpired:  m.metrics.SessionsExpired,
+		HardMaxEnforced:  m.metrics.HardMaxEnforced,
+		OrphansDetected:  m.metrics.OrphansDetected,
+		DestroySuccesses: m.metrics.DestroySuccesses,
+		DestroyFailures:  m.metrics.DestroyFailures,
 	}
 }
 

@@ -77,21 +77,6 @@ func (m *mockSessionStore) Update(ctx context.Context, session *models.Session) 
 	return nil
 }
 
-func (m *mockSessionStore) UpdateHeartbeat(ctx context.Context, id string, t time.Time) error {
-	if s, ok := m.sessions[id]; ok {
-		s.LastHeartbeat = t
-	}
-	return nil
-}
-
-func (m *mockSessionStore) UpdateHeartbeatWithIdle(ctx context.Context, id string, t time.Time, idleSeconds int) error {
-	if s, ok := m.sessions[id]; ok {
-		s.LastHeartbeat = t
-		s.LastIdleSeconds = idleSeconds
-	}
-	return nil
-}
-
 func (m *mockSessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error) {
 	for _, session := range m.sessions {
 		if session.ConsumerID == consumerID && session.OfferID == offerID {
@@ -211,7 +196,10 @@ func setupTestServer() *Server {
 	costStore := newMockCostStore()
 	ct := cost.New(costStore, sessionStore, nil)
 
-	return New(inv, prov, lm, ct)
+	server := New(inv, prov, lm, ct)
+	// Set server as ready by default in tests
+	server.SetReady(true)
+	return server
 }
 
 func TestHealth(t *testing.T) {
@@ -228,6 +216,59 @@ func TestHealth(t *testing.T) {
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", response.Status)
+	assert.Equal(t, "true", response.Services["ready"])
+}
+
+func TestHealthNotReady(t *testing.T) {
+	server := setupTestServer()
+	server.SetReady(false)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+
+	var response HealthResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.Equal(t, "unavailable", response.Status)
+	assert.Equal(t, "false", response.Services["ready"])
+}
+
+func TestReadyEndpoint(t *testing.T) {
+	server := setupTestServer()
+
+	// Server is ready by default in test setup
+	req := httptest.NewRequest("GET", "/ready", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response ReadyResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.True(t, response.Ready)
+}
+
+func TestReadyEndpointNotReady(t *testing.T) {
+	server := setupTestServer()
+	server.SetReady(false)
+
+	req := httptest.NewRequest("GET", "/ready", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+
+	var response ReadyResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.False(t, response.Ready)
 }
 
 func TestListInventory(t *testing.T) {
@@ -346,7 +387,6 @@ func TestCreateSession(t *testing.T) {
 	assert.NotEmpty(t, response.Session.ID)
 	assert.Equal(t, "consumer-001", response.Session.ConsumerID)
 	assert.NotEmpty(t, response.SSHPrivateKey)
-	assert.NotEmpty(t, response.AgentToken)
 }
 
 func TestCreateSessionBadRequest(t *testing.T) {

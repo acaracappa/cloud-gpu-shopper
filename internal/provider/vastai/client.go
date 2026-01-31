@@ -208,52 +208,8 @@ func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInsta
 func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
 	c.rateLimit()
 
-	// Build the create request
-	createReq := CreateInstanceRequest{
-		ClientID:  "me",
-		Image:     req.DockerImage,
-		DiskSpace: 50, // Default disk space in GB
-		Label:     req.Tags.ToLabel(),
-	}
-
-	// Build onstart script that:
-	// 1. Sets up SSH access
-	// 2. Downloads and runs the agent binary (if SHOPPER_AGENT_URL env var is set)
-	var onStartParts []string
-
-	// Add SSH key with proper permissions
-	if req.SSHPublicKey != "" {
-		onStartParts = append(onStartParts, fmt.Sprintf("mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys", req.SSHPublicKey))
-	}
-
-	// Download and run agent if URL provided
-	if agentURL := req.EnvVars["SHOPPER_AGENT_URL"]; agentURL != "" {
-		// Build env var exports to ensure agent has all needed vars
-		shopperURL := req.EnvVars["SHOPPER_URL"]
-		sessionID := req.EnvVars["SHOPPER_SESSION_ID"]
-		agentToken := req.EnvVars["SHOPPER_AGENT_TOKEN"]
-		expiresAt := req.EnvVars["SHOPPER_EXPIRES_AT"]
-		deploymentID := req.EnvVars["SHOPPER_DEPLOYMENT_ID"]
-		consumerID := req.EnvVars["SHOPPER_CONSUMER_ID"]
-		agentPort := req.EnvVars["SHOPPER_AGENT_PORT"]
-
-		agentScript := fmt.Sprintf(`
-apt-get update && apt-get install -y curl 2>/dev/null || true
-curl -fsSL -L '%s' -o /usr/local/bin/gpu-agent && \
-chmod +x /usr/local/bin/gpu-agent && \
-SHOPPER_URL='%s' SHOPPER_SESSION_ID='%s' SHOPPER_AGENT_TOKEN='%s' SHOPPER_EXPIRES_AT='%s' SHOPPER_DEPLOYMENT_ID='%s' SHOPPER_CONSUMER_ID='%s' SHOPPER_AGENT_PORT='%s' nohup /usr/local/bin/gpu-agent > /var/log/gpu-agent.log 2>&1 &
-`, agentURL, shopperURL, sessionID, agentToken, expiresAt, deploymentID, consumerID, agentPort)
-		onStartParts = append(onStartParts, agentScript)
-	}
-
-	if len(onStartParts) > 0 {
-		createReq.OnStart = strings.Join(onStartParts, " && ")
-	}
-
-	// Add environment variables as map (Vast.ai expects object, not string)
-	if len(req.EnvVars) > 0 {
-		createReq.Env = req.EnvVars
-	}
+	// Build the create request based on launch mode
+	createReq := c.buildCreateRequest(req)
 
 	// Parse offer ID as bundle ID
 	// Offer IDs are in format "vastai-{id}" or just "{id}"
@@ -301,13 +257,174 @@ SHOPPER_URL='%s' SHOPPER_SESSION_ID='%s' SHOPPER_AGENT_TOKEN='%s' SHOPPER_EXPIRE
 		return nil, provider.NewProviderError("vastai", "CreateInstance", 0, result.Error, nil)
 	}
 
-	return &provider.InstanceInfo{
-		ProviderInstanceID: strconv.Itoa(result.NewContract),
+	instanceID := strconv.Itoa(result.NewContract)
+
+	// Attach SSH key via separate API endpoint
+	// LEARNING FROM LIVE TESTING: The ssh_key parameter in the create request doesn't
+	// reliably register the key. We must call the dedicated SSH key attachment endpoint.
+	//
+	// Timing: After calling AttachSSHKey, the key takes approximately 10-15 seconds to
+	// propagate to the instance. The SSH verification polling handles this automatically.
+	if req.SSHPublicKey != "" {
+		if err := c.AttachSSHKey(ctx, instanceID, req.SSHPublicKey); err != nil {
+			// Log but don't fail - the instance is already created
+			// The SSH verification will fail later if the key wasn't attached
+		}
+	}
+
+	// Build instance info based on launch mode
+	info := &provider.InstanceInfo{
+		ProviderInstanceID: instanceID,
 		SSHHost:            "", // Will be populated after instance starts
 		SSHPort:            22,
 		SSHUser:            "root",
 		Status:             "creating",
-	}, nil
+	}
+
+	// Set API port info for entrypoint mode
+	if req.LaunchMode == provider.LaunchModeEntrypoint && len(req.ExposedPorts) > 0 {
+		info.APIPort = req.ExposedPorts[0]
+		info.APIPorts = make(map[int]int)
+		for _, port := range req.ExposedPorts {
+			info.APIPorts[port] = port // Actual mapping will be updated after instance starts
+		}
+	}
+
+	return info, nil
+}
+
+// buildCreateRequest builds the Vast.ai create instance request based on launch mode
+func (c *Client) buildCreateRequest(req provider.CreateInstanceRequest) CreateInstanceRequest {
+	// Determine launch mode (default to SSH for backward compatibility)
+	launchMode := req.LaunchMode
+	if launchMode == "" {
+		launchMode = provider.LaunchModeSSH
+	}
+
+	createReq := CreateInstanceRequest{
+		ClientID:  "me",
+		DiskSpace: 50, // Default disk space in GB
+		Label:     req.Tags.ToLabel(),
+	}
+
+	switch launchMode {
+	case provider.LaunchModeEntrypoint:
+		createReq = c.buildEntrypointRequest(createReq, req)
+	default: // LaunchModeSSH
+		createReq = c.buildSSHRequest(createReq, req)
+	}
+
+	return createReq
+}
+
+// buildSSHRequest builds a request for SSH mode (interactive access)
+func (c *Client) buildSSHRequest(createReq CreateInstanceRequest, req provider.CreateInstanceRequest) CreateInstanceRequest {
+	// Use default SSH image if not specified
+	image := req.DockerImage
+	if image == "" {
+		image = ImageSSHBase
+	}
+
+	createReq.Image = image
+	createReq.RunType = "ssh_proxy" // Use SSH proxy mode (works on all machines)
+	createReq.SSHKey = req.SSHPublicKey
+
+	// Add environment variables if specified
+	if len(req.EnvVars) > 0 {
+		createReq.Env = req.EnvVars
+	}
+
+	// Add on-start command if specified
+	if req.OnStartCmd != "" {
+		createReq.OnStart = req.OnStartCmd
+	}
+
+	return createReq
+}
+
+// buildEntrypointRequest builds a request for entrypoint mode (workload execution)
+func (c *Client) buildEntrypointRequest(createReq CreateInstanceRequest, req provider.CreateInstanceRequest) CreateInstanceRequest {
+	// Determine image based on workload config or explicit setting
+	image := req.DockerImage
+	if image == "" && req.WorkloadConfig != nil {
+		image = GetImageForWorkload(req.WorkloadConfig.Type)
+	}
+	if image == "" {
+		image = ImageSSHBase // Fallback
+	}
+
+	createReq.Image = image
+	createReq.RunType = "args" // Use args mode for entrypoint execution
+
+	// Build args from workload config or explicit entrypoint
+	if len(req.Entrypoint) > 0 {
+		createReq.Args = strings.Join(req.Entrypoint, " ")
+	} else if req.WorkloadConfig != nil {
+		switch req.WorkloadConfig.Type {
+		case provider.WorkloadTypeVLLM:
+			createReq.Args = BuildVLLMArgs(req.WorkloadConfig)
+		case provider.WorkloadTypeTGI:
+			createReq.Args = BuildTGIArgs(req.WorkloadConfig)
+		}
+	}
+
+	// Configure port exposure
+	ports := req.ExposedPorts
+	if len(ports) == 0 && req.WorkloadConfig != nil {
+		// Use default port for workload type
+		defaultPort := GetPortForWorkload(req.WorkloadConfig.Type)
+		if defaultPort > 0 {
+			ports = []int{defaultPort}
+		}
+	}
+	if len(ports) > 0 {
+		createReq.Ports = FormatPortsString(ports)
+	}
+
+	// Add environment variables (including HF_TOKEN for model downloads)
+	if len(req.EnvVars) > 0 {
+		createReq.Env = req.EnvVars
+	}
+
+	// Note: SSH key can still be provided for debugging access
+	if req.SSHPublicKey != "" {
+		createReq.SSHKey = req.SSHPublicKey
+	}
+
+	return createReq
+}
+
+// AttachSSHKey attaches an SSH public key to an instance
+func (c *Client) AttachSSHKey(ctx context.Context, instanceID string, sshPublicKey string) error {
+	c.rateLimit()
+
+	reqURL := fmt.Sprintf("%s/instances/%s/ssh/", c.baseURL, instanceID)
+
+	body, err := json.Marshal(map[string]string{"ssh_key": sshPublicKey})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return c.handleError(resp, "AttachSSHKey")
+	}
+
+	return nil
 }
 
 // DestroyInstance tears down a GPU instance

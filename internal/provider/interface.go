@@ -29,6 +29,35 @@ const (
 	FeatureCustomImages  ProviderFeature = "custom_images"
 )
 
+// LaunchMode determines how the instance is configured
+type LaunchMode string
+
+const (
+	// LaunchModeSSH configures the instance for interactive SSH access
+	LaunchModeSSH LaunchMode = "ssh"
+	// LaunchModeEntrypoint configures the instance to run a specific workload (e.g., vLLM, TGI)
+	LaunchModeEntrypoint LaunchMode = "entrypoint"
+)
+
+// WorkloadType represents the type of workload for entrypoint mode
+type WorkloadType string
+
+const (
+	WorkloadTypeVLLM   WorkloadType = "vllm"
+	WorkloadTypeTGI    WorkloadType = "tgi"
+	WorkloadTypeCustom WorkloadType = "custom"
+)
+
+// WorkloadConfig contains configuration for entrypoint-mode workloads
+type WorkloadConfig struct {
+	Type          WorkloadType // "vllm", "tgi", "custom"
+	ModelID       string       // HuggingFace model ID (e.g., "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+	GPUMemoryUtil float64      // GPU memory utilization (0.0-1.0, default 0.9)
+	Quantization  string       // Quantization method (e.g., "awq", "gptq", "")
+	MaxModelLen   int          // Maximum model context length
+	TensorParallel int         // Number of GPUs for tensor parallelism
+}
+
 // Provider defines the interface for GPU cloud providers
 type Provider interface {
 	// Name returns the provider identifier ("vastai" | "tensordock")
@@ -63,6 +92,12 @@ type CreateInstanceRequest struct {
 	EnvVars      map[string]string // Environment variables for the container
 	OnStartCmd   string            // Command to run on startup
 	Tags         models.InstanceTags
+
+	// Dual launch mode support
+	LaunchMode     LaunchMode      // "ssh" or "entrypoint" (default: ssh)
+	Entrypoint     []string        // Container entrypoint args (for entrypoint mode)
+	ExposedPorts   []int           // Ports to expose (e.g., 8000 for vLLM)
+	WorkloadConfig *WorkloadConfig // Structured workload config (vllm, tgi, etc.)
 }
 
 // InstanceInfo contains details about a provisioned instance
@@ -73,6 +108,11 @@ type InstanceInfo struct {
 	SSHUser            string
 	Status             string
 	ActualPricePerHour float64 // Actual price (may differ from offer)
+
+	// API endpoint info (for entrypoint mode)
+	APIHost  string // Public host for API access
+	APIPort  int    // Port for API access (e.g., 8000 for vLLM)
+	APIPorts map[int]int // Mapping of container port -> public port
 }
 
 // InstanceStatus represents the current state of a provider instance

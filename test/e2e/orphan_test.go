@@ -127,14 +127,7 @@ func TestLegitimateSessionNotOrphan(t *testing.T) {
 	sessionID := createResp.Session.ID
 	defer env.Cleanup(t, sessionID)
 
-	// Send heartbeat to transition to running
-	env.SendHeartbeat(t, sessionID, HeartbeatRequest{
-		SessionID:  sessionID,
-		AgentToken: createResp.AgentToken,
-		Status:     "running",
-	})
-
-	// Wait for running
+	// Wait for running (SSH verification completes automatically)
 	env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 
 	// Get metrics before reconciliation

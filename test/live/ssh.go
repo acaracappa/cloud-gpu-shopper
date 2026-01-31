@@ -15,7 +15,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// SSHHelper provides SSH connectivity to GPU nodes
+// SSHHelper provides SSH connectivity to GPU nodes.
+//
+// TIMING REQUIREMENTS (learned from live testing):
+//   - Vast.ai: After instance creation, SSH keys need ~10-15 seconds to propagate
+//   - TensorDock: Requires ~45 seconds for cloud-init to complete before SSH is ready
+//   - The provisioner service's SSH verification polling handles these delays automatically
+//   - When testing directly, allow sufficient time for key propagation before connecting
 type SSHHelper struct {
 	host       string
 	port       int
