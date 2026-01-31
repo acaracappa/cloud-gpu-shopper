@@ -442,6 +442,15 @@ func (s *Server) handleDeleteSession(c *gin.Context) {
 	sessionID := c.Param("id")
 
 	if err := s.provisioner.DestroySession(ctx, sessionID); err != nil {
+		// Check for not-found errors and return 404
+		var sessionNotFound *provisioner.SessionNotFoundError
+		if errors.As(err, &sessionNotFound) || errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:     fmt.Sprintf("session not found: %s", sessionID),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error:     err.Error(),
 			RequestID: c.GetString("request_id"),

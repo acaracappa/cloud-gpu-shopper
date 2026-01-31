@@ -82,6 +82,25 @@ var (
 		},
 	)
 
+	// SSHVerifyAttempts tracks the number of attempts needed for successful SSH verification
+	SSHVerifyAttempts = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "gpu_ssh_verify_attempts",
+			Help:    "Number of attempts needed for SSH verification by provider",
+			Buckets: prometheus.LinearBuckets(1, 1, 10), // 1 to 10 attempts
+		},
+		[]string{"provider"},
+	)
+
+	// SSHVerifyErrorTypes counts SSH verification errors by type
+	SSHVerifyErrorTypes = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gpu_ssh_verify_errors_by_type",
+			Help: "SSH verification errors by provider and error type (connection_refused, timeout, auth_failed, etc.)",
+		},
+		[]string{"provider", "error_type"},
+	)
+
 	// APIVerifyDuration tracks how long API verification takes (entrypoint mode)
 	APIVerifyDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -257,6 +276,16 @@ func RecordSSHVerifyDuration(provider string, duration time.Duration) {
 // RecordSSHVerifyFailure increments the SSH verify failure counter
 func RecordSSHVerifyFailure() {
 	SSHVerifyFailures.Inc()
+}
+
+// RecordSSHVerifyAttempts records the number of attempts for a successful SSH verification
+func RecordSSHVerifyAttempts(provider string, attempts int) {
+	SSHVerifyAttempts.WithLabelValues(provider).Observe(float64(attempts))
+}
+
+// RecordSSHVerifyError records an SSH verification error by type
+func RecordSSHVerifyError(provider, errorType string) {
+	SSHVerifyErrorTypes.WithLabelValues(provider, errorType).Inc()
 }
 
 // RecordHardMaxEnforced increments the hard max enforcement counter

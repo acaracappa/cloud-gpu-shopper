@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -533,12 +534,17 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 	defer timeout.Stop()
 
 	attemptCount := 0
+	lastErrorType := "none"
+	lastError := ""
 	for {
 		select {
 		case <-timeout.C:
 			// SSH verification timeout - destroy instance and fail session
 			logger.Error("SSH verification timeout, destroying instance",
-				slog.Int("attempts", attemptCount))
+				slog.Int("attempts", attemptCount),
+				slog.String("last_error_type", lastErrorType),
+				slog.String("last_error", lastError),
+				slog.Duration("elapsed", time.Since(start)))
 			session, err := s.store.Get(ctx, sessionID)
 			if err != nil {
 				logger.Error("failed to get session", slog.String("error", err.Error()))
@@ -632,10 +638,19 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					}
 
 					metrics.RecordSSHVerifyDuration(session.Provider, duration)
+					metrics.RecordSSHVerifyAttempts(session.Provider, attemptCount)
 					return
 				}
 
-				logger.Debug("SSH verification attempt failed", slog.String("error", err.Error()))
+				lastErrorType = classifySSHError(err)
+				lastError = err.Error()
+				logger.Info("SSH verification attempt failed",
+					slog.Int("attempt", attemptCount),
+					slog.String("error_type", lastErrorType),
+					slog.String("host", session.SSHHost),
+					slog.Int("port", session.SSHPort),
+					slog.String("error", lastError))
+				metrics.RecordSSHVerifyError(session.Provider, lastErrorType)
 			}
 
 			// Schedule next poll with progressive backoff
@@ -1017,4 +1032,63 @@ func (v *DefaultHTTPVerifier) CheckHealth(ctx context.Context, url string) error
 	}
 
 	return fmt.Errorf("unhealthy status: %d", resp.StatusCode)
+}
+
+// classifySSHError categorizes SSH connection errors for logging
+// Returns: error_type (connection_refused, timeout, auth_failed, etc.)
+func classifySSHError(err error) string {
+	if err == nil {
+		return "none"
+	}
+
+	errStr := err.Error()
+
+	// Connection refused - instance not accepting connections yet
+	if strings.Contains(errStr, "connection refused") {
+		return "connection_refused"
+	}
+
+	// Connection timeout - network issues or firewall
+	if strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "connection timed out") ||
+		strings.Contains(errStr, "deadline exceeded") {
+		return "timeout"
+	}
+
+	// No route to host - network unreachable
+	if strings.Contains(errStr, "no route to host") ||
+		strings.Contains(errStr, "network is unreachable") {
+		return "network_unreachable"
+	}
+
+	// DNS resolution failure
+	if strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "lookup") {
+		return "dns_failed"
+	}
+
+	// SSH handshake failures (auth)
+	if strings.Contains(errStr, "SSH handshake failed") ||
+		strings.Contains(errStr, "unable to authenticate") ||
+		strings.Contains(errStr, "permission denied") {
+		return "auth_failed"
+	}
+
+	// Private key issues
+	if strings.Contains(errStr, "failed to parse private key") {
+		return "key_parse_failed"
+	}
+
+	// Session/command failures
+	if strings.Contains(errStr, "failed to create session") ||
+		strings.Contains(errStr, "verify command failed") {
+		return "command_failed"
+	}
+
+	// EOF typically means the connection was closed
+	if strings.Contains(errStr, "EOF") {
+		return "connection_closed"
+	}
+
+	return "unknown"
 }

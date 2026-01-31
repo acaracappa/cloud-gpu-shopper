@@ -66,6 +66,7 @@ type LifecycleConfig struct {
 	StartupSweepEnabled    bool          `mapstructure:"startup_sweep_enabled"`
 	StartupSweepTimeout    time.Duration `mapstructure:"startup_sweep_timeout"`
 	ShutdownTimeout        time.Duration `mapstructure:"shutdown_timeout"`
+	DeploymentID           string        `mapstructure:"deployment_id"`
 }
 
 // SSHConfig holds SSH verification configuration
@@ -202,6 +203,9 @@ func bindEnvVars(v *viper.Viper) {
 	// Logging
 	bindEnv("logging.level", "LOG_LEVEL")
 	bindEnv("logging.format", "LOG_FORMAT")
+
+	// Lifecycle
+	bindEnv("lifecycle.deployment_id", "DEPLOYMENT_ID")
 }
 
 // Validate checks if the configuration is valid

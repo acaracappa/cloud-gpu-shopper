@@ -51,11 +51,13 @@ type Service struct {
 
 // providerCache holds cached offers for a single provider
 type providerCache struct {
-	offers    []models.GPUOffer
-	fetchedAt time.Time
-	expiresAt time.Time
-	err       error
-	inBackoff bool
+	offers     []models.GPUOffer
+	fetchedAt  time.Time
+	expiresAt  time.Time
+	softExpiry time.Time // When to start background refresh (before hard expiry)
+	err        error
+	inBackoff  bool
+	refreshing bool // True if a background refresh is in progress
 }
 
 // Option configures the inventory service
@@ -195,28 +197,108 @@ func (s *Service) fetchFromAllProviders(ctx context.Context, filter models.Offer
 }
 
 // getOffersWithCache returns cached offers or fetches fresh ones
+// Implements stale-while-revalidate pattern: returns stale data immediately
+// while refreshing in the background to avoid blocking requests
 func (s *Service) getOffersWithCache(ctx context.Context, p provider.Provider, filter models.OfferFilter) ([]models.GPUOffer, error) {
 	providerName := p.Name()
+	now := time.Now()
 
 	// Check cache first
 	s.mu.RLock()
 	cached, exists := s.cache[providerName]
 	s.mu.RUnlock()
 
-	if exists && time.Now().Before(cached.expiresAt) {
-		s.logger.Debug("using cached offers",
-			slog.String("provider", providerName),
-			slog.Int("count", len(cached.offers)),
-			slog.Bool("in_backoff", cached.inBackoff))
+	if exists {
+		// Case 1: Cache is still fresh (before soft expiry) - return immediately
+		if now.Before(cached.softExpiry) {
+			s.logger.Debug("using fresh cached offers",
+				slog.String("provider", providerName),
+				slog.Int("count", len(cached.offers)),
+				slog.Bool("in_backoff", cached.inBackoff))
 
-		if cached.err != nil {
-			return nil, cached.err
+			if cached.err != nil {
+				return nil, cached.err
+			}
+			return cached.offers, nil
 		}
-		return cached.offers, nil
+
+		// Case 2: Cache is stale but not expired - return stale data AND trigger background refresh
+		if now.Before(cached.expiresAt) && cached.err == nil && len(cached.offers) > 0 {
+			s.logger.Debug("using stale cached offers, triggering background refresh",
+				slog.String("provider", providerName),
+				slog.Int("count", len(cached.offers)))
+
+			// Trigger background refresh if not already refreshing
+			s.triggerBackgroundRefresh(p)
+
+			return cached.offers, nil
+		}
 	}
 
-	// Fetch fresh offers with timeout
-	s.logger.Debug("fetching offers from provider", slog.String("provider", providerName))
+	// Case 3: No cache or cache expired - must fetch synchronously
+	return s.fetchOffersSync(ctx, p)
+}
+
+// triggerBackgroundRefresh starts a background goroutine to refresh the cache
+func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
+	providerName := p.Name()
+
+	s.mu.Lock()
+	cached, exists := s.cache[providerName]
+	if exists && cached.refreshing {
+		s.mu.Unlock()
+		return // Already refreshing
+	}
+	if exists {
+		cached.refreshing = true
+	}
+	s.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.providerTimeout)
+		defer cancel()
+
+		s.logger.Debug("background refresh started", slog.String("provider", providerName))
+
+		offers, err := p.ListOffers(ctx, models.OfferFilter{})
+		now := time.Now()
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if err != nil {
+			s.logger.Warn("background refresh failed",
+				slog.String("provider", providerName),
+				slog.String("error", err.Error()))
+			// On error, keep the old cache but mark as no longer refreshing
+			if cached, exists := s.cache[providerName]; exists {
+				cached.refreshing = false
+			}
+			return
+		}
+
+		softExpiry := now.Add(s.cacheTTL * 3 / 4) // Soft expiry at 75% of TTL
+		s.cache[providerName] = &providerCache{
+			offers:     offers,
+			fetchedAt:  now,
+			expiresAt:  now.Add(s.cacheTTL),
+			softExpiry: softExpiry,
+			err:        nil,
+			inBackoff:  false,
+			refreshing: false,
+		}
+
+		s.logger.Debug("background refresh completed",
+			slog.String("provider", providerName),
+			slog.Int("count", len(offers)))
+	}()
+}
+
+// fetchOffersSync fetches offers synchronously and updates cache
+func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]models.GPUOffer, error) {
+	providerName := p.Name()
+
+	s.logger.Debug("fetching offers from provider (sync)", slog.String("provider", providerName))
 
 	fetchCtx, cancel := context.WithTimeout(ctx, s.providerTimeout)
 	defer cancel()
@@ -234,21 +316,26 @@ func (s *Service) getOffersWithCache(ctx context.Context, p provider.Provider, f
 			slog.String("error", err.Error()))
 
 		s.cache[providerName] = &providerCache{
-			offers:    nil,
-			fetchedAt: now,
-			expiresAt: now.Add(s.backoffTTL),
-			err:       err,
-			inBackoff: true,
+			offers:     nil,
+			fetchedAt:  now,
+			expiresAt:  now.Add(s.backoffTTL),
+			softExpiry: now.Add(s.backoffTTL),
+			err:        err,
+			inBackoff:  true,
+			refreshing: false,
 		}
 		return nil, err
 	}
 
+	softExpiry := now.Add(s.cacheTTL * 3 / 4) // Soft expiry at 75% of TTL
 	s.cache[providerName] = &providerCache{
-		offers:    offers,
-		fetchedAt: now,
-		expiresAt: now.Add(s.cacheTTL),
-		err:       nil,
-		inBackoff: false,
+		offers:     offers,
+		fetchedAt:  now,
+		expiresAt:  now.Add(s.cacheTTL),
+		softExpiry: softExpiry,
+		err:        nil,
+		inBackoff:  false,
+		refreshing: false,
 	}
 
 	s.logger.Debug("cached offers from provider",

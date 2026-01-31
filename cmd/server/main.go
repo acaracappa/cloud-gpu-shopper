@@ -85,10 +85,15 @@ func main() {
 	invService := inventory.New(providers, inventory.WithLogger(logger))
 
 	registry := provisioner.NewSimpleProviderRegistry(providers)
-	provService := provisioner.New(sessionStore, registry,
+	provOpts := []provisioner.Option{
 		provisioner.WithLogger(logger),
 		provisioner.WithSSHVerifyTimeout(cfg.SSH.VerifyTimeout),
-		provisioner.WithSSHCheckInterval(cfg.SSH.CheckInterval))
+		provisioner.WithSSHCheckInterval(cfg.SSH.CheckInterval),
+	}
+	if cfg.Lifecycle.DeploymentID != "" {
+		provOpts = append(provOpts, provisioner.WithDeploymentID(cfg.Lifecycle.DeploymentID))
+	}
+	provService := provisioner.New(sessionStore, registry, provOpts...)
 
 	lifecycleManager := lifecycle.New(sessionStore, provService,
 		lifecycle.WithLogger(logger),
@@ -100,10 +105,18 @@ func main() {
 		cost.WithLogger(logger))
 
 	// Create reconciler with auto-destroy orphans enabled
-	reconciler := lifecycle.NewReconciler(sessionStore, registry,
+	reconcileOpts := []lifecycle.ReconcilerOption{
 		lifecycle.WithReconcileLogger(logger),
 		lifecycle.WithReconcileInterval(cfg.Lifecycle.ReconciliationInterval),
-		lifecycle.WithAutoDestroyOrphans(true))
+		lifecycle.WithAutoDestroyOrphans(true),
+	}
+	if cfg.Lifecycle.DeploymentID != "" {
+		reconcileOpts = append(reconcileOpts, lifecycle.WithDeploymentID(cfg.Lifecycle.DeploymentID))
+		logger.Info("deployment ID configured", slog.String("deployment_id", cfg.Lifecycle.DeploymentID))
+	} else {
+		logger.Warn("DEPLOYMENT_ID not set; orphan detection may incorrectly claim instances from other deployments")
+	}
+	reconciler := lifecycle.NewReconciler(sessionStore, registry, reconcileOpts...)
 
 	// Create startup/shutdown manager
 	startupManager := lifecycle.NewStartupShutdownManager(
