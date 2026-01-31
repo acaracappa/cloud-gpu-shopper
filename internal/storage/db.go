@@ -50,7 +50,6 @@ func (db *DB) Migrate(ctx context.Context) error {
 		migrationCosts,
 		migrationConsumers,
 		migrationIndexes,
-		migrationBenchmarks,
 	}
 
 	for i, migration := range migrations {

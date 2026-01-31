@@ -29,6 +29,18 @@ func TestOrphanDetection(t *testing.T) {
 	require.NotEmpty(t, orphanID, "Orphan instance ID should not be empty")
 	t.Logf("Created orphan instance: %s", orphanID)
 
+	// Cleanup orphan if test fails before reconciliation destroys it
+	defer func() {
+		instances := env.ListProviderInstances(t)
+		for _, instID := range instances {
+			if instID == orphanID {
+				t.Logf("Cleanup: deleting orphan instance %s", orphanID)
+				env.DeleteInstanceFromProvider(t, orphanID)
+				break
+			}
+		}
+	}()
+
 	// Verify instance exists on provider
 	instances := env.ListProviderInstances(t)
 	assert.Contains(t, instances, orphanID, "Orphan should exist on provider")
@@ -37,8 +49,16 @@ func TestOrphanDetection(t *testing.T) {
 	t.Log("Running reconciliation...")
 	env.RunReconciliation(t)
 
-	// Wait a moment for async operations
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconciliation to complete and verify orphan is destroyed
+	require.Eventually(t, func() bool {
+		instances := env.ListProviderInstances(t)
+		for _, id := range instances {
+			if id == orphanID {
+				return false // Still exists
+			}
+		}
+		return true // Destroyed
+	}, 10*time.Second, 100*time.Millisecond, "Orphan should be destroyed by reconciliation")
 
 	// Check metrics - orphan should be detected and destroyed
 	orphansFound, orphansDestroyed, _, _ := env.GetReconcileMetrics(t)
@@ -47,10 +67,6 @@ func TestOrphanDetection(t *testing.T) {
 
 	assert.Greater(t, orphansFound, initialOrphans, "Should have detected at least one orphan")
 	assert.Greater(t, orphansDestroyed, initialDestroyed, "Should have destroyed at least one orphan")
-
-	// Verify orphan instance no longer exists on provider
-	instances = env.ListProviderInstances(t)
-	assert.NotContains(t, instances, orphanID, "Orphan should have been destroyed")
 
 	t.Log("Orphan detection test completed successfully")
 }
@@ -73,6 +89,21 @@ func TestOrphanDetectionWithMultipleOrphans(t *testing.T) {
 		t.Logf("Created orphan %d: %s", i+1, orphanIDs[i])
 	}
 
+	// Cleanup orphans if test fails before reconciliation destroys them
+	defer func() {
+		instances := env.ListProviderInstances(t)
+		instanceSet := make(map[string]bool)
+		for _, id := range instances {
+			instanceSet[id] = true
+		}
+		for _, orphanID := range orphanIDs {
+			if instanceSet[orphanID] {
+				t.Logf("Cleanup: deleting orphan instance %s", orphanID)
+				env.DeleteInstanceFromProvider(t, orphanID)
+			}
+		}
+	}()
+
 	// Verify all orphans exist
 	instances := env.ListProviderInstances(t)
 	for _, id := range orphanIDs {
@@ -83,8 +114,20 @@ func TestOrphanDetectionWithMultipleOrphans(t *testing.T) {
 	t.Log("Running reconciliation...")
 	env.RunReconciliation(t)
 
-	// Wait for async operations
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconciliation to complete and verify all orphans are destroyed
+	require.Eventually(t, func() bool {
+		instances := env.ListProviderInstances(t)
+		instanceSet := make(map[string]bool)
+		for _, id := range instances {
+			instanceSet[id] = true
+		}
+		for _, orphanID := range orphanIDs {
+			if instanceSet[orphanID] {
+				return false // At least one orphan still exists
+			}
+		}
+		return true // All orphans destroyed
+	}, 10*time.Second, 100*time.Millisecond, "All orphans should be destroyed by reconciliation")
 
 	// Check metrics
 	orphansFound, orphansDestroyed, _, _ := env.GetReconcileMetrics(t)
@@ -96,12 +139,6 @@ func TestOrphanDetectionWithMultipleOrphans(t *testing.T) {
 
 	assert.GreaterOrEqual(t, orphansFound, expectedFound, "Should have detected all orphans")
 	assert.GreaterOrEqual(t, orphansDestroyed, expectedDestroyed, "Should have destroyed all orphans")
-
-	// Verify all orphans destroyed
-	instances = env.ListProviderInstances(t)
-	for _, id := range orphanIDs {
-		assert.NotContains(t, instances, id, "Orphan should have been destroyed")
-	}
 
 	t.Log("Multiple orphan detection test completed successfully")
 }
@@ -137,7 +174,13 @@ func TestLegitimateSessionNotOrphan(t *testing.T) {
 	t.Log("Running reconciliation with legitimate session...")
 	env.RunReconciliation(t)
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconciliation to complete by polling until metrics stabilize
+	// (no new orphans should be detected for a legitimate session)
+	require.Eventually(t, func() bool {
+		session := env.GetSession(t, sessionID)
+		// Session should still be running (not affected by reconciliation)
+		return session.Status == "running"
+	}, 10*time.Second, 100*time.Millisecond, "Legitimate session should remain running")
 
 	// Check that no new orphans were detected (our session is legitimate)
 	orphansFound, _, _, _ := env.GetReconcileMetrics(t)

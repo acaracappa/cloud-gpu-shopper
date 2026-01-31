@@ -225,17 +225,20 @@ func (m *Manager) Stop() {
 	m.logger.Info("lifecycle manager stopping")
 	close(stopCh)
 	<-doneCh
-
-	m.mu.Lock()
-	m.running = false
-	m.mu.Unlock()
+	// Note: running flag is set to false by the run() goroutine before closing doneCh
 
 	m.logger.Info("lifecycle manager stopped")
 }
 
 // run is the main lifecycle check loop
 func (m *Manager) run(ctx context.Context) {
-	defer close(m.doneCh)
+	defer func() {
+		// Update running state when loop exits (whether via Stop() or context cancellation)
+		m.mu.Lock()
+		m.running = false
+		m.mu.Unlock()
+		close(m.doneCh)
+	}()
 
 	ticker := time.NewTicker(m.checkInterval)
 	defer ticker.Stop()

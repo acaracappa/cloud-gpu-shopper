@@ -295,7 +295,8 @@ func TestProvisionFailure(t *testing.T) {
 	}
 
 	// We expect the creation to fail, so use lower-level HTTP
-	body, _ := jsonMarshal(reqBody)
+	body, err := jsonMarshal(reqBody)
+	require.NoError(t, err)
 	resp, err := env.HTTPClient.Post(env.ServerURL+"/api/v1/sessions", "application/json", body)
 	require.NoError(t, err)
 	defer resp.Body.Close()

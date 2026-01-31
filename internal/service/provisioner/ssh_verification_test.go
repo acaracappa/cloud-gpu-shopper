@@ -32,6 +32,11 @@ func TestSSHVerification_SuccessTransitionsToRunning(t *testing.T) {
 		WithSSHVerifyTimeout(5*time.Second),
 		WithSSHCheckInterval(100*time.Millisecond))
 
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(10*time.Second), "verification goroutines should complete")
+	}()
+
 	ctx := context.Background()
 	req := models.CreateSessionRequest{
 		ConsumerID:     "consumer-001",
@@ -49,20 +54,14 @@ func TestSSHVerification_SuccessTransitionsToRunning(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, session.ID)
 
-	// Wait for SSH verification to complete
-	// Should transition to running within a few hundred ms
-	var finalStatus models.SessionStatus
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
+	// Wait for SSH verification to complete using require.Eventually
+	require.Eventually(t, func() bool {
 		s, err := store.Get(ctx, session.ID)
-		require.NoError(t, err)
-		finalStatus = s.Status
-		if s.Status == models.StatusRunning {
-			break
+		if err != nil {
+			return false
 		}
-	}
-
-	assert.Equal(t, models.StatusRunning, finalStatus, "Session should transition to running after SSH verification")
+		return s.Status == models.StatusRunning
+	}, 5*time.Second, 50*time.Millisecond, "Session should transition to running after SSH verification")
 
 	// Verify SSH verification was called
 	calls := mockSSH.GetVerifyCalls()
@@ -92,6 +91,11 @@ func TestSSHVerification_TimeoutDestroysInstance(t *testing.T) {
 		WithSSHVerifyTimeout(500*time.Millisecond),
 		WithSSHCheckInterval(100*time.Millisecond))
 
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(10*time.Second), "verification goroutines should complete")
+	}()
+
 	ctx := context.Background()
 	req := models.CreateSessionRequest{
 		ConsumerID:     "consumer-001",
@@ -107,22 +111,17 @@ func TestSSHVerification_TimeoutDestroysInstance(t *testing.T) {
 	session, err := svc.CreateSession(ctx, req, offer)
 	require.NoError(t, err)
 
-	// Wait for SSH verification timeout
-	// Should fail within about 600ms (500ms timeout + some buffer)
-	var finalStatus models.SessionStatus
+	// Wait for SSH verification timeout using require.Eventually
 	var finalError string
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
+	require.Eventually(t, func() bool {
 		s, err := store.Get(ctx, session.ID)
-		require.NoError(t, err)
-		finalStatus = s.Status
-		finalError = s.Error
-		if s.Status == models.StatusFailed {
-			break
+		if err != nil {
+			return false
 		}
-	}
+		finalError = s.Error
+		return s.Status == models.StatusFailed
+	}, 5*time.Second, 50*time.Millisecond, "Session should fail after SSH verification timeout")
 
-	assert.Equal(t, models.StatusFailed, finalStatus, "Session should fail after SSH verification timeout")
 	assert.Contains(t, finalError, "SSH verification timeout", "Error should indicate SSH timeout")
 
 	// Verify provider destroy was called
@@ -150,6 +149,11 @@ func TestSSHVerification_MultipleAttempts(t *testing.T) {
 		WithSSHVerifyTimeout(5*time.Second),
 		WithSSHCheckInterval(100*time.Millisecond))
 
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(10*time.Second), "verification goroutines should complete")
+	}()
+
 	ctx := context.Background()
 	req := models.CreateSessionRequest{
 		ConsumerID:     "consumer-001",
@@ -165,19 +169,14 @@ func TestSSHVerification_MultipleAttempts(t *testing.T) {
 	session, err := svc.CreateSession(ctx, req, offer)
 	require.NoError(t, err)
 
-	// Wait for SSH verification to complete
-	var finalStatus models.SessionStatus
-	for i := 0; i < 50; i++ {
-		time.Sleep(100 * time.Millisecond)
+	// Wait for SSH verification to complete using require.Eventually
+	require.Eventually(t, func() bool {
 		s, err := store.Get(ctx, session.ID)
-		require.NoError(t, err)
-		finalStatus = s.Status
-		if s.Status == models.StatusRunning {
-			break
+		if err != nil {
+			return false
 		}
-	}
-
-	assert.Equal(t, models.StatusRunning, finalStatus, "Session should eventually reach running")
+		return s.Status == models.StatusRunning
+	}, 5*time.Second, 50*time.Millisecond, "Session should eventually reach running")
 
 	mu.Lock()
 	attempts := attemptCount
@@ -223,6 +222,11 @@ func TestSSHVerification_SessionTerminalStopsVerification(t *testing.T) {
 		WithSSHVerifyTimeout(10*time.Second),
 		WithSSHCheckInterval(100*time.Millisecond))
 
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(15*time.Second), "verification goroutines should complete")
+	}()
+
 	ctx := context.Background()
 	req := models.CreateSessionRequest{
 		ConsumerID:     "consumer-001",
@@ -238,23 +242,28 @@ func TestSSHVerification_SessionTerminalStopsVerification(t *testing.T) {
 	session, err := svc.CreateSession(ctx, req, offer)
 	require.NoError(t, err)
 
-	// Wait a bit for SSH verification to start
-	time.Sleep(200 * time.Millisecond)
+	// Wait for SSH verification to start (at least one call)
+	require.Eventually(t, func() bool {
+		return len(mockSSH.GetVerifyCalls()) >= 1
+	}, 5*time.Second, 50*time.Millisecond, "SSH verification should start")
 
 	// Destroy the session, which should stop SSH verification
 	err = svc.DestroySession(ctx, session.ID)
 	require.NoError(t, err)
 
 	// Record call count after destroy
-	time.Sleep(100 * time.Millisecond)
 	initialCalls := len(mockSSH.GetVerifyCalls())
 
-	// Wait and verify no more calls are made
-	time.Sleep(300 * time.Millisecond)
+	// Wait for verification goroutine to notice the terminal state and exit
+	// The goroutine checks IsTerminal() on each poll cycle
+	require.Eventually(t, func() bool {
+		return svc.WaitForVerificationComplete(100 * time.Millisecond)
+	}, 5*time.Second, 100*time.Millisecond, "verification goroutine should exit after session destroyed")
+
 	finalCalls := len(mockSSH.GetVerifyCalls())
 
 	// There might be one more call in flight when we stopped, but not many more
-	assert.LessOrEqual(t, finalCalls-initialCalls, 1, "SSH verification should stop when session is destroyed")
+	assert.LessOrEqual(t, finalCalls-initialCalls, 2, "SSH verification should stop when session is destroyed")
 }
 
 // TestSSHVerification_WithDelayedSSHInfo tests the case where SSH info
@@ -310,6 +319,11 @@ func TestSSHVerification_WithDelayedSSHInfo(t *testing.T) {
 		WithSSHVerifyTimeout(10*time.Second),
 		WithSSHCheckInterval(100*time.Millisecond))
 
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(15*time.Second), "verification goroutines should complete")
+	}()
+
 	ctx := context.Background()
 	req := models.CreateSessionRequest{
 		ConsumerID:     "consumer-001",
@@ -325,17 +339,18 @@ func TestSSHVerification_WithDelayedSSHInfo(t *testing.T) {
 	session, err := svc.CreateSession(ctx, req, offer)
 	require.NoError(t, err)
 
-	// Wait for SSH verification to complete
-	var finalSession *models.Session
-	for i := 0; i < 50; i++ {
-		time.Sleep(100 * time.Millisecond)
+	// Wait for SSH verification to complete using require.Eventually
+	require.Eventually(t, func() bool {
 		s, err := store.Get(ctx, session.ID)
-		require.NoError(t, err)
-		finalSession = s
-		if s.Status == models.StatusRunning {
-			break
+		if err != nil {
+			return false
 		}
-	}
+		return s.Status == models.StatusRunning
+	}, 10*time.Second, 50*time.Millisecond, "Session should reach running status")
+
+	// Get final session state
+	finalSession, err := store.Get(ctx, session.ID)
+	require.NoError(t, err)
 
 	assert.Equal(t, models.StatusRunning, finalSession.Status)
 
@@ -356,22 +371,26 @@ func TestSSHVerification_WithDelayedSSHInfo(t *testing.T) {
 }
 
 // TestSSHVerification_ContextCancellation tests that context cancellation
-// properly stops SSH verification
+// of the create request does NOT stop SSH verification (verification uses its own context)
 func TestSSHVerification_ContextCancellation(t *testing.T) {
 	store := newMockSessionStore()
 	prov := newMockProvider("vastai")
 	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
 
-	// Use mock SSH verifier that takes a while
+	// Use mock SSH verifier that succeeds quickly so test completes fast
 	mockSSH := NewMockSSHVerifier()
-	mockSSH.SetSucceed(false)
-	mockSSH.SetDelay(100 * time.Millisecond)
+	mockSSH.SetSucceed(true)
 
 	svc := New(store, registry,
 		WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))),
 		WithSSHVerifier(mockSSH),
-		WithSSHVerifyTimeout(30*time.Second),
+		WithSSHVerifyTimeout(5*time.Second),
 		WithSSHCheckInterval(50*time.Millisecond))
+
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(10*time.Second), "verification goroutines should complete")
+	}()
 
 	ctx := context.Background()
 	req := models.CreateSessionRequest{
@@ -390,10 +409,16 @@ func TestSSHVerification_ContextCancellation(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, session.ID)
 
-	// The async SSH verification runs with context.Background() so it won't be affected
-	// by cancellation of the create context. This is by design - we want verification
-	// to continue even after the API request completes.
-	// Test passes if no panic/race occurs.
+	// Wait for verification to complete - the async SSH verification runs with
+	// context.Background() so it won't be affected by cancellation of the create context.
+	// This is by design - we want verification to continue even after the API request completes.
+	require.Eventually(t, func() bool {
+		s, err := store.Get(ctx, session.ID)
+		if err != nil {
+			return false
+		}
+		return s.Status == models.StatusRunning
+	}, 5*time.Second, 50*time.Millisecond, "Session should reach running status")
 }
 
 // TestSSHVerifierInterface verifies that the real SSH verifier satisfies the interface

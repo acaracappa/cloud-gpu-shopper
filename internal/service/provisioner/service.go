@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -152,6 +153,12 @@ type Service struct {
 	destroyTimeout time.Duration
 	destroyRetries int
 	sshKeyBits     int
+
+	// For time mocking in tests
+	now func() time.Time
+
+	// Verification goroutine tracking (for testing)
+	verifyWg sync.WaitGroup
 }
 
 // Option configures the provisioner service
@@ -234,6 +241,13 @@ func WithAPICheckInterval(d time.Duration) Option {
 	}
 }
 
+// WithTimeFunc sets a custom time function (for testing)
+func WithTimeFunc(fn func() time.Time) Option {
+	return func(s *Service) {
+		s.now = fn
+	}
+}
+
 // New creates a new provisioner service
 func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Service {
 	s := &Service{
@@ -250,6 +264,7 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 		destroyTimeout:       DefaultDestroyTimeout,
 		destroyRetries:       DefaultDestroyRetries,
 		sshKeyBits:           DefaultSSHKeyBits,
+		now:                  time.Now,
 	}
 
 	for _, opt := range opts {
@@ -300,7 +315,7 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		return nil, fmt.Errorf("failed to generate SSH key: %w", err)
 	}
 
-	now := time.Now()
+	now := s.now()
 	expiresAt := now.Add(time.Duration(req.ReservationHrs) * time.Hour)
 
 	// Set defaults
@@ -453,16 +468,24 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	// to ensure goroutines can be bounded and don't run indefinitely
 	if req.LaunchMode == models.LaunchModeEntrypoint {
 		// Entrypoint mode: wait for API endpoint to be ready
-		verifyCtx, cancel := context.WithTimeout(context.Background(), s.apiVerifyTimeout)
+		// Context timeout is slightly longer than verify timeout to ensure internal timer fires first
+		// and has time to complete cleanup before context cancellation
+		verifyCtx, cancel := context.WithTimeout(context.Background(), s.apiVerifyTimeout+5*time.Second)
+		s.verifyWg.Add(1)
 		go func() {
+			defer s.verifyWg.Done()
 			defer cancel()
 			s.waitForAPIVerifyAsync(verifyCtx, session.ID, prov)
 		}()
 	} else {
 		// SSH mode: wait for SSH connectivity
 		// Note: We pass the private key directly because it's not stored in the database
-		verifyCtx, cancel := context.WithTimeout(context.Background(), s.sshVerifyTimeout)
+		// Context timeout is slightly longer than verify timeout to ensure internal timer fires first
+		// and has time to complete cleanup before context cancellation
+		verifyCtx, cancel := context.WithTimeout(context.Background(), s.sshVerifyTimeout+5*time.Second)
+		s.verifyWg.Add(1)
 		go func() {
+			defer s.verifyWg.Done()
 			defer cancel()
 			s.waitForSSHVerifyAsync(verifyCtx, session.ID, privateKey, prov)
 		}()
@@ -661,7 +684,7 @@ func (s *Service) DestroySession(ctx context.Context, sessionID string) error {
 
 	oldStatus := session.Status
 	session.Status = models.StatusStopped
-	session.StoppedAt = time.Now()
+	session.StoppedAt = s.now()
 	if err := s.store.Update(ctx, session); err != nil {
 		s.logger.Error("failed to update session to stopped",
 			slog.String("session_id", sessionID),
@@ -761,7 +784,7 @@ func (s *Service) ListSessions(ctx context.Context, filter models.SessionListFil
 func (s *Service) failSession(ctx context.Context, session *models.Session, reason string) {
 	session.Status = models.StatusFailed
 	session.Error = reason
-	session.StoppedAt = time.Now()
+	session.StoppedAt = s.now()
 	if err := s.store.Update(ctx, session); err != nil {
 		s.logger.Error("failed to update session to failed",
 			slog.String("session_id", session.ID),
@@ -797,6 +820,24 @@ func (s *Service) generateSSHKeyPair() (privateKeyPEM, publicKeyOpenSSH string, 
 // GetDeploymentID returns the deployment identifier
 func (s *Service) GetDeploymentID() string {
 	return s.deploymentID
+}
+
+// WaitForVerificationComplete waits for all pending verification goroutines to complete.
+// This is primarily for testing to ensure no goroutine leaks.
+// Returns true if all verifications completed within the timeout, false otherwise.
+func (s *Service) WaitForVerificationComplete(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.verifyWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // buildWorkloadConfig builds a provider WorkloadConfig from session request

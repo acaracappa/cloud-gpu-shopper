@@ -57,6 +57,9 @@ type Reconciler struct {
 	reconcileInterval  time.Duration
 	autoDestroyOrphans bool
 
+	// For time mocking in tests
+	now func() time.Time
+
 	// Shutdown coordination
 	mu      sync.Mutex
 	running bool
@@ -116,6 +119,13 @@ func WithReconcileEventHandler(handler ReconcileEventHandler) ReconcilerOption {
 	}
 }
 
+// WithReconcileTimeFunc sets a custom time function (for testing)
+func WithReconcileTimeFunc(fn func() time.Time) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.now = fn
+	}
+}
+
 // NewReconciler creates a new reconciler
 func NewReconciler(store ReconcileStore, providers ProviderRegistry, opts ...ReconcilerOption) *Reconciler {
 	r := &Reconciler{
@@ -125,6 +135,7 @@ func NewReconciler(store ReconcileStore, providers ProviderRegistry, opts ...Rec
 		logger:             slog.Default(),
 		reconcileInterval:  DefaultReconcileInterval,
 		autoDestroyOrphans: true,
+		now:                time.Now,
 		stopCh:             make(chan struct{}),
 		doneCh:             make(chan struct{}),
 		metrics:            &ReconcileMetrics{},
@@ -361,7 +372,7 @@ func (r *Reconciler) handleGhost(ctx context.Context, session *models.Session) {
 	oldStatus := session.Status
 	session.Status = models.StatusStopped
 	session.Error = "Instance not found on provider during reconciliation"
-	session.StoppedAt = time.Now()
+	session.StoppedAt = r.now()
 
 	if err := r.store.Update(ctx, session); err != nil {
 		r.logger.Error("failed to update ghost session",
@@ -412,7 +423,7 @@ func (r *Reconciler) RecoverStuckSessions(ctx context.Context) error {
 			// Never got a provider ID - mark as failed
 			session.Status = models.StatusFailed
 			session.Error = "Provisioning failed - no provider instance ID"
-			session.StoppedAt = time.Now()
+			session.StoppedAt = r.now()
 			r.store.Update(ctx, session)
 			continue
 		}
@@ -426,7 +437,7 @@ func (r *Reconciler) RecoverStuckSessions(ctx context.Context) error {
 			} else {
 				session.Status = models.StatusStopped
 			}
-			session.StoppedAt = time.Now()
+			session.StoppedAt = r.now()
 			r.store.Update(ctx, session)
 			continue
 		}
@@ -454,7 +465,7 @@ func (r *Reconciler) RecoverStuckSessions(ctx context.Context) error {
 		} else {
 			// Instance not running
 			session.Status = models.StatusStopped
-			session.StoppedAt = time.Now()
+			session.StoppedAt = r.now()
 			r.store.Update(ctx, session)
 		}
 	}

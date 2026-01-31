@@ -32,6 +32,9 @@ func TestGhostDetection(t *testing.T) {
 	sessionID := createResp.Session.ID
 	t.Logf("Created session: %s", sessionID)
 
+	// Cleanup session on test failure
+	defer env.Cleanup(t, sessionID)
+
 	// Wait for running (SSH verification completes automatically)
 	session := env.WaitForStatus(t, sessionID, "running", 10*time.Second)
 	t.Logf("Session is running")
@@ -63,8 +66,11 @@ func TestGhostDetection(t *testing.T) {
 	t.Log("Running reconciliation to detect ghost...")
 	env.RunReconciliation(t)
 
-	// Wait for reconciliation to complete
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconciliation to complete and session to be marked as stopped
+	require.Eventually(t, func() bool {
+		session = env.GetSession(t, sessionID)
+		return session.Status == "stopped"
+	}, 10*time.Second, 100*time.Millisecond, "Ghost session should be marked as stopped")
 
 	// Check metrics - ghost should be detected and fixed
 	_, _, ghostsFound, ghostsFixed := env.GetReconcileMetrics(t)
@@ -75,7 +81,6 @@ func TestGhostDetection(t *testing.T) {
 	assert.Greater(t, ghostsFixed, initialGhostsFixed, "Should have fixed the ghost")
 
 	// Session should now be marked as stopped
-	session = env.GetSession(t, sessionID)
 	assert.Equal(t, "stopped", session.Status, "Ghost session should be marked as stopped")
 	assert.Contains(t, session.Error, "not found", "Error should indicate instance not found")
 
@@ -113,7 +118,12 @@ func TestGhostDetectionPreservesRunningInstances(t *testing.T) {
 	t.Log("Running reconciliation with valid instance...")
 	env.RunReconciliation(t)
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconciliation to complete by verifying session remains running
+	require.Eventually(t, func() bool {
+		session := env.GetSession(t, sessionID)
+		// Session should remain running (not turned into a ghost)
+		return session.Status == "running"
+	}, 10*time.Second, 100*time.Millisecond, "Legitimate session should remain running")
 
 	// Check that no new ghosts were detected
 	_, _, ghostsFound, _ := env.GetReconcileMetrics(t)
@@ -151,6 +161,9 @@ func TestMultipleGhostDetection(t *testing.T) {
 		t.Logf("Created session %d: %s", i+1, createResp.Session.ID)
 	}
 
+	// Cleanup sessions on test failure
+	defer env.Cleanup(t, sessionIDs...)
+
 	// Wait for all running (SSH verification completes automatically)
 	for _, sessionID := range sessionIDs {
 		env.WaitForStatus(t, sessionID, "running", 10*time.Second)
@@ -170,7 +183,16 @@ func TestMultipleGhostDetection(t *testing.T) {
 	t.Log("Running reconciliation to detect multiple ghosts...")
 	env.RunReconciliation(t)
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconciliation to complete and all sessions to be marked as stopped
+	require.Eventually(t, func() bool {
+		for _, sessionID := range sessionIDs {
+			session := env.GetSession(t, sessionID)
+			if session.Status != "stopped" {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond, "All ghost sessions should be marked as stopped")
 
 	// Check metrics
 	_, _, ghostsFound, ghostsFixed := env.GetReconcileMetrics(t)

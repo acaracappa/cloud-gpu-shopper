@@ -184,21 +184,18 @@ func (w *Watchdog) GetStats() WatchdogStats {
 		ActiveInstances: len(w.instances),
 	}
 
-	// Copy spend by provider
+	// Copy completed spend by provider and add to total
 	for prov, spend := range w.spendByProv {
 		stats.SpendByProv[prov] = spend
+		stats.TotalSpend += spend
 	}
 
 	// Add running instance costs
 	for _, info := range w.instances {
 		duration := time.Since(info.StartTime)
-		stats.SpendByProv[info.Provider] += info.PriceHour * duration.Hours()
-		stats.TotalSpend += info.PriceHour * duration.Hours()
-	}
-
-	// Add completed instance costs
-	for _, spend := range w.spendByProv {
-		stats.TotalSpend += spend
+		runningCost := info.PriceHour * duration.Hours()
+		stats.SpendByProv[info.Provider] += runningCost
+		stats.TotalSpend += runningCost
 	}
 
 	return stats

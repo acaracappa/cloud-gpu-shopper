@@ -1,5 +1,32 @@
 package cmd
 
+// CLI Test Suite - Global State Management
+//
+// This test file manages global state carefully to prevent test pollution.
+// The CLI package uses package-level variables for cobra flags, which creates
+// shared mutable state between tests.
+//
+// Design decisions:
+//
+// 1. Global State Protection:
+//    - testMu mutex ensures only one test modifies global state at a time
+//    - setupTestWithCleanup() must be called at the start of tests that modify state
+//    - State is saved before modification and restored via t.Cleanup()
+//
+// 2. Cleanup Order (LIFO via t.Cleanup):
+//    a. Close mock HTTP server (if any)
+//    b. Restore saved global state
+//    c. Release mutex
+//
+// 3. Parallel Tests:
+//    - Tests that modify global state CANNOT use t.Parallel()
+//    - Pure function tests (TestTruncateString, TestParseSessionPath) CAN use t.Parallel()
+//    - Table-driven subtests of pure functions can also use t.Parallel()
+//
+// 4. Environment Variables:
+//    - GPU_SHOPPER_URL is saved/restored along with other global state
+//    - Other env vars (VASTAI_API_KEY, etc.) are not modified by these tests
+
 import (
 	"bytes"
 	"encoding/json"
@@ -8,14 +35,217 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
-// Helper to set up mock server and reset serverURL
+// testMu protects global state during tests that cannot run in parallel.
+// All tests that modify package-level variables must hold this mutex.
+var testMu sync.Mutex
+
+// globalStateSnapshot holds a snapshot of all global state variables for save/restore.
+// This is used to ensure tests can restore state after modification.
+type globalStateSnapshot struct {
+	serverURL    string
+	outputFormat string
+
+	// inventory flags
+	inventoryProvider    string
+	inventoryGPUType     string
+	inventoryMaxPrice    float64
+	inventoryMinVRAM     int
+	inventoryMinGPUCount int
+
+	// provision flags
+	provisionConsumerID  string
+	provisionOfferID     string
+	provisionWorkload    string
+	provisionHours       int
+	provisionIdleTimeout int
+	provisionStorage     string
+	provisionSaveKey     string
+	provisionGPUType     string
+
+	// sessions flags
+	sessionsConsumerID string
+	sessionsStatus     string
+	extendHours        int
+
+	// costs flags
+	costsConsumerID string
+	costsSessionID  string
+	costsPeriod     string
+	costsStartDate  string
+	costsEndDate    string
+
+	// shutdown flags
+	shutdownForce bool
+
+	// cleanup flags
+	cleanupExecute  bool
+	cleanupForce    bool
+	cleanupProvider string
+
+	// transfer flags
+	transferKeyFile string
+	transferTimeout time.Duration
+
+	// environment variables that might be set
+	envGPUShopperURL string
+}
+
+// saveGlobalState captures all current global state into a snapshot.
+// This must be called while holding testMu.
+func saveGlobalState() globalStateSnapshot {
+	return globalStateSnapshot{
+		serverURL:            serverURL,
+		outputFormat:         outputFormat,
+		inventoryProvider:    inventoryProvider,
+		inventoryGPUType:     inventoryGPUType,
+		inventoryMaxPrice:    inventoryMaxPrice,
+		inventoryMinVRAM:     inventoryMinVRAM,
+		inventoryMinGPUCount: inventoryMinGPUCount,
+		provisionConsumerID:  provisionConsumerID,
+		provisionOfferID:     provisionOfferID,
+		provisionWorkload:    provisionWorkload,
+		provisionHours:       provisionHours,
+		provisionIdleTimeout: provisionIdleTimeout,
+		provisionStorage:     provisionStorage,
+		provisionSaveKey:     provisionSaveKey,
+		provisionGPUType:     provisionGPUType,
+		sessionsConsumerID:   sessionsConsumerID,
+		sessionsStatus:       sessionsStatus,
+		extendHours:          extendHours,
+		costsConsumerID:      costsConsumerID,
+		costsSessionID:       costsSessionID,
+		costsPeriod:          costsPeriod,
+		costsStartDate:       costsStartDate,
+		costsEndDate:         costsEndDate,
+		shutdownForce:        shutdownForce,
+		cleanupExecute:       cleanupExecute,
+		cleanupForce:         cleanupForce,
+		cleanupProvider:      cleanupProvider,
+		transferKeyFile:      transferKeyFile,
+		transferTimeout:      transferTimeout,
+		envGPUShopperURL:     os.Getenv("GPU_SHOPPER_URL"),
+	}
+}
+
+// restoreGlobalState restores all global state from a snapshot.
+// This must be called while still holding testMu (before unlock).
+func restoreGlobalState(saved globalStateSnapshot) {
+	serverURL = saved.serverURL
+	outputFormat = saved.outputFormat
+	inventoryProvider = saved.inventoryProvider
+	inventoryGPUType = saved.inventoryGPUType
+	inventoryMaxPrice = saved.inventoryMaxPrice
+	inventoryMinVRAM = saved.inventoryMinVRAM
+	inventoryMinGPUCount = saved.inventoryMinGPUCount
+	provisionConsumerID = saved.provisionConsumerID
+	provisionOfferID = saved.provisionOfferID
+	provisionWorkload = saved.provisionWorkload
+	provisionHours = saved.provisionHours
+	provisionIdleTimeout = saved.provisionIdleTimeout
+	provisionStorage = saved.provisionStorage
+	provisionSaveKey = saved.provisionSaveKey
+	provisionGPUType = saved.provisionGPUType
+	sessionsConsumerID = saved.sessionsConsumerID
+	sessionsStatus = saved.sessionsStatus
+	extendHours = saved.extendHours
+	costsConsumerID = saved.costsConsumerID
+	costsSessionID = saved.costsSessionID
+	costsPeriod = saved.costsPeriod
+	costsStartDate = saved.costsStartDate
+	costsEndDate = saved.costsEndDate
+	shutdownForce = saved.shutdownForce
+	cleanupExecute = saved.cleanupExecute
+	cleanupForce = saved.cleanupForce
+	cleanupProvider = saved.cleanupProvider
+	transferKeyFile = saved.transferKeyFile
+	transferTimeout = saved.transferTimeout
+
+	// Restore environment variable
+	if saved.envGPUShopperURL != "" {
+		os.Setenv("GPU_SHOPPER_URL", saved.envGPUShopperURL)
+	} else {
+		os.Unsetenv("GPU_SHOPPER_URL")
+	}
+}
+
+// resetGlobalStateToDefaults resets all global state to safe test defaults.
+// This must be called while holding testMu.
+func resetGlobalStateToDefaults() {
+	serverURL = "http://localhost:8080"
+	outputFormat = "table"
+	inventoryProvider = ""
+	inventoryGPUType = ""
+	inventoryMaxPrice = 0
+	inventoryMinVRAM = 0
+	inventoryMinGPUCount = 0
+	provisionConsumerID = ""
+	provisionOfferID = ""
+	provisionWorkload = "llm"
+	provisionHours = 2
+	provisionIdleTimeout = 0
+	provisionStorage = "destroy"
+	provisionSaveKey = ""
+	provisionGPUType = ""
+	sessionsConsumerID = ""
+	sessionsStatus = ""
+	extendHours = 1
+	costsConsumerID = ""
+	costsSessionID = ""
+	costsPeriod = ""
+	costsStartDate = ""
+	costsEndDate = ""
+	shutdownForce = false
+	cleanupExecute = false
+	cleanupForce = false
+	cleanupProvider = ""
+	transferKeyFile = ""
+	transferTimeout = 5 * time.Minute
+}
+
+// setupTestWithCleanup sets up a test with proper global state management.
+// It acquires the mutex, saves current state, resets to defaults, and registers
+// cleanup to restore state and release the mutex in LIFO order.
+//
+// Note: Tests using this helper CANNOT run in parallel (t.Parallel()) because
+// they share package-level global state. The mutex ensures safe sequential access.
+//
+// Cleanup order (LIFO via t.Cleanup):
+// 1. Restore saved global state
+// 2. Release mutex
+func setupTestWithCleanup(t *testing.T) {
+	t.Helper()
+
+	testMu.Lock()
+	saved := saveGlobalState()
+	resetGlobalStateToDefaults()
+
+	// Register cleanup in LIFO order - restore state first, then unlock
+	// t.Cleanup runs registered functions in LIFO order
+	t.Cleanup(func() {
+		restoreGlobalState(saved)
+		testMu.Unlock()
+	})
+}
+
+// setupMockServer sets up a mock HTTP server and configures the serverURL global.
+// Must be called after setupTestWithCleanup to ensure proper state management.
+// The server is automatically closed via t.Cleanup (LIFO order ensures this
+// runs before state restoration).
 func setupMockServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+
 	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	serverURL = server.URL // Override the package-level serverURL
+	// Register cleanup - will run before the cleanup registered by setupTestWithCleanup
+	// due to LIFO ordering, which is correct (close server before restoring state)
+	t.Cleanup(func() {
+		server.Close()
+	})
+	serverURL = server.URL
 	return server
 }
 
@@ -67,6 +297,7 @@ var mockSession = map[string]interface{}{
 
 // TestInventoryCommand tests the inventory command with sample offers
 func TestInventoryCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/inventory" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -82,14 +313,6 @@ func TestInventoryCommand(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	})
-
-	// Reset flags to defaults
-	outputFormat = "table"
-	inventoryProvider = ""
-	inventoryGPUType = ""
-	inventoryMaxPrice = 0
-	inventoryMinVRAM = 0
-	inventoryMinGPUCount = 0
 
 	output := captureOutput(func() {
 		err := runInventory(nil, nil)
@@ -115,6 +338,7 @@ func TestInventoryCommand(t *testing.T) {
 
 // TestInventoryCommand_WithFilters tests the inventory command with provider and GPU filters
 func TestInventoryCommand_WithFilters(t *testing.T) {
+	setupTestWithCleanup(t)
 	var capturedQuery string
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		capturedQuery = r.URL.RawQuery
@@ -133,7 +357,6 @@ func TestInventoryCommand_WithFilters(t *testing.T) {
 	inventoryMaxPrice = 1.50
 	inventoryMinVRAM = 40
 	inventoryMinGPUCount = 2
-	outputFormat = "table"
 
 	output := captureOutput(func() {
 		err := runInventory(nil, nil)
@@ -159,13 +382,6 @@ func TestInventoryCommand_WithFilters(t *testing.T) {
 		t.Errorf("expected min_gpu_count filter in query, got: %s", capturedQuery)
 	}
 
-	// Reset filters
-	inventoryProvider = ""
-	inventoryGPUType = ""
-	inventoryMaxPrice = 0
-	inventoryMinVRAM = 0
-	inventoryMinGPUCount = 0
-
 	if output == "" {
 		t.Error("expected non-empty output")
 	}
@@ -173,6 +389,7 @@ func TestInventoryCommand_WithFilters(t *testing.T) {
 
 // TestInventoryCommand_Empty tests the inventory command when no offers are found
 func TestInventoryCommand_Empty(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		response := map[string]interface{}{
 			"offers": []interface{}{},
@@ -181,10 +398,6 @@ func TestInventoryCommand_Empty(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	})
-
-	outputFormat = "table"
-	inventoryProvider = ""
-	inventoryGPUType = ""
 
 	output := captureOutput(func() {
 		err := runInventory(nil, nil)
@@ -200,6 +413,7 @@ func TestInventoryCommand_Empty(t *testing.T) {
 
 // TestInventoryCommand_JSON tests the inventory command with JSON output
 func TestInventoryCommand_JSON(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		response := map[string]interface{}{
 			"offers": []interface{}{mockOffer},
@@ -210,8 +424,6 @@ func TestInventoryCommand_JSON(t *testing.T) {
 	})
 
 	outputFormat = "json"
-	inventoryProvider = ""
-	inventoryGPUType = ""
 
 	output := captureOutput(func() {
 		err := runInventory(nil, nil)
@@ -225,13 +437,11 @@ func TestInventoryCommand_JSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Errorf("expected valid JSON output, got error: %v", err)
 	}
-
-	// Reset
-	outputFormat = "table"
 }
 
 // TestProvisionCommand_WithOffer tests the provision command with a specific offer
 func TestProvisionCommand_WithOffer(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sessions" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -273,13 +483,6 @@ func TestProvisionCommand_WithOffer(t *testing.T) {
 	// Set up provision flags
 	provisionConsumerID = "test-consumer"
 	provisionOfferID = "offer-456"
-	provisionGPUType = ""
-	provisionWorkload = "llm"
-	provisionHours = 2
-	provisionIdleTimeout = 0
-	provisionStorage = "destroy"
-	provisionSaveKey = ""
-	outputFormat = "table"
 
 	output := captureOutput(func() {
 		err := runProvision(nil, nil)
@@ -302,6 +505,7 @@ func TestProvisionCommand_WithOffer(t *testing.T) {
 
 // TestProvisionCommand_WithGPU tests the provision command with GPU auto-selection
 func TestProvisionCommand_WithGPU(t *testing.T) {
+	setupTestWithCleanup(t)
 	callCount := 0
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -344,11 +548,7 @@ func TestProvisionCommand_WithGPU(t *testing.T) {
 
 	// Set up provision flags with GPU type instead of offer ID
 	provisionConsumerID = "test-consumer"
-	provisionOfferID = ""
 	provisionGPUType = "RTX4090"
-	provisionWorkload = "llm"
-	provisionHours = 2
-	outputFormat = "table"
 
 	output := captureOutput(func() {
 		err := runProvision(nil, nil)
@@ -370,12 +570,12 @@ func TestProvisionCommand_WithGPU(t *testing.T) {
 
 // TestProvisionCommand_InvalidWorkload tests that invalid workload types are rejected
 func TestProvisionCommand_InvalidWorkload(t *testing.T) {
+	setupTestWithCleanup(t)
 	// No server needed - validation happens before request
 
 	provisionConsumerID = "test-consumer"
 	provisionOfferID = "offer-456"
 	provisionWorkload = "invalid-workload"
-	outputFormat = "table"
 
 	err := runProvision(nil, nil)
 	if err == nil {
@@ -388,11 +588,9 @@ func TestProvisionCommand_InvalidWorkload(t *testing.T) {
 
 // TestProvisionCommand_NoOfferOrGPU tests that provision fails without offer or GPU
 func TestProvisionCommand_NoOfferOrGPU(t *testing.T) {
+	setupTestWithCleanup(t)
+
 	provisionConsumerID = "test-consumer"
-	provisionOfferID = ""
-	provisionGPUType = ""
-	provisionWorkload = "llm"
-	outputFormat = "table"
 
 	err := runProvision(nil, nil)
 	if err == nil {
@@ -405,6 +603,7 @@ func TestProvisionCommand_NoOfferOrGPU(t *testing.T) {
 
 // TestSessionsListCommand tests the sessions list command
 func TestSessionsListCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sessions" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -420,10 +619,6 @@ func TestSessionsListCommand(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	})
-
-	outputFormat = "table"
-	sessionsConsumerID = ""
-	sessionsStatus = ""
 
 	output := captureOutput(func() {
 		err := runSessionsList(nil, nil)
@@ -446,6 +641,7 @@ func TestSessionsListCommand(t *testing.T) {
 
 // TestSessionsListCommand_WithFilters tests sessions list with consumer and status filters
 func TestSessionsListCommand_WithFilters(t *testing.T) {
+	setupTestWithCleanup(t)
 	var capturedQuery string
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		capturedQuery = r.URL.RawQuery
@@ -458,7 +654,6 @@ func TestSessionsListCommand_WithFilters(t *testing.T) {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	outputFormat = "table"
 	sessionsConsumerID = "consumer-1"
 	sessionsStatus = "running"
 
@@ -476,14 +671,11 @@ func TestSessionsListCommand_WithFilters(t *testing.T) {
 	if !strings.Contains(capturedQuery, "status=running") {
 		t.Errorf("expected status filter in query, got: %s", capturedQuery)
 	}
-
-	// Reset
-	sessionsConsumerID = ""
-	sessionsStatus = ""
 }
 
 // TestSessionsListCommand_Empty tests sessions list when no sessions exist
 func TestSessionsListCommand_Empty(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		response := map[string]interface{}{
 			"sessions": []interface{}{},
@@ -492,10 +684,6 @@ func TestSessionsListCommand_Empty(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	})
-
-	outputFormat = "table"
-	sessionsConsumerID = ""
-	sessionsStatus = ""
 
 	output := captureOutput(func() {
 		err := runSessionsList(nil, nil)
@@ -511,6 +699,7 @@ func TestSessionsListCommand_Empty(t *testing.T) {
 
 // TestSessionsGetCommand tests getting a specific session
 func TestSessionsGetCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sessions/sess-123" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -522,8 +711,6 @@ func TestSessionsGetCommand(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(mockSession)
 	})
-
-	outputFormat = "table"
 
 	output := captureOutput(func() {
 		err := runSessionsGet(nil, []string{"sess-123"})
@@ -549,12 +736,11 @@ func TestSessionsGetCommand(t *testing.T) {
 
 // TestSessionsGetCommand_NotFound tests getting a non-existent session
 func TestSessionsGetCommand_NotFound(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(`{"error": "session not found"}`))
 	})
-
-	outputFormat = "table"
 
 	err := runSessionsGet(nil, []string{"nonexistent"})
 	if err == nil {
@@ -567,6 +753,7 @@ func TestSessionsGetCommand_NotFound(t *testing.T) {
 
 // TestSessionsGetCommand_JSON tests getting a session with JSON output
 func TestSessionsGetCommand_JSON(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(mockSession)
@@ -586,13 +773,11 @@ func TestSessionsGetCommand_JSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Errorf("expected valid JSON output, got error: %v", err)
 	}
-
-	// Reset
-	outputFormat = "table"
 }
 
 // TestSessionsDoneCommand tests signaling session completion
 func TestSessionsDoneCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sessions/sess-123/done" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -622,6 +807,7 @@ func TestSessionsDoneCommand(t *testing.T) {
 
 // TestSessionsDoneCommand_Error tests session done when request fails
 func TestSessionsDoneCommand_Error(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error": "session already terminated"}`))
@@ -638,6 +824,7 @@ func TestSessionsDoneCommand_Error(t *testing.T) {
 
 // TestSessionsDeleteCommand tests force-deleting a session
 func TestSessionsDeleteCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sessions/sess-123" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -667,6 +854,7 @@ func TestSessionsDeleteCommand(t *testing.T) {
 
 // TestSessionsDeleteCommand_Error tests session delete when request fails
 func TestSessionsDeleteCommand_Error(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error": "failed to destroy instance"}`))
@@ -683,6 +871,7 @@ func TestSessionsDeleteCommand_Error(t *testing.T) {
 
 // TestSessionsExtendCommand tests extending a session
 func TestSessionsExtendCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sessions/sess-123/extend" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -729,6 +918,7 @@ func TestSessionsExtendCommand(t *testing.T) {
 
 // TestCostsCommand tests the costs command
 func TestCostsCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/costs" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -754,10 +944,6 @@ func TestCostsCommand(t *testing.T) {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	outputFormat = "table"
-	costsConsumerID = ""
-	costsSessionID = ""
-
 	output := captureOutput(func() {
 		err := runCosts(nil, nil)
 		if err != nil {
@@ -779,6 +965,7 @@ func TestCostsCommand(t *testing.T) {
 
 // TestCostsCommand_WithFilters tests the costs command with filters
 func TestCostsCommand_WithFilters(t *testing.T) {
+	setupTestWithCleanup(t)
 	var capturedQuery string
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		capturedQuery = r.URL.RawQuery
@@ -793,7 +980,6 @@ func TestCostsCommand_WithFilters(t *testing.T) {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	outputFormat = "table"
 	costsConsumerID = "consumer-1"
 	costsSessionID = "sess-123"
 
@@ -811,14 +997,11 @@ func TestCostsCommand_WithFilters(t *testing.T) {
 	if !strings.Contains(capturedQuery, "session_id=sess-123") {
 		t.Errorf("expected session_id filter in query, got: %s", capturedQuery)
 	}
-
-	// Reset
-	costsConsumerID = ""
-	costsSessionID = ""
 }
 
 // TestCostsSummaryCommand tests the costs summary command
 func TestCostsSummaryCommand(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/costs/summary" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -832,9 +1015,6 @@ func TestCostsSummaryCommand(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	})
-
-	outputFormat = "table"
-	costsConsumerID = ""
 
 	output := captureOutput(func() {
 		err := runCostsSummary(nil, nil)
@@ -850,9 +1030,9 @@ func TestCostsSummaryCommand(t *testing.T) {
 
 // TestServerConnectionError tests handling when server is unreachable
 func TestServerConnectionError(t *testing.T) {
+	setupTestWithCleanup(t)
 	// Point to non-existent server
 	serverURL = "http://localhost:1"
-	outputFormat = "table"
 
 	err := runInventory(nil, nil)
 	if err == nil {
@@ -865,12 +1045,11 @@ func TestServerConnectionError(t *testing.T) {
 
 // TestServerErrorResponse tests handling of non-200 server responses
 func TestServerErrorResponse(t *testing.T) {
+	setupTestWithCleanup(t)
 	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error": "internal server error"}`))
 	})
-
-	outputFormat = "table"
 
 	err := runInventory(nil, nil)
 	if err == nil {
@@ -878,5 +1057,160 @@ func TestServerErrorResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "server error") {
 		t.Errorf("expected 'server error' in error message, got: %v", err)
+	}
+}
+
+// =============================================================================
+// Parallel-safe tests for pure functions
+// These tests can run in parallel because they don't modify any global state
+// =============================================================================
+
+// TestTruncateString tests the truncateString utility function.
+// This is a pure function test that can run in parallel.
+func TestTruncateString(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{
+			name:     "string shorter than max",
+			input:    "hello",
+			maxLen:   10,
+			expected: "hello",
+		},
+		{
+			name:     "string equal to max",
+			input:    "hello",
+			maxLen:   5,
+			expected: "hello",
+		},
+		{
+			name:     "string longer than max",
+			input:    "hello world",
+			maxLen:   8,
+			expected: "hello...",
+		},
+		{
+			name:     "very short maxLen",
+			input:    "hello",
+			maxLen:   3,
+			expected: "hel",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			maxLen:   5,
+			expected: "",
+		},
+		{
+			name:     "zero maxLen",
+			input:    "hello",
+			maxLen:   0,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := truncateString(tt.input, tt.maxLen)
+			if result != tt.expected {
+				t.Errorf("truncateString(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestParseSessionPath tests the parseSessionPath utility function.
+// This is a pure function test that can run in parallel.
+func TestParseSessionPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		input       string
+		wantSession string
+		wantPath    string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "valid session path",
+			input:       "session-123:/home/user/file.txt",
+			wantSession: "session-123",
+			wantPath:    "/home/user/file.txt",
+			wantErr:     false,
+		},
+		{
+			name:        "valid with spaces trimmed",
+			input:       "  session-123  :  /path/to/file  ",
+			wantSession: "session-123",
+			wantPath:    "/path/to/file",
+			wantErr:     false,
+		},
+		{
+			name:        "missing colon",
+			input:       "session-123/home/user/file.txt",
+			wantErr:     true,
+			errContains: "invalid format",
+		},
+		{
+			name:        "empty session ID",
+			input:       ":/home/user/file.txt",
+			wantErr:     true,
+			errContains: "session ID cannot be empty",
+		},
+		{
+			name:        "empty path",
+			input:       "session-123:",
+			wantErr:     true,
+			errContains: "path cannot be empty",
+		},
+		{
+			name:        "session ID with whitespace only",
+			input:       "   :/path",
+			wantErr:     true,
+			errContains: "session ID cannot be empty",
+		},
+		{
+			name:        "path with whitespace only",
+			input:       "session:   ",
+			wantErr:     true,
+			errContains: "path cannot be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotSession, gotPath, err := parseSessionPath(tt.input)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseSessionPath(%q) expected error containing %q, got nil", tt.input, tt.errContains)
+					return
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("parseSessionPath(%q) error = %v, want error containing %q", tt.input, err, tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("parseSessionPath(%q) unexpected error: %v", tt.input, err)
+				return
+			}
+
+			if gotSession != tt.wantSession {
+				t.Errorf("parseSessionPath(%q) session = %q, want %q", tt.input, gotSession, tt.wantSession)
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("parseSessionPath(%q) path = %q, want %q", tt.input, gotPath, tt.wantPath)
+			}
+		})
 	}
 }

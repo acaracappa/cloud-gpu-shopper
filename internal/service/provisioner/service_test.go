@@ -87,7 +87,13 @@ func newMockSessionStore() *mockSessionStore {
 func (m *mockSessionStore) Create(ctx context.Context, session *models.Session) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[session.ID] = session
+	// Store a copy to avoid races when caller modifies the original
+	sessionCopy := *session
+	if session.ExposedPorts != nil {
+		sessionCopy.ExposedPorts = make([]int, len(session.ExposedPorts))
+		copy(sessionCopy.ExposedPorts, session.ExposedPorts)
+	}
+	m.sessions[session.ID] = &sessionCopy
 	return nil
 }
 
@@ -98,9 +104,13 @@ func (m *mockSessionStore) Get(ctx context.Context, id string) (*models.Session,
 	if !ok {
 		return nil, &SessionNotFoundError{ID: id}
 	}
-	// Return a copy
-	copy := *session
-	return &copy, nil
+	// Deep copy to avoid races
+	sessionCopy := *session
+	if session.ExposedPorts != nil {
+		sessionCopy.ExposedPorts = make([]int, len(session.ExposedPorts))
+		copy(sessionCopy.ExposedPorts, session.ExposedPorts)
+	}
+	return &sessionCopy, nil
 }
 
 func (m *mockSessionStore) Update(ctx context.Context, session *models.Session) error {
@@ -109,7 +119,13 @@ func (m *mockSessionStore) Update(ctx context.Context, session *models.Session) 
 	if _, ok := m.sessions[session.ID]; !ok {
 		return &SessionNotFoundError{ID: session.ID}
 	}
-	m.sessions[session.ID] = session
+	// Store a copy to avoid races when caller modifies the original
+	sessionCopy := *session
+	if session.ExposedPorts != nil {
+		sessionCopy.ExposedPorts = make([]int, len(session.ExposedPorts))
+		copy(sessionCopy.ExposedPorts, session.ExposedPorts)
+	}
+	m.sessions[session.ID] = &sessionCopy
 	return nil
 }
 
@@ -121,8 +137,13 @@ func (m *mockSessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Contex
 			if session.Status == models.StatusPending ||
 				session.Status == models.StatusProvisioning ||
 				session.Status == models.StatusRunning {
-				copy := *session
-				return &copy, nil
+				// Deep copy to avoid races
+				sessionCopy := *session
+				if session.ExposedPorts != nil {
+					sessionCopy.ExposedPorts = make([]int, len(session.ExposedPorts))
+					copy(sessionCopy.ExposedPorts, session.ExposedPorts)
+				}
+				return &sessionCopy, nil
 			}
 		}
 	}
@@ -140,8 +161,13 @@ func (m *mockSessionStore) List(ctx context.Context, filter models.SessionListFi
 		if filter.Status != "" && session.Status != filter.Status {
 			continue
 		}
-		copy := *session
-		result = append(result, &copy)
+		// Deep copy to avoid races
+		sessionCopy := *session
+		if session.ExposedPorts != nil {
+			sessionCopy.ExposedPorts = make([]int, len(session.ExposedPorts))
+			copy(sessionCopy.ExposedPorts, session.ExposedPorts)
+		}
+		result = append(result, &sessionCopy)
 		if filter.Limit > 0 && len(result) >= filter.Limit {
 			break
 		}

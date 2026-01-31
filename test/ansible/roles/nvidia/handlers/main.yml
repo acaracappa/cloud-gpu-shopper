@@ -1,6 +1,0 @@
----
-- name: restart docker
-  ansible.builtin.service:
-    name: docker
-    state: restarted
-  when: docker_service_running is defined and docker_service_running

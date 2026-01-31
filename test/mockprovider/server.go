@@ -67,6 +67,10 @@ func (s *Server) setupRoutes() {
 	s.router.DELETE("/instances/:id/", s.handleDestroyInstance)
 	s.router.DELETE("/instances/:id", s.handleDestroyInstance)
 
+	// SSH key attachment (Vast.ai API)
+	s.router.POST("/instances/:id/ssh/", s.handleAttachSSHKey)
+	s.router.POST("/instances/:id/ssh", s.handleAttachSSHKey)
+
 	// Health check
 	s.router.GET("/health", s.handleHealth)
 
@@ -293,6 +297,41 @@ func (s *Server) handleDestroyInstance(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, DestroyResponse{Success: true})
+}
+
+// AttachSSHKeyRequest matches Vast.ai SSH key attachment request
+type AttachSSHKeyRequest struct {
+	SSHKey string `json:"ssh_key"`
+}
+
+// AttachSSHKeyResponse matches Vast.ai SSH key attachment response
+type AttachSSHKeyResponse struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+func (s *Server) handleAttachSSHKey(c *gin.Context) {
+	instanceID := c.Param("id")
+
+	var req AttachSSHKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, AttachSSHKeyResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	// Verify instance exists
+	if _, ok := s.state.GetInstance(instanceID); !ok {
+		c.JSON(http.StatusNotFound, AttachSSHKeyResponse{
+			Success: false,
+			Error:   "instance not found",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, AttachSSHKeyResponse{Success: true})
 }
 
 func (s *Server) handleHealth(c *gin.Context) {

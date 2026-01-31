@@ -39,12 +39,77 @@ func TestMain(m *testing.M) {
 	if os.Getenv(EnvServerURL) != "" && os.Getenv(EnvMockProviderURL) != "" {
 		// Use external servers
 		log.Println("Using external servers for E2E tests")
-		code := m.Run()
-		os.Exit(code)
+		os.Exit(m.Run())
 	}
 
-	// Start in-process servers
+	// Run tests with in-process servers
+	// Using a wrapper function ensures defers run before os.Exit
+	os.Exit(runTestsWithServers(m))
+}
+
+// runTestsWithServers sets up in-process servers and runs tests.
+// This wrapper ensures all cleanup runs via defers before os.Exit is called.
+func runTestsWithServers(m *testing.M) (exitCode int) {
 	log.Println("Starting in-process servers for E2E tests")
+
+	// Track resources for cleanup
+	var (
+		db     *storage.DB
+		dbPath string
+		lm     *lifecycle.Manager
+	)
+
+	// Deferred cleanup runs in LIFO order when this function returns
+	// This ensures cleanup happens even on panic, and before os.Exit
+	defer func() {
+		// Recover from any panic to ensure cleanup completes
+		if r := recover(); r != nil {
+			log.Printf("PANIC during E2E tests: %v", r)
+			exitCode = 1
+		}
+
+		log.Println("Cleaning up E2E test environment...")
+
+		// 1. Stop lifecycle manager (stops background goroutines)
+		if lm != nil {
+			lm.Stop()
+			log.Println("Lifecycle manager stopped")
+		}
+
+		// 2. Close test servers
+		if testServer != nil {
+			testServer.Close()
+			log.Println("API server closed")
+		}
+		if testMockProvider != nil {
+			testMockProvider.Close()
+			log.Println("Mock provider closed")
+		}
+
+		// 3. Close database connection
+		if db != nil {
+			if err := db.Close(); err != nil {
+				log.Printf("Warning: failed to close database: %v", err)
+			} else {
+				log.Println("Database closed")
+			}
+		}
+
+		// 4. Remove temp database file (after db is closed)
+		if dbPath != "" {
+			if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Warning: failed to remove temp database: %v", err)
+			} else {
+				log.Println("Temp database removed")
+			}
+		}
+
+		// 5. Clean up environment variables
+		os.Unsetenv(EnvServerURL)
+		os.Unsetenv(EnvMockProviderURL)
+
+		log.Println("E2E cleanup complete")
+	}()
 
 	// Start mock provider
 	mockState := mockprovider.NewState()
@@ -55,19 +120,21 @@ func TestMain(m *testing.M) {
 	// Create temp database
 	tmpDB, err := os.CreateTemp("", "e2e-test-*.db")
 	if err != nil {
-		log.Fatalf("Failed to create temp database: %v", err)
+		log.Printf("Failed to create temp database: %v", err)
+		return 1
 	}
 	tmpDB.Close()
-	dbPath := tmpDB.Name()
-	defer os.Remove(dbPath)
+	dbPath = tmpDB.Name()
 
 	// Initialize database
-	db, err := storage.New(dbPath)
+	db, err = storage.New(dbPath)
 	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
+		log.Printf("Failed to open database: %v", err)
+		return 1
 	}
 	if err := db.Migrate(context.Background()); err != nil {
-		log.Fatalf("Failed to migrate database: %v", err)
+		log.Printf("Failed to migrate database: %v", err)
+		return 1
 	}
 
 	// Create mock provider adapter that talks to our mock server
@@ -86,7 +153,7 @@ func TestMain(m *testing.M) {
 		provisioner.WithSSHVerifier(mockSSHVerifier),
 		provisioner.WithSSHVerifyTimeout(5*time.Second),
 		provisioner.WithSSHCheckInterval(500*time.Millisecond))
-	lm := lifecycle.New(sessionStore, prov)
+	lm = lifecycle.New(sessionStore, prov)
 	ct := cost.New(costStore, sessionStore, nil)
 
 	// Create reconciler for orphan/ghost detection tests
@@ -99,10 +166,10 @@ func TestMain(m *testing.M) {
 
 	// Start lifecycle manager
 	lm.Start(context.Background())
-	defer lm.Stop()
 
 	// Create API server
 	apiServer := api.New(inv, prov, lm, ct)
+	apiServer.SetReady(true)
 	testServer = httptest.NewServer(apiServer.Router())
 	log.Printf("API server started at %s", testServer.URL)
 
@@ -110,15 +177,8 @@ func TestMain(m *testing.M) {
 	os.Setenv(EnvServerURL, testServer.URL)
 	os.Setenv(EnvMockProviderURL, testMockProvider.URL)
 
-	// Run tests
-	code := m.Run()
-
-	// Cleanup
-	testServer.Close()
-	testMockProvider.Close()
-	db.Close()
-
-	os.Exit(code)
+	// Run tests - deferred cleanup will run after this returns
+	return m.Run()
 }
 
 // MockProviderAdapter adapts the mock provider HTTP server to the provider.Provider interface
@@ -193,9 +253,14 @@ func (m *MockProviderAdapter) ListOffers(ctx context.Context, filter models.Offe
 }
 
 func (m *MockProviderAdapter) ListAllInstances(ctx context.Context) ([]provider.ProviderInstance, error) {
-	resp, err := m.client.Get(m.baseURL + "/instances/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/instances/", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list instances: %w", err)
 	}
 	defer resp.Body.Close()
 

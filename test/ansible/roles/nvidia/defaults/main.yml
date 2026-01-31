@@ -1,4 +1,0 @@
----
-# Default variables for nvidia role
-nvidia_min_driver_version: "525.0"
-nvidia_cuda_version: "12.0"

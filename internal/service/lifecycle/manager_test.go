@@ -52,6 +52,9 @@ func (m *mockSessionStore) GetExpiredSessions(ctx context.Context) ([]*models.Se
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Note: This mock uses time.Now() which may cause non-determinism in tests.
+	// For tests that need deterministic time, use mockSessionStoreWithExpiry instead,
+	// which accepts a custom now time.
 	now := time.Now()
 	var result []*models.Session
 	for _, s := range m.sessions {
@@ -193,8 +196,10 @@ func TestManager_StartStop(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, m.IsRunning())
 
-	// Wait for at least one check
-	time.Sleep(50 * time.Millisecond)
+	// Wait for at least one check using Eventually instead of Sleep
+	require.Eventually(t, func() bool {
+		return m.GetMetrics().ChecksRun > 0
+	}, 5*time.Second, 10*time.Millisecond, "expected at least one check to run")
 
 	m.Stop()
 	assert.False(t, m.IsRunning())
@@ -590,15 +595,17 @@ func TestManager_ContextCancellation(t *testing.T) {
 
 	err := m.Start(ctx)
 	require.NoError(t, err)
+	assert.True(t, m.IsRunning())
 
 	// Cancel context
 	cancel()
 
-	// Wait for manager to stop
-	time.Sleep(100 * time.Millisecond)
+	// Wait for manager to stop using Eventually instead of Sleep
+	require.Eventually(t, func() bool {
+		return !m.IsRunning()
+	}, 5*time.Second, 10*time.Millisecond, "manager should stop after context cancellation")
 
-	// Manager should have stopped due to context cancellation
-	// (Note: depending on timing, it might still be marked as running briefly)
+	assert.False(t, m.IsRunning())
 }
 
 func TestManager_RunsAllChecks(t *testing.T) {
@@ -613,12 +620,149 @@ func TestManager_RunsAllChecks(t *testing.T) {
 	err := m.Start(ctx)
 	require.NoError(t, err)
 
-	// Wait for multiple check cycles
-	time.Sleep(50 * time.Millisecond)
+	// Wait for multiple check cycles using Eventually instead of Sleep
+	require.Eventually(t, func() bool {
+		return m.GetMetrics().ChecksRun >= 2
+	}, 5*time.Second, 10*time.Millisecond, "expected at least 2 checks to run")
 
 	m.Stop()
 
 	metrics := m.GetMetrics()
 	assert.GreaterOrEqual(t, metrics.ChecksRun, int64(2))
+}
+
+// TestManager_TimeInjection_Deterministic demonstrates that time injection enables
+// deterministic testing of time-dependent expiration logic. This test simulates
+// time progression without relying on actual clock time, making tests fast and reliable.
+func TestManager_TimeInjection_Deterministic(t *testing.T) {
+	// Use a fixed base time for complete determinism
+	baseTime := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	currentTime := baseTime
+
+	// Create a controllable time function
+	timeFunc := func() time.Time {
+		return currentTime
+	}
+
+	// Use the mockSessionStoreWithExpiry which also uses controlled time
+	store := &mockSessionStoreWithExpiry{
+		sessions: make(map[string]*models.Session),
+		now:      baseTime,
+	}
+	destroyer := newMockDestroyer()
+	handler := newMockEventHandler()
+
+	// Create a session that will expire in 2 hours
+	session := &models.Session{
+		ID:        "sess-time-test",
+		Status:    models.StatusRunning,
+		CreatedAt: baseTime,
+		ExpiresAt: baseTime.Add(2 * time.Hour), // Expires at 14:00
+	}
+	store.add(session)
+
+	m := New(store, destroyer,
+		WithLogger(newTestLogger()),
+		WithHardMaxHours(12),
+		WithOrphanGracePeriod(15*time.Minute),
+		WithEventHandler(handler),
+		WithTimeFunc(timeFunc))
+
+	ctx := context.Background()
+
+	// T+0: Session should not be expired (created at 12:00, expires at 14:00)
+	m.checkHardMax(ctx)
+	m.checkOrphans(ctx)
+	assert.Empty(t, destroyer.getDestroyCalls(), "session should not be destroyed at T+0")
+	assert.Empty(t, handler.orphanSessions, "no orphans at T+0")
+
+	// T+1h: Session still valid (13:00, expires at 14:00)
+	currentTime = baseTime.Add(1 * time.Hour)
+	store.now = currentTime
+	m.checkReservationExpiry(ctx)
+	m.checkOrphans(ctx)
+	assert.Empty(t, destroyer.getDestroyCalls(), "session should not be destroyed at T+1h")
+	assert.Empty(t, handler.orphanSessions, "no orphans at T+1h")
+
+	// T+2h 5m: Session expired but within grace period (14:05, grace ends at 14:15)
+	currentTime = baseTime.Add(2*time.Hour + 5*time.Minute)
+	store.now = currentTime
+	m.checkReservationExpiry(ctx)
+	assert.Equal(t, []string{"sess-time-test"}, destroyer.getDestroyCalls(), "expired session should be destroyed")
+	m.checkOrphans(ctx)
+	assert.Empty(t, handler.orphanSessions, "still within grace period at T+2h5m")
+
+	// Reset for hard max test
+	destroyer.destroyCalls = nil
+	handler.orphanSessions = nil
+
+	// Create a new session for hard max testing
+	hardMaxSession := &models.Session{
+		ID:        "sess-hard-max",
+		Status:    models.StatusRunning,
+		CreatedAt: baseTime,
+		ExpiresAt: baseTime.Add(24 * time.Hour), // Long reservation
+	}
+	store.sessions = map[string]*models.Session{hardMaxSession.ID: hardMaxSession}
+
+	// T+11h: Session still within hard max (12 hour limit)
+	currentTime = baseTime.Add(11 * time.Hour)
+	m.checkHardMax(ctx)
+	assert.Empty(t, destroyer.getDestroyCalls(), "session should not hit hard max at T+11h")
+
+	// T+13h: Session exceeds hard max
+	currentTime = baseTime.Add(13 * time.Hour)
+	m.checkHardMax(ctx)
+	assert.Equal(t, []string{"sess-hard-max"}, destroyer.getDestroyCalls(), "session should hit hard max at T+13h")
+	assert.Len(t, handler.hardMaxSessions, 1, "hard max event should be fired")
+}
+
+// TestManager_TimeInjection_OrphanGracePeriod demonstrates time injection for
+// orphan detection grace period testing.
+func TestManager_TimeInjection_OrphanGracePeriod(t *testing.T) {
+	baseTime := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	currentTime := baseTime
+
+	timeFunc := func() time.Time {
+		return currentTime
+	}
+
+	store := newMockSessionStore()
+	destroyer := newMockDestroyer()
+	handler := newMockEventHandler()
+
+	// Create a session that expires at 14:00, grace period is 15 minutes
+	// So orphan detection should trigger after 14:15
+	session := &models.Session{
+		ID:        "sess-orphan-grace",
+		Status:    models.StatusRunning,
+		CreatedAt: baseTime,
+		ExpiresAt: baseTime.Add(2 * time.Hour), // Expires at 14:00
+	}
+	store.add(session)
+
+	m := New(store, destroyer,
+		WithLogger(newTestLogger()),
+		WithOrphanGracePeriod(15*time.Minute),
+		WithEventHandler(handler),
+		WithTimeFunc(timeFunc))
+
+	ctx := context.Background()
+
+	// T+2h: Expired but within grace period (14:00 - 14:00, grace ends at 14:15)
+	currentTime = baseTime.Add(2 * time.Hour)
+	m.checkOrphans(ctx)
+	assert.Empty(t, handler.orphanSessions, "no orphan yet at exact expiry")
+
+	// T+2h10m: Still within grace period (14:10, grace ends at 14:15)
+	currentTime = baseTime.Add(2*time.Hour + 10*time.Minute)
+	m.checkOrphans(ctx)
+	assert.Empty(t, handler.orphanSessions, "no orphan at T+2h10m (within grace)")
+
+	// T+2h16m: Past grace period (14:16, grace ended at 14:15)
+	currentTime = baseTime.Add(2*time.Hour + 16*time.Minute)
+	m.checkOrphans(ctx)
+	assert.Len(t, handler.orphanSessions, 1, "orphan detected after grace period")
+	assert.Equal(t, "sess-orphan-grace", handler.orphanSessions[0].ID)
 }
 

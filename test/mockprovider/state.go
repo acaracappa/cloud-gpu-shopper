@@ -308,10 +308,13 @@ func (s *State) DestroyInstance(id string) error {
 	instance.Status = StatusDestroyed
 	instance.ActualStatus = "exited"
 
+	// Capture delay before releasing lock to avoid race
+	destroyDelay := s.destroyDelay
+
 	// Simulate async destruction
 	go func() {
-		if s.destroyDelay > 0 {
-			time.Sleep(s.destroyDelay)
+		if destroyDelay > 0 {
+			time.Sleep(destroyDelay)
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}

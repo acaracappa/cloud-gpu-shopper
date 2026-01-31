@@ -160,8 +160,11 @@ The service is designed with "zero orphaned instances" as the primary goal:
 # Run tests
 go test ./...
 
-# Run tests with verbose output
-go test -v ./...
+# Run tests with race detection (recommended)
+go test -race ./...
+
+# Run E2E tests
+go test -tags=e2e ./test/e2e/...
 
 # Run tests with coverage
 go test -cover ./...
@@ -170,6 +173,14 @@ go test -cover ./...
 go build -o bin/server ./cmd/server
 go build -o bin/gpu-shopper ./cmd/cli
 ```
+
+### Test Quality
+
+All tests are designed to be:
+- **Race-free**: Pass with `go test -race`
+- **Deterministic**: Use `require.Eventually()` instead of `time.Sleep()`
+- **Isolated**: Proper cleanup with `t.Cleanup()` and deferred resource release
+- **Time-injectable**: Services support `WithTimeFunc()` for controlled time testing
 
 ## Project Structure
 
@@ -194,7 +205,12 @@ go build -o bin/gpu-shopper ./cmd/cli
 
 See [PROGRESS.md](PROGRESS.md) for detailed implementation status.
 
-**Current Phase**: Day 5 Complete - MVP Ready
+**Current Phase**: Post-MVP - QA Remediation Complete
+
+- MVP fully implemented with all safety systems
+- Comprehensive QA review completed (120+ issues addressed)
+- Test suite hardened for race-free, deterministic execution
+- E2E and live testing infrastructure operational
 
 ## License
 

@@ -17,11 +17,21 @@ type mockCostStore struct {
 	mu      sync.RWMutex
 	records []*models.CostRecord
 	err     error
+	// now is an optional time function for deterministic testing
+	now func() time.Time
 }
 
 func newMockCostStore() *mockCostStore {
 	return &mockCostStore{
 		records: make([]*models.CostRecord, 0),
+		now:     time.Now,
+	}
+}
+
+func newMockCostStoreWithTime(now func() time.Time) *mockCostStore {
+	return &mockCostStore{
+		records: make([]*models.CostRecord, 0),
+		now:     now,
 	}
 }
 
@@ -46,7 +56,7 @@ func (m *mockCostStore) RecordHourlyForSession(ctx context.Context, session *mod
 		ConsumerID: session.ConsumerID,
 		Provider:   session.Provider,
 		GPUType:    session.GPUType,
-		Hour:       time.Now().Truncate(time.Hour),
+		Hour:       m.now().Truncate(time.Hour),
 		Amount:     session.PricePerHour,
 		Currency:   "USD",
 	}
@@ -402,6 +412,10 @@ func TestTracker_NoBudgetLimitNoAlert(t *testing.T) {
 	consumerStore := newMockConsumerStore()
 	alertSender := newMockAlertSender()
 
+	// Use a fixed time for determinism
+	now := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	startOfMonth := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	// Consumer with no budget limit
 	consumerStore.add(&models.Consumer{
 		ID:          "consumer-001",
@@ -412,12 +426,13 @@ func TestTracker_NoBudgetLimitNoAlert(t *testing.T) {
 	// Add lots of cost
 	costStore.Record(context.Background(), &models.CostRecord{
 		ConsumerID: "consumer-001",
-		Hour:       time.Now().Truncate(time.Hour),
+		Hour:       startOfMonth.Add(24 * time.Hour),
 		Amount:     1000.0,
 	})
 
 	tracker := New(costStore, sessionStore, consumerStore,
-		WithAlertSender(alertSender))
+		WithAlertSender(alertSender),
+		WithTimeFunc(func() time.Time { return now }))
 
 	ctx := context.Background()
 	tracker.RunAggregationNow(ctx)
@@ -538,7 +553,11 @@ func TestTracker_RecordCost(t *testing.T) {
 	costStore := newMockCostStore()
 	sessionStore := newMockSessionStore()
 
-	tracker := New(costStore, sessionStore, nil)
+	// Use a fixed time for determinism
+	now := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	tracker := New(costStore, sessionStore, nil,
+		WithTimeFunc(func() time.Time { return now }))
 
 	ctx := context.Background()
 	err := tracker.RecordCost(ctx, &models.CostRecord{
@@ -546,7 +565,7 @@ func TestTracker_RecordCost(t *testing.T) {
 		ConsumerID: "consumer-001",
 		Provider:   "vastai",
 		GPUType:    "RTX4090",
-		Hour:       time.Now().Truncate(time.Hour),
+		Hour:       now.Truncate(time.Hour),
 		Amount:     0.75,
 		Currency:   "USD",
 	})
@@ -632,4 +651,162 @@ func TestTracker_GetPeriodSummary(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 4.00, summary.TotalCost) // Days 3, 4, 5, 6
+}
+
+// TestTracker_TimeInjection_Deterministic demonstrates that time injection enables
+// deterministic testing of budget period calculations. This test simulates
+// time progression for budget monitoring without relying on actual clock time.
+func TestTracker_TimeInjection_Deterministic(t *testing.T) {
+	// Fixed base time: January 15, 2024 at noon
+	baseTime := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	currentTime := baseTime
+
+	timeFunc := func() time.Time {
+		return currentTime
+	}
+
+	costStore := newMockCostStoreWithTime(timeFunc)
+	sessionStore := newMockSessionStore()
+	consumerStore := newMockConsumerStore()
+	alertSender := newMockAlertSender()
+
+	// Consumer with $100 monthly budget
+	consumerStore.add(&models.Consumer{
+		ID:          "consumer-budget-test",
+		Name:        "Test Consumer",
+		BudgetLimit: 100.0,
+	})
+
+	tracker := New(costStore, sessionStore, consumerStore,
+		WithAlertSender(alertSender),
+		WithBudgetWarningThreshold(0.80),
+		WithBudgetExceededThreshold(1.0),
+		WithTimeFunc(timeFunc))
+
+	ctx := context.Background()
+
+	// Add $50 in costs on Jan 10 (this month)
+	costStore.Record(ctx, &models.CostRecord{
+		ConsumerID: "consumer-budget-test",
+		Hour:       time.Date(2024, 1, 10, 10, 0, 0, 0, time.UTC),
+		Amount:     50.0,
+	})
+
+	// T+0: $50 spent, 50% of budget - no alerts
+	tracker.RunAggregationNow(ctx)
+	alerts := alertSender.getAlerts()
+	assert.Empty(t, alerts, "no alerts at 50% of budget")
+
+	// Add $30 more costs on Jan 12
+	costStore.Record(ctx, &models.CostRecord{
+		ConsumerID: "consumer-budget-test",
+		Hour:       time.Date(2024, 1, 12, 10, 0, 0, 0, time.UTC),
+		Amount:     30.0,
+	})
+
+	// T+0: $80 spent, 80% of budget - warning alert
+	tracker.RunAggregationNow(ctx)
+	alerts = alertSender.getAlerts()
+	require.Len(t, alerts, 1, "warning alert at 80%")
+	assert.Equal(t, "warning", alerts[0].AlertType)
+
+	// Add $25 more on Jan 14
+	costStore.Record(ctx, &models.CostRecord{
+		ConsumerID: "consumer-budget-test",
+		Hour:       time.Date(2024, 1, 14, 10, 0, 0, 0, time.UTC),
+		Amount:     25.0,
+	})
+
+	// T+0: $105 spent, 105% of budget - exceeded alert
+	tracker.RunAggregationNow(ctx)
+	alerts = alertSender.getAlerts()
+	require.Len(t, alerts, 2, "warning + exceeded alerts")
+	assert.Equal(t, "exceeded", alerts[1].AlertType)
+
+	// Simulate advancing to February (new budget period)
+	currentTime = time.Date(2024, 2, 5, 12, 0, 0, 0, time.UTC)
+
+	// Reset consumer alert state for new month
+	consumer, _ := consumerStore.Get(ctx, "consumer-budget-test")
+	consumer.AlertSent = false
+	consumerStore.Update(ctx, consumer)
+
+	// Add $20 in February (should be separate from January budget)
+	costStore.Record(ctx, &models.CostRecord{
+		ConsumerID: "consumer-budget-test",
+		Hour:       time.Date(2024, 2, 3, 10, 0, 0, 0, time.UTC),
+		Amount:     20.0,
+	})
+
+	// In February, only $20 spent - no new alerts
+	alertCountBefore := len(alertSender.getAlerts())
+	tracker.RunAggregationNow(ctx)
+	alertCountAfter := len(alertSender.getAlerts())
+	assert.Equal(t, alertCountBefore, alertCountAfter, "no new alerts in new month with low spend")
+
+	// Verify monthly summary correctly uses time injection for period boundaries
+	summary, err := tracker.GetMonthlySummary(ctx, "consumer-budget-test")
+	require.NoError(t, err)
+	assert.Equal(t, 20.0, summary.TotalCost, "February summary should only include February costs")
+}
+
+// TestTracker_TimeInjection_DailySummary demonstrates time injection for
+// daily summary calculations across day boundaries.
+func TestTracker_TimeInjection_DailySummary(t *testing.T) {
+	// Start at 10 PM on Jan 15
+	currentTime := time.Date(2024, 1, 15, 22, 0, 0, 0, time.UTC)
+
+	timeFunc := func() time.Time {
+		return currentTime
+	}
+
+	costStore := newMockCostStoreWithTime(timeFunc)
+	sessionStore := newMockSessionStore()
+
+	// Add costs at different times on Jan 15 and Jan 16
+	// 10 AM Jan 15 - today
+	costStore.Record(context.Background(), &models.CostRecord{
+		SessionID:  "sess-001",
+		ConsumerID: "consumer-001",
+		Provider:   "vastai",
+		GPUType:    "RTX4090",
+		Hour:       time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC),
+		Amount:     2.50,
+	})
+	// 8 PM Jan 15 - today
+	costStore.Record(context.Background(), &models.CostRecord{
+		SessionID:  "sess-001",
+		ConsumerID: "consumer-001",
+		Provider:   "vastai",
+		GPUType:    "RTX4090",
+		Hour:       time.Date(2024, 1, 15, 20, 0, 0, 0, time.UTC),
+		Amount:     1.50,
+	})
+	// 11 PM Jan 14 - yesterday
+	costStore.Record(context.Background(), &models.CostRecord{
+		SessionID:  "sess-002",
+		ConsumerID: "consumer-001",
+		Provider:   "tensordock",
+		GPUType:    "A100",
+		Hour:       time.Date(2024, 1, 14, 23, 0, 0, 0, time.UTC),
+		Amount:     5.00,
+	})
+
+	tracker := New(costStore, sessionStore, nil,
+		WithTimeFunc(timeFunc))
+
+	ctx := context.Background()
+
+	// Get daily summary for "today" (Jan 15)
+	summary, err := tracker.GetDailySummary(ctx, "consumer-001")
+	require.NoError(t, err)
+	assert.Equal(t, 4.00, summary.TotalCost, "daily summary should only include Jan 15 costs")
+
+	// Advance time to Jan 16 at 2 AM
+	currentTime = time.Date(2024, 1, 16, 2, 0, 0, 0, time.UTC)
+
+	// Now "today" is Jan 16 - the Jan 15 costs should not appear
+	summary, err = tracker.GetDailySummary(ctx, "consumer-001")
+	require.NoError(t, err)
+	assert.Equal(t, 0.00, summary.TotalCost, "daily summary on new day should be empty")
 }
