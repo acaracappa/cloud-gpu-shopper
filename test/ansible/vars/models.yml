@@ -1,0 +1,115 @@
+---
+# Model configurations for benchmark suite
+# These define HuggingFace model IDs and vLLM parameters
+
+models:
+  # Small tier (7B models) - ~16GB VRAM
+  mistral-7b:
+    name: "Mistral 7B Instruct v0.3"
+    huggingface_id: "mistralai/Mistral-7B-Instruct-v0.3"
+    parameters_b: 7.0
+    tier: small
+    min_vram_gb: 16
+    max_model_len: 4096
+    tensor_parallel: 1
+    gpu_memory_utilization: 0.90
+
+  qwen2.5-7b:
+    name: "Qwen 2.5 7B Instruct"
+    huggingface_id: "Qwen/Qwen2.5-7B-Instruct"
+    parameters_b: 7.0
+    tier: small
+    min_vram_gb: 16
+    max_model_len: 4096
+    tensor_parallel: 1
+    gpu_memory_utilization: 0.90
+
+  # Medium tier (32-33B models) - 24-48GB VRAM
+  qwen2.5-32b:
+    name: "Qwen 2.5 32B Instruct"
+    huggingface_id: "Qwen/Qwen2.5-32B-Instruct"
+    parameters_b: 32.0
+    tier: medium
+    min_vram_gb: 48
+    max_model_len: 4096
+    tensor_parallel: 1
+    gpu_memory_utilization: 0.90
+
+  deepseek-33b:
+    name: "DeepSeek LLM 33B Chat"
+    huggingface_id: "deepseek-ai/deepseek-llm-33b-chat"
+    parameters_b: 33.0
+    tier: medium
+    min_vram_gb: 48
+    max_model_len: 4096
+    tensor_parallel: 1
+    gpu_memory_utilization: 0.90
+
+  # Large tier (67-72B models) - 80GB+ VRAM
+  qwen2.5-72b:
+    name: "Qwen 2.5 72B Instruct"
+    huggingface_id: "Qwen/Qwen2.5-72B-Instruct"
+    parameters_b: 72.0
+    tier: large
+    min_vram_gb: 80
+    max_model_len: 4096
+    tensor_parallel: 2
+    gpu_memory_utilization: 0.90
+
+  deepseek-67b:
+    name: "DeepSeek LLM 67B Chat"
+    huggingface_id: "deepseek-ai/deepseek-llm-67b-chat"
+    parameters_b: 67.0
+    tier: large
+    min_vram_gb: 80
+    max_model_len: 4096
+    tensor_parallel: 2
+    gpu_memory_utilization: 0.90
+
+# GPU type mappings
+gpus:
+  RTX4090:
+    vram_gb: 24
+    typical_price_hr: 0.45
+  A10:
+    vram_gb: 24
+    typical_price_hr: 0.35
+  L4:
+    vram_gb: 24
+    typical_price_hr: 0.40
+  A6000:
+    vram_gb: 48
+    typical_price_hr: 0.75
+  L40S:
+    vram_gb: 48
+    typical_price_hr: 0.90
+  A100-40GB:
+    vram_gb: 40
+    typical_price_hr: 1.20
+  A100-80GB:
+    vram_gb: 80
+    typical_price_hr: 2.00
+  H100:
+    vram_gb: 80
+    typical_price_hr: 3.50
+
+# Model tier to GPU compatibility
+tier_gpu_mapping:
+  small:
+    - RTX4090
+    - A10
+    - L4
+    - A6000
+    - L40S
+    - A100-40GB
+    - A100-80GB
+    - H100
+  medium:
+    - A6000
+    - L40S
+    - A100-40GB
+    - A100-80GB
+    - H100
+  large:
+    - A100-80GB
+    - H100

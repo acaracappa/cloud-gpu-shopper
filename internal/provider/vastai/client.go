@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -269,6 +270,7 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		if err := c.AttachSSHKey(ctx, instanceID, req.SSHPublicKey); err != nil {
 			// Log but don't fail - the instance is already created
 			// The SSH verification will fail later if the key wasn't attached
+			log.Printf("[Vast.ai] WARNING: failed to attach SSH key to instance %s: %v (SSH verification will fail)", instanceID, err)
 		}
 	}
 

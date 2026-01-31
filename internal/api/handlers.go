@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/storage"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
@@ -113,7 +115,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 	}
 
 	// Return 503 if not ready (e.g., during startup sweep)
-	if !s.ready {
+	if !s.ready.Load() {
 		response.Status = "unavailable"
 		response.Services["ready"] = "false"
 		c.JSON(http.StatusServiceUnavailable, response)
@@ -132,11 +134,11 @@ type ReadyResponse struct {
 
 func (s *Server) handleReady(c *gin.Context) {
 	response := ReadyResponse{
-		Ready:     s.ready,
+		Ready:     s.ready.Load(),
 		Timestamp: time.Now(),
 	}
 
-	if !s.ready {
+	if !s.ready.Load() {
 		c.JSON(http.StatusServiceUnavailable, response)
 		return
 	}
@@ -309,6 +311,8 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 }
 
 func (s *Server) handleListSessions(c *gin.Context) {
+	ctx := c.Request.Context()
+
 	var query ListSessionsQuery
 	if err := c.ShouldBindQuery(&query); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{
@@ -318,11 +322,34 @@ func (s *Server) handleListSessions(c *gin.Context) {
 		return
 	}
 
-	// Note: In a full implementation, we'd query the session store
-	// with filters. This is a placeholder that returns empty list.
+	// Build filter from query parameters
+	filter := models.SessionListFilter{
+		ConsumerID: query.ConsumerID,
+		Limit:      query.Limit,
+	}
+	if query.Status != "" {
+		filter.Status = models.SessionStatus(query.Status)
+	}
+
+	// Query sessions from the provisioner service
+	sessions, err := s.provisioner.ListSessions(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to list sessions",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Convert to response format
+	responses := make([]models.SessionResponse, len(sessions))
+	for i, session := range sessions {
+		responses[i] = session.ToResponse()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"sessions": []models.SessionResponse{},
-		"count":    0,
+		"sessions": responses,
+		"count":    len(responses),
 	})
 }
 
@@ -332,8 +359,17 @@ func (s *Server) handleGetSession(c *gin.Context) {
 
 	session, err := s.provisioner.GetSession(ctx, sessionID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     err.Error(),
+		// Check if the error is a not-found error (return 404) vs other errors (return 500)
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:     err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		// Internal error (DB issues, etc.)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to get session",
 			RequestID: c.GetString("request_id"),
 		})
 		return
@@ -383,7 +419,16 @@ func (s *Server) handleExtendSession(c *gin.Context) {
 	}
 
 	// Get updated session
-	session, _ := s.provisioner.GetSession(ctx, sessionID)
+	session, err := s.provisioner.GetSession(ctx, sessionID)
+	if err != nil || session == nil {
+		// Extension succeeded but couldn't retrieve updated session
+		// Return success without the new expiry time
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "session extended",
+			"session_id": sessionID,
+		})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":        "session extended",
@@ -453,10 +498,26 @@ func (s *Server) handleGetCosts(c *gin.Context) {
 		// Parse custom date range
 		var startTime, endTime time.Time
 		if params.StartDate != "" {
-			startTime, _ = time.Parse("2006-01-02", params.StartDate)
+			var parseErr error
+			startTime, parseErr = time.Parse("2006-01-02", params.StartDate)
+			if parseErr != nil {
+				c.JSON(http.StatusBadRequest, ErrorResponse{
+					Error:     fmt.Sprintf("invalid start_date format, expected YYYY-MM-DD: %s", params.StartDate),
+					RequestID: c.GetString("request_id"),
+				})
+				return
+			}
 		}
 		if params.EndDate != "" {
-			endTime, _ = time.Parse("2006-01-02", params.EndDate)
+			var parseErr error
+			endTime, parseErr = time.Parse("2006-01-02", params.EndDate)
+			if parseErr != nil {
+				c.JSON(http.StatusBadRequest, ErrorResponse{
+					Error:     fmt.Sprintf("invalid end_date format, expected YYYY-MM-DD: %s", params.EndDate),
+					RequestID: c.GetString("request_id"),
+				})
+				return
+			}
 		}
 		summary, err = s.costTracker.GetSummary(ctx, models.CostQuery{
 			ConsumerID: params.ConsumerID,

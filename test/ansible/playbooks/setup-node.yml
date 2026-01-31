@@ -1,0 +1,74 @@
+---
+# Setup GPU node for benchmarking
+# Installs NVIDIA container toolkit and Docker
+#
+# Usage:
+#   ansible-playbook playbooks/setup-node.yml -i inventory/dynamic.py
+
+- name: Setup GPU node for benchmarking
+  hosts: benchmark_nodes
+  become: yes
+  gather_facts: yes
+
+  vars:
+    setup_start_time: "{{ ansible_date_time.epoch }}"
+
+  pre_tasks:
+    - name: Display node information
+      ansible.builtin.debug:
+        msg: |
+          Target host: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Architecture: {{ ansible_architecture }}
+          CPU cores: {{ ansible_processor_vcpus }}
+          Memory: {{ (ansible_memtotal_mb / 1024) | round(1) }} GB
+
+    - name: Verify we have root access
+      ansible.builtin.command: whoami
+      become: yes
+      register: whoami_result
+      changed_when: false
+
+    - name: Fail if not root
+      ansible.builtin.fail:
+        msg: "Failed to become root user"
+      when: whoami_result.stdout != "root"
+
+  roles:
+    - role: docker
+      tags: [docker]
+
+    - role: nvidia
+      tags: [nvidia]
+
+  post_tasks:
+    - name: Verify GPU access via Docker
+      ansible.builtin.command: docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi
+      register: docker_gpu_verify
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: docker_gpu_verify.rc == 0
+
+    - name: Display GPU verification
+      ansible.builtin.debug:
+        msg: "{{ docker_gpu_verify.stdout_lines[:10] }}"
+
+    - name: Calculate setup duration
+      ansible.builtin.set_fact:
+        setup_duration: "{{ (ansible_date_time.epoch | int) - (setup_start_time | int) }}"
+
+    - name: Display setup summary
+      ansible.builtin.debug:
+        msg: |
+          Node setup complete!
+          Duration: {{ setup_duration }} seconds
+          Docker: OK
+          NVIDIA Toolkit: OK
+          GPU Access: OK
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted

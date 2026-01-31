@@ -129,6 +129,26 @@ func (m *mockSessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Contex
 	return nil, ErrNotFound
 }
 
+func (m *mockSessionStore) List(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*models.Session
+	for _, session := range m.sessions {
+		if filter.ConsumerID != "" && session.ConsumerID != filter.ConsumerID {
+			continue
+		}
+		if filter.Status != "" && session.Status != filter.Status {
+			continue
+		}
+		copy := *session
+		result = append(result, &copy)
+		if filter.Limit > 0 && len(result) >= filter.Limit {
+			break
+		}
+	}
+	return result, nil
+}
+
 // mockProvider implements provider.Provider for testing
 type mockProvider struct {
 	name              string

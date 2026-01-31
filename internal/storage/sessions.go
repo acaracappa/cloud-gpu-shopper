@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
@@ -150,8 +151,8 @@ func (s *SessionStore) Update(ctx context.Context, session *models.Session) erro
 	return nil
 }
 
-// List returns sessions matching the filter
-func (s *SessionStore) List(ctx context.Context, filter SessionFilter) ([]*models.Session, error) {
+// ListInternal returns sessions matching the internal filter (used by lifecycle and other internal services)
+func (s *SessionStore) ListInternal(ctx context.Context, filter SessionFilter) ([]*models.Session, error) {
 	query := `
 		SELECT
 			id, consumer_id, provider, provider_instance_id, offer_id,
@@ -187,7 +188,7 @@ func (s *SessionStore) List(ctx context.Context, filter SessionFilter) ([]*model
 			placeholders[i] = "?"
 			args = append(args, status)
 		}
-		query += fmt.Sprintf(" AND status IN (%s)", joinStrings(placeholders, ","))
+		query += fmt.Sprintf(" AND status IN (%s)", strings.Join(placeholders, ","))
 	}
 
 	if !filter.ExpiresBeforeTime.IsZero() {
@@ -239,13 +240,16 @@ func (s *SessionStore) List(ctx context.Context, filter SessionFilter) ([]*model
 
 		sessions = append(sessions, session)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating sessions: %w", err)
+	}
 
 	return sessions, nil
 }
 
 // GetActiveSessions returns all sessions in active states
 func (s *SessionStore) GetActiveSessions(ctx context.Context) ([]*models.Session, error) {
-	return s.List(ctx, SessionFilter{
+	return s.ListInternal(ctx, SessionFilter{
 		Statuses: []models.SessionStatus{
 			models.StatusPending,
 			models.StatusProvisioning,
@@ -256,7 +260,7 @@ func (s *SessionStore) GetActiveSessions(ctx context.Context) ([]*models.Session
 
 // GetActiveSessionsByProvider returns active sessions for a specific provider
 func (s *SessionStore) GetActiveSessionsByProvider(ctx context.Context, provider string) ([]*models.Session, error) {
-	return s.List(ctx, SessionFilter{
+	return s.ListInternal(ctx, SessionFilter{
 		Provider: provider,
 		Statuses: []models.SessionStatus{
 			models.StatusPending,
@@ -268,7 +272,7 @@ func (s *SessionStore) GetActiveSessionsByProvider(ctx context.Context, provider
 
 // GetExpiredSessions returns sessions past their expiration time
 func (s *SessionStore) GetExpiredSessions(ctx context.Context) ([]*models.Session, error) {
-	return s.List(ctx, SessionFilter{
+	return s.ListInternal(ctx, SessionFilter{
 		Statuses: []models.SessionStatus{
 			models.StatusRunning,
 		},
@@ -278,8 +282,17 @@ func (s *SessionStore) GetExpiredSessions(ctx context.Context) ([]*models.Sessio
 
 // GetSessionsByStatus returns sessions with specific statuses
 func (s *SessionStore) GetSessionsByStatus(ctx context.Context, statuses ...models.SessionStatus) ([]*models.Session, error) {
-	return s.List(ctx, SessionFilter{
+	return s.ListInternal(ctx, SessionFilter{
 		Statuses: statuses,
+	})
+}
+
+// List returns sessions matching the filter (implements provisioner.SessionStore interface)
+func (s *SessionStore) List(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error) {
+	return s.ListInternal(ctx, SessionFilter{
+		ConsumerID: filter.ConsumerID,
+		Status:     filter.Status,
+		Limit:      filter.Limit,
 	})
 }
 
@@ -299,18 +312,6 @@ func nullTime(t time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: t, Valid: true}
-}
-
-// joinStrings joins strings with a separator
-func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for i := 1; i < len(strs); i++ {
-		result += sep + strs[i]
-	}
-	return result
 }
 
 // GetActiveSessionByConsumerAndOffer returns an active session for the given consumer and offer, if one exists.

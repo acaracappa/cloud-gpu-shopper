@@ -55,6 +55,9 @@ const (
 
 	// DefaultSSHKeyBits is the RSA key size
 	DefaultSSHKeyBits = 4096
+
+	// TensorDockCloudInitDelay is the time to wait for TensorDock cloud-init before SSH polling
+	TensorDockCloudInitDelay = 45 * time.Second
 )
 
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
@@ -106,6 +109,7 @@ type SessionStore interface {
 	Get(ctx context.Context, id string) (*models.Session, error)
 	Update(ctx context.Context, session *models.Session) error
 	GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error)
+	List(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error)
 }
 
 // ProviderRegistry provides access to provider clients
@@ -340,12 +344,7 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		return nil, err
 	}
 
-	tags := models.InstanceTags{
-		ShopperSessionID:    session.ID,
-		ShopperDeploymentID: s.deploymentID,
-		ShopperExpiresAt:    expiresAt,
-		ShopperConsumerID:   req.ConsumerID,
-	}
+	tags := s.buildInstanceTags(session.ID, req.ConsumerID, expiresAt)
 
 	// Build the provider request based on launch mode
 	instanceReq := provider.CreateInstanceRequest{
@@ -403,11 +402,30 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 
 	if err := s.store.Update(ctx, session); err != nil {
 		// Critical: Instance exists but we failed to record it
-		// Log error but return success - reconciliation will catch orphans
-		s.logger.Error("CRITICAL: failed to update session after provision",
+		// Attempt to destroy the orphaned instance to prevent billing
+		s.logger.Error("CRITICAL: failed to update session after provision, attempting cleanup",
 			slog.String("session_id", session.ID),
 			slog.String("provider_id", instance.ProviderInstanceID),
 			slog.String("error", err.Error()))
+
+		// Try to destroy the instance to prevent orphan
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if destroyErr := prov.DestroyInstance(destroyCtx, instance.ProviderInstanceID); destroyErr != nil {
+			// Log destruction failure - manual cleanup may be needed
+			s.logger.Error("CRITICAL: failed to destroy orphaned instance after DB failure",
+				slog.String("session_id", session.ID),
+				slog.String("provider_id", instance.ProviderInstanceID),
+				slog.String("provider", session.Provider),
+				slog.String("destroy_error", destroyErr.Error()),
+				slog.String("db_error", err.Error()))
+			metrics.RecordOrphanDetected()
+		} else {
+			s.logger.Info("successfully destroyed orphaned instance after DB failure",
+				slog.String("session_id", session.ID),
+				slog.String("provider_id", instance.ProviderInstanceID))
+		}
+
 		return nil, fmt.Errorf("failed to update session: %w", err)
 	}
 
@@ -431,13 +449,23 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 
 	// PHASE 4: Wait for verification (async - don't block API)
 	// The caller can poll session status to check when it's running
+	// Use a context with timeout derived from verification config rather than context.Background()
+	// to ensure goroutines can be bounded and don't run indefinitely
 	if req.LaunchMode == models.LaunchModeEntrypoint {
 		// Entrypoint mode: wait for API endpoint to be ready
-		go s.waitForAPIVerifyAsync(context.Background(), session.ID, prov)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), s.apiVerifyTimeout)
+		go func() {
+			defer cancel()
+			s.waitForAPIVerifyAsync(verifyCtx, session.ID, prov)
+		}()
 	} else {
 		// SSH mode: wait for SSH connectivity
 		// Note: We pass the private key directly because it's not stored in the database
-		go s.waitForSSHVerifyAsync(context.Background(), session.ID, privateKey, prov)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), s.sshVerifyTimeout)
+		go func() {
+			defer cancel()
+			s.waitForSSHVerifyAsync(verifyCtx, session.ID, privateKey, prov)
+		}()
 	}
 
 	return session, nil
@@ -455,13 +483,19 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 	// TensorDock VMs need extra time for cloud-init runcmd to execute
 	session, err := s.store.Get(ctx, sessionID)
 	if err == nil && session.Provider == "tensordock" {
-		logger.Info("TensorDock: waiting 45s for cloud-init before SSH polling")
+		logger.Info("TensorDock: waiting for cloud-init before SSH polling",
+			slog.Duration("delay", TensorDockCloudInitDelay))
 		select {
-		case <-time.After(45 * time.Second):
+		case <-time.After(TensorDockCloudInitDelay):
 		case <-ctx.Done():
 			return
 		}
 	}
+
+	// Log warning about insecure host key verification once per session
+	// This is intentional for commodity GPU instances where host keys are unknown
+	logger.Warn("using insecure host key verification for commodity GPU instance",
+		slog.String("reason", "host keys are unknown for spot instances"))
 
 	// Create progressive backoff for SSH polling
 	// This reduces provider API load when instances take a long time to be ready
@@ -718,6 +752,11 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (*models.Ses
 	return s.store.Get(ctx, sessionID)
 }
 
+// ListSessions returns sessions matching the filter criteria
+func (s *Service) ListSessions(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error) {
+	return s.store.List(ctx, filter)
+}
+
 // failSession marks a session as failed
 func (s *Service) failSession(ctx context.Context, session *models.Session, reason string) {
 	session.Status = models.StatusFailed
@@ -778,6 +817,16 @@ func (s *Service) buildWorkloadConfig(req models.CreateSessionRequest) *provider
 	}
 
 	return config
+}
+
+// buildInstanceTags creates provider instance tags for session tracking and orphan detection
+func (s *Service) buildInstanceTags(sessionID, consumerID string, expiresAt time.Time) models.InstanceTags {
+	return models.InstanceTags{
+		ShopperSessionID:    sessionID,
+		ShopperDeploymentID: s.deploymentID,
+		ShopperExpiresAt:    expiresAt,
+		ShopperConsumerID:   consumerID,
+	}
 }
 
 // waitForAPIVerifyAsync waits for API endpoint verification in the background

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -175,22 +176,32 @@ func setDefaults(v *viper.Viper) {
 }
 
 func bindEnvVars(v *viper.Viper) {
+	// Helper to bind and log errors (BindEnv errors are non-fatal but should be logged)
+	bindEnv := func(key string, envVar string) {
+		if err := v.BindEnv(key, envVar); err != nil {
+			slog.Warn("failed to bind environment variable",
+				slog.String("key", key),
+				slog.String("env_var", envVar),
+				slog.String("error", err.Error()))
+		}
+	}
+
 	// Provider credentials from environment
-	v.BindEnv("providers.vastai.api_key", "VASTAI_API_KEY")
-	v.BindEnv("providers.tensordock.auth_id", "TENSORDOCK_AUTH_ID")
-	v.BindEnv("providers.tensordock.api_token", "TENSORDOCK_API_TOKEN")
-	v.BindEnv("providers.tensordock.default_image", "TENSORDOCK_DEFAULT_IMAGE")
+	bindEnv("providers.vastai.api_key", "VASTAI_API_KEY")
+	bindEnv("providers.tensordock.auth_id", "TENSORDOCK_AUTH_ID")
+	bindEnv("providers.tensordock.api_token", "TENSORDOCK_API_TOKEN")
+	bindEnv("providers.tensordock.default_image", "TENSORDOCK_DEFAULT_IMAGE")
 
 	// Database path
-	v.BindEnv("database.path", "DATABASE_PATH")
+	bindEnv("database.path", "DATABASE_PATH")
 
 	// Server config
-	v.BindEnv("server.host", "SERVER_HOST")
-	v.BindEnv("server.port", "SERVER_PORT")
+	bindEnv("server.host", "SERVER_HOST")
+	bindEnv("server.port", "SERVER_PORT")
 
 	// Logging
-	v.BindEnv("logging.level", "LOG_LEVEL")
-	v.BindEnv("logging.format", "LOG_FORMAT")
+	bindEnv("logging.level", "LOG_LEVEL")
+	bindEnv("logging.format", "LOG_FORMAT")
 }
 
 // Validate checks if the configuration is valid

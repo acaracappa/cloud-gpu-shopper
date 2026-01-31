@@ -1,0 +1,5 @@
+# SSH private keys should never be committed
+benchmark_key
+*_key
+*.pem
+!*.pub

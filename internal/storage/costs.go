@@ -19,15 +19,26 @@ func NewCostStore(db *DB) *CostStore {
 	return &CostStore{db: db}
 }
 
-// Record records a cost entry for a session
+// Record records a cost entry for a session.
+// If a record already exists for the same session_id and hour, it updates the existing record.
+// This prevents duplicate billing when cost aggregation runs more frequently than once per hour.
 func (s *CostStore) Record(ctx context.Context, record *models.CostRecord) error {
 	if record.ID == "" {
 		record.ID = uuid.New().String()
 	}
 
+	// Use ON CONFLICT to handle duplicate (session_id, hour) gracefully.
+	// When a duplicate is detected, we update the existing record with the latest values.
+	// This ensures idempotent behavior for repeated aggregation runs within the same hour.
 	query := `
 		INSERT INTO costs (id, session_id, consumer_id, provider, gpu_type, hour, amount, currency)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, hour) DO UPDATE SET
+			amount = excluded.amount,
+			consumer_id = excluded.consumer_id,
+			provider = excluded.provider,
+			gpu_type = excluded.gpu_type,
+			currency = excluded.currency
 	`
 
 	_, err := s.db.ExecContext(ctx, query,
@@ -89,32 +100,8 @@ func (s *CostStore) GetSummary(ctx context.Context, query models.CostQuery) (*mo
 		WHERE 1=1
 	`
 
-	var args []interface{}
-
-	if query.ConsumerID != "" {
-		sqlQuery += " AND consumer_id = ?"
-		args = append(args, query.ConsumerID)
-	}
-
-	if query.SessionID != "" {
-		sqlQuery += " AND session_id = ?"
-		args = append(args, query.SessionID)
-	}
-
-	if query.Provider != "" {
-		sqlQuery += " AND provider = ?"
-		args = append(args, query.Provider)
-	}
-
-	if !query.StartTime.IsZero() {
-		sqlQuery += " AND hour >= ?"
-		args = append(args, query.StartTime)
-	}
-
-	if !query.EndTime.IsZero() {
-		sqlQuery += " AND hour < ?"
-		args = append(args, query.EndTime)
-	}
+	whereClause, args := s.buildCostFilterClause(query)
+	sqlQuery += whereClause
 
 	summary := &models.CostSummary{
 		ConsumerID:  query.ConsumerID,
@@ -134,82 +121,111 @@ func (s *CostStore) GetSummary(ctx context.Context, query models.CostQuery) (*mo
 	}
 
 	// Get breakdown by provider
-	providerQuery := `
-		SELECT provider, COALESCE(SUM(amount), 0)
-		FROM costs
-		WHERE 1=1
-	`
-	providerArgs := make([]interface{}, 0, len(args))
-
-	if query.ConsumerID != "" {
-		providerQuery += " AND consumer_id = ?"
-		providerArgs = append(providerArgs, query.ConsumerID)
-	}
-	if !query.StartTime.IsZero() {
-		providerQuery += " AND hour >= ?"
-		providerArgs = append(providerArgs, query.StartTime)
-	}
-	if !query.EndTime.IsZero() {
-		providerQuery += " AND hour < ?"
-		providerArgs = append(providerArgs, query.EndTime)
-	}
-
-	providerQuery += " GROUP BY provider"
-
-	rows, err := s.db.QueryContext(ctx, providerQuery, providerArgs...)
+	summary.ByProvider, err = s.aggregateCostsByColumn(ctx, "provider", query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get provider breakdown: %w", err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var provider string
-		var amount float64
-		if err := rows.Scan(&provider, &amount); err != nil {
-			return nil, fmt.Errorf("failed to scan provider row: %w", err)
-		}
-		summary.ByProvider[provider] = amount
-	}
 
 	// Get breakdown by GPU type
-	gpuQuery := `
-		SELECT gpu_type, COALESCE(SUM(amount), 0)
-		FROM costs
-		WHERE 1=1
-	`
-	gpuArgs := make([]interface{}, 0, len(args))
-
-	if query.ConsumerID != "" {
-		gpuQuery += " AND consumer_id = ?"
-		gpuArgs = append(gpuArgs, query.ConsumerID)
-	}
-	if !query.StartTime.IsZero() {
-		gpuQuery += " AND hour >= ?"
-		gpuArgs = append(gpuArgs, query.StartTime)
-	}
-	if !query.EndTime.IsZero() {
-		gpuQuery += " AND hour < ?"
-		gpuArgs = append(gpuArgs, query.EndTime)
-	}
-
-	gpuQuery += " GROUP BY gpu_type"
-
-	rows, err = s.db.QueryContext(ctx, gpuQuery, gpuArgs...)
+	summary.ByGPUType, err = s.aggregateCostsByColumn(ctx, "gpu_type", query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get GPU breakdown: %w", err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var gpuType string
-		var amount float64
-		if err := rows.Scan(&gpuType, &amount); err != nil {
-			return nil, fmt.Errorf("failed to scan GPU row: %w", err)
-		}
-		summary.ByGPUType[gpuType] = amount
-	}
 
 	return summary, nil
+}
+
+// buildCostFilterClause builds WHERE clause conditions and args from a CostQuery.
+// Returns the clause string (starting with " AND" if conditions exist) and the args slice.
+func (s *CostStore) buildCostFilterClause(query models.CostQuery) (string, []interface{}) {
+	var clause string
+	var args []interface{}
+
+	if query.ConsumerID != "" {
+		clause += " AND consumer_id = ?"
+		args = append(args, query.ConsumerID)
+	}
+
+	if query.SessionID != "" {
+		clause += " AND session_id = ?"
+		args = append(args, query.SessionID)
+	}
+
+	if query.Provider != "" {
+		clause += " AND provider = ?"
+		args = append(args, query.Provider)
+	}
+
+	if !query.StartTime.IsZero() {
+		clause += " AND hour >= ?"
+		args = append(args, query.StartTime)
+	}
+
+	if !query.EndTime.IsZero() {
+		clause += " AND hour < ?"
+		args = append(args, query.EndTime)
+	}
+
+	return clause, args
+}
+
+// buildBreakdownFilterClause builds WHERE clause for breakdown queries.
+// Uses a subset of filters (consumer, time range) appropriate for aggregations.
+func (s *CostStore) buildBreakdownFilterClause(query models.CostQuery) (string, []interface{}) {
+	var clause string
+	var args []interface{}
+
+	if query.ConsumerID != "" {
+		clause += " AND consumer_id = ?"
+		args = append(args, query.ConsumerID)
+	}
+
+	if !query.StartTime.IsZero() {
+		clause += " AND hour >= ?"
+		args = append(args, query.StartTime)
+	}
+
+	if !query.EndTime.IsZero() {
+		clause += " AND hour < ?"
+		args = append(args, query.EndTime)
+	}
+
+	return clause, args
+}
+
+// aggregateCostsByColumn aggregates costs grouped by the specified column.
+// Returns a map of column value to total amount.
+func (s *CostStore) aggregateCostsByColumn(ctx context.Context, column string, query models.CostQuery) (map[string]float64, error) {
+	sqlQuery := fmt.Sprintf(`
+		SELECT %s, COALESCE(SUM(amount), 0)
+		FROM costs
+		WHERE 1=1
+	`, column)
+
+	whereClause, args := s.buildBreakdownFilterClause(query)
+	sqlQuery += whereClause
+	sqlQuery += fmt.Sprintf(" GROUP BY %s", column)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]float64)
+	for rows.Next() {
+		var key string
+		var amount float64
+		if err := rows.Scan(&key, &amount); err != nil {
+			return nil, fmt.Errorf("failed to scan %s row: %w", column, err)
+		}
+		result[key] = amount
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating %s rows: %w", column, err)
+	}
+
+	return result, nil
 }
 
 // RecordHourlyForSession records an hourly cost entry for a running session

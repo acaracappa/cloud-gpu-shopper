@@ -1,0 +1,6 @@
+---
+- name: restart vllm
+  community.docker.docker_container:
+    name: "{{ vllm_container_name }}"
+    state: started
+    restart: yes

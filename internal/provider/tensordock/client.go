@@ -48,7 +48,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -240,8 +240,16 @@ func (cb *circuitBreaker) getBackoff() time.Duration {
 		return cb.config.BaseBackoff
 	}
 
+	// Cap consecutiveWaits to prevent integer overflow in bit shift
+	// With max shift of 10, we can shift up to 2^10 = 1024x the base backoff
+	waits := cb.consecutiveWaits
+	const maxShift = 10
+	if waits > maxShift {
+		waits = maxShift
+	}
+
 	// Exponential backoff: base * 2^(waits-1), capped at maxBackoff
-	backoff := cb.config.BaseBackoff * time.Duration(1<<uint(cb.consecutiveWaits-1))
+	backoff := cb.config.BaseBackoff * time.Duration(1<<uint(waits-1))
 	if backoff > cb.config.MaxBackoff {
 		backoff = cb.config.MaxBackoff
 	}
@@ -279,6 +287,9 @@ type Client struct {
 
 	// Debug mode for troubleshooting API issues
 	debugEnabled bool
+
+	// Structured logging
+	logger *slog.Logger
 }
 
 // ClientOption configures the TensorDock client
@@ -356,6 +367,21 @@ func WithCircuitBreaker(config CircuitBreakerConfig) ClientOption {
 	}
 }
 
+// WithLogger sets a custom logger for the client.
+// If not provided, slog.Default() is used.
+//
+// Example:
+//
+//	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+//	client := tensordock.NewClient(key, token, tensordock.WithLogger(logger))
+func WithLogger(logger *slog.Logger) ClientOption {
+	return func(c *Client) {
+		if logger != nil {
+			c.logger = logger
+		}
+	}
+}
+
 // debugLog logs a message if debug mode is enabled.
 // SECURITY: This function redacts sensitive credentials before logging.
 func (c *Client) debugLog(format string, args ...interface{}) {
@@ -363,7 +389,7 @@ func (c *Client) debugLog(format string, args ...interface{}) {
 		// Redact any credentials that might appear in the log message
 		message := fmt.Sprintf(format, args...)
 		message = redactCredentials(message)
-		log.Printf("[TensorDock DEBUG] %s", message)
+		c.logger.Debug(message, slog.String("provider", "tensordock"))
 	}
 }
 
@@ -555,6 +581,7 @@ func NewClient(apiKey, apiToken string, opts ...ClientOption) *Client {
 		timeouts:       DefaultTimeouts(),
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()),
 		minInterval:    time.Second, // Conservative rate limit
+		logger:         slog.Default(),
 	}
 
 	for _, opt := range opts {
@@ -926,7 +953,11 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		return nil, fmt.Errorf("TensorDock returned empty instance ID (body: %s)", string(respBody))
 	}
 
-	log.Printf("[TensorDock] Instance created: ID=%s, Name=%s", result.Data.ID, result.Data.Name)
+	c.logger.Info("instance created",
+		slog.String("provider", "tensordock"),
+		slog.String("instance_id", result.Data.ID),
+		slog.String("name", result.Data.Name),
+	)
 
 	// Note: Create response does NOT include IP address
 	// Caller must poll GetInstanceStatus to get SSH connection details
@@ -998,7 +1029,10 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err er
 		return c.handleError(resp, "DestroyInstance")
 	}
 
-	log.Printf("[TensorDock] Instance destroyed: %s", instanceID)
+	c.logger.Info("instance destroyed",
+		slog.String("provider", "tensordock"),
+		slog.String("instance_id", instanceID),
+	)
 	return nil
 }
 

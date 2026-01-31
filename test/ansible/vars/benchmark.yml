@@ -1,0 +1,76 @@
+---
+# Benchmark suite configuration
+
+# Cost guardrails
+cost_limits:
+  max_cost_per_run: 10.00      # Abort if estimated cost exceeds
+  alert_at_cost: 5.00          # Warn when 50% of budget used
+  max_duration_minutes: 120    # Hard timeout per benchmark
+  alert_at_duration: 90        # Warn at 75% of time limit
+
+# Retry strategy
+retry:
+  max_retries: 3
+  retry_backoff:
+    - 10   # seconds
+    - 30
+    - 60
+  retryable_errors:
+    - ssh_connection_timeout
+    - vllm_startup_timeout
+    - benchmark_request_timeout
+  non_retryable_errors:
+    - gpu_out_of_memory
+    - model_not_found
+    - cost_limit_exceeded
+
+# Benchmark parameters
+throughput:
+  requests: 100
+  warmup_requests: 5
+  prompt_tokens: 128
+  max_tokens: 256
+
+latency:
+  requests: 50
+  max_tokens: 64
+
+concurrency:
+  max_concurrent: 32
+  requests_per_level: 3
+  levels:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 24
+    - 32
+
+# vLLM settings
+vllm:
+  image: "vllm/vllm-openai:latest"
+  port: 8000
+  startup_timeout: 600  # seconds
+  health_check_interval: 10
+  max_startup_retries: 60
+
+# Result storage
+results:
+  local_dir: "/tmp/benchmark-results"
+  fetch_dir: "./results"
+  formats:
+    - json
+    - markdown
+
+# Notification settings (optional)
+notifications:
+  enabled: false
+  # slack_webhook: ""
+  # email: ""
+
+# Cleanup settings
+cleanup:
+  remove_model_cache: false
+  prune_docker_images: true
+  remove_results: true

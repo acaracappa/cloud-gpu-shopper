@@ -217,11 +217,14 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		return
 	}
+	// Capture channel references while holding lock to prevent race with Start()
+	stopCh := m.stopCh
+	doneCh := m.doneCh
 	m.mu.Unlock()
 
 	m.logger.Info("lifecycle manager stopping")
-	close(m.stopCh)
-	<-m.doneCh
+	close(stopCh)
+	<-doneCh
 
 	m.mu.Lock()
 	m.running = false

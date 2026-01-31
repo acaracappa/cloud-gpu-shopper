@@ -1,0 +1,97 @@
+---
+# vLLM deployment and management
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - vllm_model_id is defined
+      - vllm_model_id | length > 0
+    fail_msg: "vllm_model_id must be defined"
+
+- name: Pull vLLM Docker image
+  community.docker.docker_image:
+    name: "{{ vllm_image }}"
+    source: pull
+    force_source: "{{ vllm_force_pull | default(false) }}"
+  register: vllm_image_pull
+  retries: 3
+  delay: 30
+  until: vllm_image_pull is succeeded
+
+- name: Stop existing vLLM container if running
+  community.docker.docker_container:
+    name: "{{ vllm_container_name }}"
+    state: absent
+  when: vllm_force_restart | default(false)
+
+- name: Create vLLM container
+  community.docker.docker_container:
+    name: "{{ vllm_container_name }}"
+    image: "{{ vllm_image }}"
+    state: started
+    restart_policy: unless-stopped
+    runtime: nvidia
+    env:
+      NVIDIA_VISIBLE_DEVICES: all
+      HF_TOKEN: "{{ vllm_hf_token | default(omit) }}"
+    ports:
+      - "{{ vllm_port }}:8000"
+    volumes:
+      - "{{ vllm_cache_dir }}:/root/.cache/huggingface"
+    command: >
+      --model {{ vllm_model_id }}
+      --tensor-parallel-size {{ vllm_tensor_parallel }}
+      --max-model-len {{ vllm_max_model_len }}
+      --gpu-memory-utilization {{ vllm_gpu_memory_utilization }}
+      {% if vllm_dtype is defined %}--dtype {{ vllm_dtype }}{% endif %}
+      {% if vllm_quantization is defined %}--quantization {{ vllm_quantization }}{% endif %}
+      {% if vllm_trust_remote_code %}--trust-remote-code{% endif %}
+    shm_size: "{{ vllm_shm_size }}"
+  register: vllm_container
+
+- name: Wait for vLLM to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ vllm_port }}/health"
+    method: GET
+    status_code: 200
+  register: vllm_health
+  until: vllm_health.status == 200
+  retries: "{{ vllm_startup_retries }}"
+  delay: "{{ vllm_startup_delay }}"
+
+- name: Get vLLM version
+  ansible.builtin.uri:
+    url: "http://localhost:{{ vllm_port }}/version"
+    method: GET
+    return_content: yes
+  register: vllm_version_response
+  ignore_errors: yes
+
+- name: Set vLLM version fact
+  ansible.builtin.set_fact:
+    vllm_version: "{{ vllm_version_response.json.version | default('unknown') }}"
+  when: vllm_version_response is succeeded
+
+- name: Display vLLM status
+  ansible.builtin.debug:
+    msg: |
+      vLLM Container: {{ vllm_container_name }}
+      Model: {{ vllm_model_id }}
+      Port: {{ vllm_port }}
+      Version: {{ vllm_version | default('unknown') }}
+      Status: Ready
+
+- name: Verify model is loaded
+  ansible.builtin.uri:
+    url: "http://localhost:{{ vllm_port }}/v1/models"
+    method: GET
+    return_content: yes
+  register: vllm_models
+  retries: 3
+  delay: 5
+  until: vllm_models.status == 200
+
+- name: Display loaded model
+  ansible.builtin.debug:
+    msg: "Loaded model: {{ vllm_models.json.data[0].id | default('unknown') }}"
+  when: vllm_models.json.data | length > 0

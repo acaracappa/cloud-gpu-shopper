@@ -50,6 +50,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 		migrationCosts,
 		migrationConsumers,
 		migrationIndexes,
+		migrationBenchmarks,
 	}
 
 	for i, migration := range migrations {
@@ -76,6 +77,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 	// Run index migrations that may fail if already exists
 	indexMigrations := []string{
 		migrationDuplicatePrevention,
+		migrationCostDeduplication,
 	}
 
 	for _, migration := range indexMigrations {
@@ -194,4 +196,12 @@ ALTER TABLE sessions DROP COLUMN last_heartbeat;
 
 const migrationDropLastIdleSeconds = `
 ALTER TABLE sessions DROP COLUMN last_idle_seconds;
+`
+
+// migrationCostDeduplication adds a unique index to prevent duplicate cost records
+// for the same session and hour. This prevents duplicate billing when aggregation
+// runs more frequently than once per hour.
+const migrationCostDeduplication = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_costs_session_hour_unique
+ON costs(session_id, hour);
 `

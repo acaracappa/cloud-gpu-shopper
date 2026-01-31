@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -19,6 +20,7 @@ var (
 	provisionIdleTimeout int
 	provisionStorage     string
 	provisionSaveKey     string
+	provisionGPUType     string
 )
 
 var provisionCmd = &cobra.Command{
@@ -32,18 +34,41 @@ func init() {
 	rootCmd.AddCommand(provisionCmd)
 
 	provisionCmd.Flags().StringVarP(&provisionConsumerID, "consumer", "c", "", "Consumer ID (required)")
-	provisionCmd.Flags().StringVarP(&provisionOfferID, "offer", "i", "", "Offer ID to provision (required)")
-	provisionCmd.Flags().StringVarP(&provisionWorkload, "workload", "w", "llm", "Workload type (llm, training, batch)")
+	provisionCmd.Flags().StringVarP(&provisionOfferID, "offer", "i", "", "Offer ID to provision")
+	provisionCmd.Flags().StringVarP(&provisionGPUType, "gpu", "g", "", "GPU type to auto-select cheapest offer (e.g., RTX4090, A100)")
+	provisionCmd.Flags().StringVarP(&provisionWorkload, "workload", "w", "llm", "Workload type (llm, llm_vllm, llm_tgi, training, batch, interactive)")
 	provisionCmd.Flags().IntVarP(&provisionHours, "hours", "t", 2, "Reservation hours (1-12)")
 	provisionCmd.Flags().IntVar(&provisionIdleTimeout, "idle-timeout", 0, "Idle timeout in minutes (0 = disabled)")
 	provisionCmd.Flags().StringVar(&provisionStorage, "storage", "destroy", "Storage policy (destroy, preserve)")
 	provisionCmd.Flags().StringVar(&provisionSaveKey, "save-key", "", "Save SSH private key to file")
 
 	provisionCmd.MarkFlagRequired("consumer")
-	provisionCmd.MarkFlagRequired("offer")
 }
 
 func runProvision(cmd *cobra.Command, args []string) error {
+	// Validate workload type
+	validWorkloads := map[string]bool{
+		"llm": true, "llm_vllm": true, "llm_tgi": true,
+		"training": true, "batch": true, "interactive": true,
+	}
+	if !validWorkloads[provisionWorkload] {
+		return fmt.Errorf("invalid workload type %q, valid types: llm, llm_vllm, llm_tgi, training, batch, interactive", provisionWorkload)
+	}
+
+	// If --gpu provided but not --offer, auto-select cheapest matching offer
+	if provisionOfferID == "" && provisionGPUType != "" {
+		offer, err := selectCheapestOffer(provisionGPUType)
+		if err != nil {
+			return fmt.Errorf("failed to auto-select offer: %w", err)
+		}
+		provisionOfferID = offer.ID
+		fmt.Printf("Auto-selected offer %s (%s, $%.2f/hr)\n", offer.ID, offer.GPUType, offer.PricePerHour)
+	}
+
+	if provisionOfferID == "" {
+		return fmt.Errorf("either --offer or --gpu must be provided")
+	}
+
 	reqBody := map[string]interface{}{
 		"consumer_id":       provisionConsumerID,
 		"offer_id":          provisionOfferID,
@@ -125,26 +150,34 @@ func runProvision(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// SessionResponse is the response from session creation
-type SessionResponse struct {
-	Session       Session `json:"session"`
-	SSHPrivateKey string  `json:"ssh_private_key,omitempty"`
-}
+// selectCheapestOffer queries the inventory API for the cheapest available offer matching the GPU type
+func selectCheapestOffer(gpuType string) (*GPUOffer, error) {
+	params := url.Values{}
+	params.Set("gpu_type", gpuType)
 
-// Session represents a session from the API
-type Session struct {
-	ID            string  `json:"id"`
-	ConsumerID    string  `json:"consumer_id"`
-	Provider      string  `json:"provider"`
-	GPUType       string  `json:"gpu_type"`
-	GPUCount      int     `json:"gpu_count"`
-	Status        string  `json:"status"`
-	Error         string  `json:"error,omitempty"`
-	SSHHost      string `json:"ssh_host,omitempty"`
-	SSHPort      int    `json:"ssh_port,omitempty"`
-	SSHUser      string `json:"ssh_user,omitempty"`
-	WorkloadType string `json:"workload_type"`
-	PricePerHour  float64 `json:"price_per_hour"`
-	CreatedAt     string  `json:"created_at"`
-	ExpiresAt     string  `json:"expires_at"`
+	reqURL := fmt.Sprintf("%s/api/v1/inventory?%s", serverURL, params.Encode())
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("inventory request failed: %s", string(body))
+	}
+
+	var result struct {
+		Offers []GPUOffer `json:"offers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if len(result.Offers) == 0 {
+		return nil, fmt.Errorf("no offers found for GPU type %s", gpuType)
+	}
+
+	// Offers are already sorted by price from API
+	return &result.Offers[0], nil
 }

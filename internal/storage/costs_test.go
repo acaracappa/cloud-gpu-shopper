@@ -374,3 +374,125 @@ func TestCostStore_RecordHourlyForSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, session.PricePerHour, total)
 }
+
+func TestCostStore_Record_Deduplication(t *testing.T) {
+	db := newTestDB(t)
+	sessionStore := NewSessionStore(db)
+	costStore := NewCostStore(db)
+	ctx := context.Background()
+
+	session := createTestSession(t, sessionStore, "sess-dedup")
+	hour := time.Now().Truncate(time.Hour)
+
+	// Record cost for the same session and hour multiple times
+	// This simulates aggregation running more frequently than once per hour
+	for i := 0; i < 5; i++ {
+		record := &models.CostRecord{
+			SessionID:  session.ID,
+			ConsumerID: session.ConsumerID,
+			Provider:   session.Provider,
+			GPUType:    session.GPUType,
+			Hour:       hour,
+			Amount:     0.50,
+			Currency:   "USD",
+		}
+		err := costStore.Record(ctx, record)
+		require.NoError(t, err, "Record should not fail on duplicate")
+	}
+
+	// Verify only one cost record exists (no duplicates)
+	total, err := costStore.GetSessionCost(ctx, session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0.50, total, "Total should be 0.50, not 2.50 (duplicates should be deduplicated)")
+}
+
+func TestCostStore_Record_DeduplicationUpdatesAmount(t *testing.T) {
+	db := newTestDB(t)
+	sessionStore := NewSessionStore(db)
+	costStore := NewCostStore(db)
+	ctx := context.Background()
+
+	session := createTestSession(t, sessionStore, "sess-dedup-update")
+	hour := time.Now().Truncate(time.Hour)
+
+	// Record initial cost
+	record1 := &models.CostRecord{
+		SessionID:  session.ID,
+		ConsumerID: session.ConsumerID,
+		Provider:   session.Provider,
+		GPUType:    session.GPUType,
+		Hour:       hour,
+		Amount:     0.50,
+		Currency:   "USD",
+	}
+	err := costStore.Record(ctx, record1)
+	require.NoError(t, err)
+
+	// Record again with updated amount (e.g., price changed mid-hour)
+	record2 := &models.CostRecord{
+		SessionID:  session.ID,
+		ConsumerID: session.ConsumerID,
+		Provider:   session.Provider,
+		GPUType:    session.GPUType,
+		Hour:       hour,
+		Amount:     0.75, // Updated amount
+		Currency:   "USD",
+	}
+	err = costStore.Record(ctx, record2)
+	require.NoError(t, err)
+
+	// Verify the amount was updated
+	total, err := costStore.GetSessionCost(ctx, session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0.75, total, "Amount should be updated to 0.75")
+}
+
+func TestCostStore_RecordHourlyForSession_Deduplication(t *testing.T) {
+	db := newTestDB(t)
+	sessionStore := NewSessionStore(db)
+	costStore := NewCostStore(db)
+	ctx := context.Background()
+
+	session := createTestSession(t, sessionStore, "sess-hourly-dedup")
+
+	// Simulate multiple aggregation runs within the same hour
+	for i := 0; i < 3; i++ {
+		err := costStore.RecordHourlyForSession(ctx, session)
+		require.NoError(t, err, "RecordHourlyForSession should not fail on duplicate")
+	}
+
+	// Verify only one cost record exists
+	total, err := costStore.GetSessionCost(ctx, session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, session.PricePerHour, total, "Should only have one hour billed, not three")
+}
+
+func TestCostStore_Record_DifferentHoursNotDeduplicated(t *testing.T) {
+	db := newTestDB(t)
+	sessionStore := NewSessionStore(db)
+	costStore := NewCostStore(db)
+	ctx := context.Background()
+
+	session := createTestSession(t, sessionStore, "sess-diff-hours")
+	baseHour := time.Now().Truncate(time.Hour)
+
+	// Record costs for different hours - these should NOT be deduplicated
+	for i := 0; i < 3; i++ {
+		record := &models.CostRecord{
+			SessionID:  session.ID,
+			ConsumerID: session.ConsumerID,
+			Provider:   session.Provider,
+			GPUType:    session.GPUType,
+			Hour:       baseHour.Add(time.Duration(i) * time.Hour),
+			Amount:     0.50,
+			Currency:   "USD",
+		}
+		err := costStore.Record(ctx, record)
+		require.NoError(t, err)
+	}
+
+	// Verify all three cost records exist (different hours)
+	total, err := costStore.GetSessionCost(ctx, session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1.50, total, "All three hours should be billed")
+}

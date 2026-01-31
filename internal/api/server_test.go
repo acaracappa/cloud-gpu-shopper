@@ -108,6 +108,23 @@ func (m *mockSessionStore) GetSessionsByStatus(ctx context.Context, statuses ...
 	return nil, nil
 }
 
+func (m *mockSessionStore) List(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error) {
+	var result []*models.Session
+	for _, session := range m.sessions {
+		if filter.ConsumerID != "" && session.ConsumerID != filter.ConsumerID {
+			continue
+		}
+		if filter.Status != "" && session.Status != filter.Status {
+			continue
+		}
+		result = append(result, session)
+		if filter.Limit > 0 && len(result) >= filter.Limit {
+			break
+		}
+	}
+	return result, nil
+}
+
 type mockCostStore struct {
 	records []*models.CostRecord
 }

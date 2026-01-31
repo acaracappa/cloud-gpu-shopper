@@ -251,8 +251,15 @@ func (r *Reconciler) reconcileProvider(ctx context.Context, providerName string)
 
 	providerMap := make(map[string]provider.ProviderInstance)
 	for _, p := range providerInstances {
-		// Only include instances from our deployment
-		if r.deploymentID != "" && !p.IsOurs(r.deploymentID) {
+		// Only include instances from our deployment.
+		// If deploymentID is empty, we include ALL instances which may lead to
+		// false positive orphan detection for instances from other deployments.
+		// This is intentional for single-deployment environments but operators
+		// should configure a deploymentID in multi-deployment scenarios.
+		if r.deploymentID == "" {
+			r.logger.Warn("deploymentID is empty; all provider instances will be considered ours",
+				slog.String("instance_id", p.ID))
+		} else if !p.IsOurs(r.deploymentID) {
 			continue
 		}
 		providerMap[p.ID] = p

@@ -166,3 +166,10 @@ func (s *Session) IsActive() bool {
 func (s *Session) IsTerminal() bool {
 	return s.Status == StatusStopped || s.Status == StatusFailed
 }
+
+// SessionListFilter defines parameters for listing sessions
+type SessionListFilter struct {
+	ConsumerID string
+	Status     SessionStatus
+	Limit      int
+}

@@ -32,6 +32,9 @@ const (
 
 	// StaleConfidenceMultiplier is applied to offers when inventory is stale
 	StaleConfidenceMultiplier = 0.5
+
+	// DefaultProviderTimeout is the default timeout for provider API calls
+	DefaultProviderTimeout = 30 * time.Second
 )
 
 // Service aggregates GPU offers from multiple providers with caching
@@ -39,10 +42,11 @@ type Service struct {
 	providers []provider.Provider
 	logger    *slog.Logger
 
-	mu         sync.RWMutex
-	cache      map[string]*providerCache
-	cacheTTL   time.Duration
-	backoffTTL time.Duration
+	mu              sync.RWMutex
+	cache           map[string]*providerCache
+	cacheTTL        time.Duration
+	backoffTTL      time.Duration
+	providerTimeout time.Duration
 }
 
 // providerCache holds cached offers for a single provider
@@ -78,14 +82,22 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithProviderTimeout sets a custom timeout for provider API calls
+func WithProviderTimeout(d time.Duration) Option {
+	return func(s *Service) {
+		s.providerTimeout = d
+	}
+}
+
 // New creates a new inventory service
 func New(providers []provider.Provider, opts ...Option) *Service {
 	s := &Service{
-		providers:  providers,
-		logger:     slog.Default(),
-		cache:      make(map[string]*providerCache),
-		cacheTTL:   DefaultCacheTTL,
-		backoffTTL: BackoffCacheTTL,
+		providers:       providers,
+		logger:          slog.Default(),
+		cache:           make(map[string]*providerCache),
+		cacheTTL:        DefaultCacheTTL,
+		backoffTTL:      BackoffCacheTTL,
+		providerTimeout: DefaultProviderTimeout,
 	}
 
 	for _, opt := range opts {
@@ -203,10 +215,13 @@ func (s *Service) getOffersWithCache(ctx context.Context, p provider.Provider, f
 		return cached.offers, nil
 	}
 
-	// Fetch fresh offers
+	// Fetch fresh offers with timeout
 	s.logger.Debug("fetching offers from provider", slog.String("provider", providerName))
 
-	offers, err := p.ListOffers(ctx, models.OfferFilter{}) // Fetch all, filter locally for better caching
+	fetchCtx, cancel := context.WithTimeout(ctx, s.providerTimeout)
+	defer cancel()
+
+	offers, err := p.ListOffers(fetchCtx, models.OfferFilter{}) // Fetch all, filter locally for better caching
 	now := time.Now()
 
 	// Update cache

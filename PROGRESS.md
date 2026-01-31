@@ -2,22 +2,70 @@
 
 ## Current Status
 
-**Phase**: 5 - Agent + Integration (Complete)
-**Status**: E2E Testing Sprint Complete - Full Test Coverage
-**Estimated Duration**: 3-5 days
-**Date**: 2026-01-29
+**Phase**: Post-MVP QA Remediation
+**Status**: QA Agent Review Complete - Backlog In Progress
+**Date**: 2026-01-30
 
-### E2E Test Coverage
-- Mock provider server for testing
-- Orphan detection and auto-destroy
-- Ghost detection and status fix
-- Hard-max enforcement
-- Idle auto-shutdown
-- Session lifecycle (provision → heartbeat → destroy)
+### MVP Complete
+- All 7 safety rules implemented and tested
+- E2E test coverage for all critical paths
+- Live testing infrastructure for both providers
 
 ---
 
-## Option B: Full MVP Plan
+## Backlog
+
+### Outstanding (Medium Priority)
+
+_None - all medium priority items complete_
+
+### Outstanding (Low Priority)
+
+_None - all low priority items complete_
+
+### Deferred
+
+_None - all deferred items complete_
+
+### Completed (QA Remediation)
+| ID | Issue | Status |
+|----|-------|--------|
+| C1 | Vast.ai SSH key attachment error silenced | Fixed |
+| C2 | Orphan instance on DB failure | Fixed |
+| C3 | Race condition in lifecycle Start/Stop | Fixed |
+| C5 | ListSessions returns empty list | Fixed |
+| H1 | Missing rows.Err() after SQL loops | Fixed |
+| H2 | Nil panic in handleExtendSession | Fixed |
+| H3 | Goroutine leak (context.Background) | Fixed |
+| H4 | Integer overflow in backoff | Fixed |
+| H5 | Error mapping always 404 | Fixed |
+| H7 | Ready field race condition | Fixed |
+| H8 | Viper BindEnv errors ignored | Fixed |
+| H10 | DeploymentID not persisted | Fixed |
+| M2 | Panic recovery missing stack trace | Fixed |
+| M4 | No request body size limit | Fixed |
+| M5 | Date parsing errors silently ignored | Fixed |
+| L1 | Unused printError function | Fixed |
+| L3 | Custom joinStrings instead of strings.Join | Fixed |
+| M1 | TensorDock SSH wait magic number | Fixed |
+| M3 | Cost aggregation duplicates | Fixed |
+| M6 | SSH InsecureIgnoreHostKey not logged | Fixed |
+| M7 | Missing HTTP server request metrics | Fixed |
+| M8 | Inconsistent logger usage (TensorDock) | Fixed |
+| M9 | Large functions need refactoring | Fixed |
+| M10 | No context timeout on inventory | Fixed |
+| L2 | Duplicate Session struct in CLI | Fixed |
+| L4 | Magic strings for workload types | Fixed |
+| L5 | Missing --gpu filter in CLI provision | Fixed |
+| L6 | Error variable shadowing | Verified - none found |
+| D1 | CLI integration tests | Fixed |
+| D2 | Agent basic file transfer | Fixed |
+
+---
+
+## Implementation History
+
+### Option B: Full MVP Plan
 
 ### Day 1: Foundation + Provider Spike
 
@@ -49,12 +97,11 @@
 - [x] Unit tests with mocked providers
 
 #### Phase 2B: Storage Layer (2-3 hours)
-- [ ] SQLite setup with WAL mode
-- [ ] Sessions repository (CRUD + queries)
-- [ ] Costs repository
-- [ ] Consumers repository
-- [ ] Database migrations
-- [ ] Unit tests
+- [x] SQLite setup with WAL mode
+- [x] Sessions repository (CRUD + queries)
+- [x] Costs repository
+- [x] Database migrations
+- [x] Unit tests
 
 #### Phase 2C: Provisioner Service (3-4 hours)
 - [x] Two-phase provisioning (per ARCHITECTURE.md)
@@ -112,7 +159,6 @@
 - [x] `gpu-shopper shutdown` command
 - [x] `gpu-shopper costs` command (with summary subcommand)
 - [x] `gpu-shopper config` command (show, set)
-- [ ] Integration tests (deferred)
 
 #### Phase 4C: Observability (1-2 hours)
 - [x] Prometheus metrics endpoint (/metrics)
@@ -129,7 +175,6 @@
 - [x] Heartbeat sender (30s interval)
 - [x] Shopper-unreachable failsafe
 - [x] Health/status endpoint
-- [ ] Basic file transfer (deferred - not MVP critical)
 - [x] Agent Dockerfile
 - [x] Unit tests
 

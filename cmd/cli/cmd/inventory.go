@@ -114,17 +114,3 @@ func runInventory(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nTotal: %d offers\n", result.Count)
 	return nil
 }
-
-// GPUOffer represents a GPU offer from the API
-type GPUOffer struct {
-	ID           string  `json:"id"`
-	Provider     string  `json:"provider"`
-	ProviderID   string  `json:"provider_id"`
-	GPUType      string  `json:"gpu_type"`
-	GPUCount     int     `json:"gpu_count"`
-	VRAM         int     `json:"vram_gb"`
-	PricePerHour float64 `json:"price_per_hour"`
-	Location     string  `json:"location"`
-	Reliability  float64 `json:"reliability"`
-	Available    bool    `json:"available"`
-}

@@ -1,0 +1,82 @@
+---
+# Cleanup benchmark environment
+# Removes vLLM container and cached model data
+#
+# Usage:
+#   ansible-playbook playbooks/cleanup.yml -i inventory/dynamic.py
+#   ansible-playbook playbooks/cleanup.yml -i inventory/dynamic.py -e remove_cache=true
+
+- name: Cleanup benchmark environment
+  hosts: benchmark_nodes
+  become: yes
+  gather_facts: no
+
+  vars:
+    vllm_container_name: "{{ container_name | default('vllm-benchmark') }}"
+    remove_model_cache: "{{ remove_cache | default(false) }}"
+    cache_dir: "{{ model_cache_dir | default('/root/.cache/huggingface') }}"
+
+  tasks:
+    - name: Stop and remove vLLM container
+      community.docker.docker_container:
+        name: "{{ vllm_container_name }}"
+        state: absent
+      register: container_removed
+      ignore_errors: yes
+
+    - name: Display container removal status
+      ansible.builtin.debug:
+        msg: "Container '{{ vllm_container_name }}' {{ 'removed' if container_removed is changed else 'was not running' }}"
+
+    - name: Remove any other benchmark containers
+      ansible.builtin.shell: |
+        docker ps -a --filter "name=vllm" --format "{{ '{{' }}.Names{{ '}}' }}" | xargs -r docker rm -f
+      register: other_containers
+      changed_when: other_containers.stdout | length > 0
+      ignore_errors: yes
+
+    - name: Remove benchmark results directory
+      ansible.builtin.file:
+        path: /tmp/benchmark-results
+        state: absent
+
+    - name: Get cache directory size before removal
+      ansible.builtin.command: du -sh {{ cache_dir }}
+      register: cache_size
+      changed_when: false
+      ignore_errors: yes
+      when: remove_model_cache
+
+    - name: Display cache size
+      ansible.builtin.debug:
+        msg: "Model cache size: {{ cache_size.stdout | default('unknown') }}"
+      when: remove_model_cache and cache_size.rc == 0
+
+    - name: Remove model cache
+      ansible.builtin.file:
+        path: "{{ cache_dir }}"
+        state: absent
+      when: remove_model_cache
+
+    - name: Prune unused Docker images
+      ansible.builtin.command: docker image prune -f
+      register: image_prune
+      changed_when: "'Total reclaimed space' in image_prune.stdout"
+      ignore_errors: yes
+
+    - name: Display prune result
+      ansible.builtin.debug:
+        msg: "{{ image_prune.stdout_lines[-1] | default('No images pruned') }}"
+      when: image_prune.rc == 0
+
+    - name: Display cleanup summary
+      ansible.builtin.debug:
+        msg: |
+          Cleanup Complete!
+          - Container removed: {{ vllm_container_name }}
+          - Results removed: /tmp/benchmark-results
+          {% if remove_model_cache %}
+          - Model cache removed: {{ cache_dir }}
+          {% else %}
+          - Model cache: PRESERVED (use -e remove_cache=true to remove)
+          {% endif %}

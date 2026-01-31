@@ -1,0 +1,5 @@
+---
+# Default variables for docker role
+docker_add_user_to_group: true
+docker_log_max_size: "10m"
+docker_log_max_file: "3"

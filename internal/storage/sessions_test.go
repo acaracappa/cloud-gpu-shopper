@@ -172,29 +172,29 @@ func TestSessionStore_List(t *testing.T) {
 	}
 
 	// Test filter by consumer
-	results, err := store.List(ctx, SessionFilter{ConsumerID: "consumer-001"})
+	results, err := store.ListInternal(ctx, SessionFilter{ConsumerID: "consumer-001"})
 	require.NoError(t, err)
 	assert.Len(t, results, 2)
 
 	// Test filter by provider
-	results, err = store.List(ctx, SessionFilter{Provider: "tensordock"})
+	results, err = store.ListInternal(ctx, SessionFilter{Provider: "tensordock"})
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
 	assert.Equal(t, "sess-list-2", results[0].ID)
 
 	// Test filter by status
-	results, err = store.List(ctx, SessionFilter{Status: models.StatusRunning})
+	results, err = store.ListInternal(ctx, SessionFilter{Status: models.StatusRunning})
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
 	assert.Equal(t, "sess-list-1", results[0].ID)
 
 	// Test filter by multiple statuses
-	results, err = store.List(ctx, SessionFilter{Statuses: []models.SessionStatus{models.StatusRunning, models.StatusPending}})
+	results, err = store.ListInternal(ctx, SessionFilter{Statuses: []models.SessionStatus{models.StatusRunning, models.StatusPending}})
 	require.NoError(t, err)
 	assert.Len(t, results, 2)
 
 	// Test limit
-	results, err = store.List(ctx, SessionFilter{Limit: 1})
+	results, err = store.ListInternal(ctx, SessionFilter{Limit: 1})
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
 }

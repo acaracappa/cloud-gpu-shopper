@@ -7,6 +7,28 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// HTTP request metrics for API server
+var (
+	// HTTPRequestDuration tracks the duration of HTTP requests
+	HTTPRequestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "Duration of HTTP requests by method, path, and status",
+			Buckets: prometheus.DefBuckets, // Default: .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	// HTTPRequestsTotal counts the total number of HTTP requests
+	HTTPRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests by method, path, and status",
+		},
+		[]string{"method", "path", "status"},
+	)
+)
+
 // Critical safety metrics for GPU session management
 var (
 	// SessionsActive tracks the number of active sessions by provider and status
@@ -277,4 +299,10 @@ func RecordProviderAPICall(provider, operation, status string) {
 // state should be 0 (closed), 1 (open), or 2 (half-open)
 func UpdateProviderCircuitBreakerState(provider string, state int) {
 	ProviderCircuitBreakerState.WithLabelValues(provider).Set(float64(state))
+}
+
+// RecordHTTPRequest records the duration and increments the counter for an HTTP request
+func RecordHTTPRequest(method, path, status string, duration time.Duration) {
+	HTTPRequestDuration.WithLabelValues(method, path, status).Observe(duration.Seconds())
+	HTTPRequestsTotal.WithLabelValues(method, path, status).Inc()
 }

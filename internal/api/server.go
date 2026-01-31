@@ -5,19 +5,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
-
-	// Register metrics
-	_ "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 )
 
 // Server is the HTTP API server
@@ -36,8 +37,8 @@ type Server struct {
 	host string
 	port int
 
-	// Readiness state
-	ready bool
+	// Readiness state (atomic for thread-safe access)
+	ready atomic.Bool
 }
 
 // Option configures the server
@@ -92,13 +93,13 @@ func New(
 
 // SetReady sets the server readiness state
 func (s *Server) SetReady(ready bool) {
-	s.ready = ready
+	s.ready.Store(ready)
 	s.logger.Info("server readiness changed", slog.Bool("ready", ready))
 }
 
 // IsReady returns whether the server is ready to accept traffic
 func (s *Server) IsReady() bool {
-	return s.ready
+	return s.ready.Load()
 }
 
 // setupRouter configures the Gin router
@@ -108,6 +109,8 @@ func (s *Server) setupRouter() {
 
 	// Add middleware
 	router.Use(s.requestIDMiddleware())
+	router.Use(s.metricsMiddleware())
+	router.Use(s.bodySizeLimitMiddleware(1 << 20)) // 1MB limit
 	router.Use(s.loggingMiddleware())
 	router.Use(s.recoveryMiddleware())
 
@@ -182,6 +185,28 @@ func (s *Server) requestIDMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) metricsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+
+		c.Next()
+
+		// Use the matched route pattern for consistent path labels
+		// This prevents high cardinality from path parameters like /sessions/:id
+		path := c.FullPath()
+		if path == "" {
+			// Fallback for unmatched routes (404s)
+			path = "unmatched"
+		}
+
+		duration := time.Since(start)
+		status := strconv.Itoa(c.Writer.Status())
+		method := c.Request.Method
+
+		metrics.RecordHTTPRequest(method, path, status, duration)
+	}
+}
+
 func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -206,8 +231,10 @@ func (s *Server) recoveryMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
+				stack := string(debug.Stack())
 				s.logger.Error("panic recovered",
 					slog.Any("error", err),
+					slog.String("stack", stack),
 					slog.String("request_id", c.GetString("request_id")))
 
 				c.JSON(http.StatusInternalServerError, ErrorResponse{
@@ -217,6 +244,13 @@ func (s *Server) recoveryMiddleware() gin.HandlerFunc {
 				c.Abort()
 			}
 		}()
+		c.Next()
+	}
+}
+
+func (s *Server) bodySizeLimitMiddleware(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
 		c.Next()
 	}
 }
