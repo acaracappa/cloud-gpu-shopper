@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,16 +18,27 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
+	sshverify "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/ssh"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/storage"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
-const (
-	// DefaultHeartbeatTimeout is how long to wait for agent heartbeat
-	DefaultHeartbeatTimeout = 5 * time.Minute
+// Compile-time check that sshverify.Verifier satisfies SSHVerifier interface
+var _ SSHVerifier = (*sshverify.Verifier)(nil)
 
-	// DefaultHeartbeatCheckInterval is how often to check for heartbeat
-	DefaultHeartbeatCheckInterval = 10 * time.Second
+const (
+	// DefaultSSHVerifyTimeout is how long to wait for SSH verification
+	// Increased to 8 minutes to accommodate TensorDock cloud-init delays
+	DefaultSSHVerifyTimeout = 8 * time.Minute
+
+	// DefaultSSHCheckInterval is how often to retry SSH connection
+	DefaultSSHCheckInterval = 15 * time.Second
+
+	// DefaultAPIVerifyTimeout is how long to wait for API verification (entrypoint mode)
+	DefaultAPIVerifyTimeout = 10 * time.Minute
+
+	// DefaultAPICheckInterval is how often to retry API health check
+	DefaultAPICheckInterval = 15 * time.Second
 
 	// DefaultDestroyTimeout is the max time to wait for destroy verification
 	DefaultDestroyTimeout = 5 * time.Minute
@@ -37,12 +48,6 @@ const (
 
 	// DefaultSSHKeyBits is the RSA key size
 	DefaultSSHKeyBits = 4096
-
-	// DefaultAgentPort is the default port for the agent endpoint
-	DefaultAgentPort = 8081
-
-	// DefaultAgentBinaryURL is the URL to download the agent binary from GitHub releases
-	DefaultAgentBinaryURL = "https://github.com/acaracappa/cloud-gpu-shopper/releases/latest/download/gpu-shopper-agent-linux-amd64"
 )
 
 // SessionStore defines the interface for session persistence
@@ -50,8 +55,6 @@ type SessionStore interface {
 	Create(ctx context.Context, session *models.Session) error
 	Get(ctx context.Context, id string) (*models.Session, error)
 	Update(ctx context.Context, session *models.Session) error
-	UpdateHeartbeat(ctx context.Context, id string, t time.Time) error
-	UpdateHeartbeatWithIdle(ctx context.Context, id string, t time.Time, idleSeconds int) error
 	GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error)
 }
 
@@ -60,26 +63,39 @@ type ProviderRegistry interface {
 	Get(name string) (provider.Provider, error)
 }
 
+// SSHVerifier defines the interface for SSH verification
+type SSHVerifier interface {
+	// VerifyOnce attempts a single SSH connection verification (no retries)
+	VerifyOnce(ctx context.Context, host string, port int, user, privateKey string) error
+}
+
+// HTTPVerifier defines the interface for HTTP endpoint verification
+type HTTPVerifier interface {
+	// CheckHealth checks if an HTTP endpoint is responding
+	CheckHealth(ctx context.Context, url string) error
+}
+
 // Service handles GPU session provisioning and destruction
 type Service struct {
 	store        SessionStore
 	providers    ProviderRegistry
 	logger       *slog.Logger
 	deploymentID string
-	agentImage   string
-	agentPort    int
-	shopperURL   string // Public URL for agents to reach this server
-	agentBinURL  string // URL to download agent binary (for non-Docker providers)
+
+	// SSH verification
+	sshVerifier      SSHVerifier
+	sshVerifyTimeout time.Duration
+	sshCheckInterval time.Duration
+
+	// API verification (for entrypoint mode)
+	httpVerifier     HTTPVerifier
+	apiVerifyTimeout time.Duration
+	apiCheckInterval time.Duration
 
 	// Configuration
-	heartbeatTimeout       time.Duration
-	heartbeatCheckInterval time.Duration
-	destroyTimeout         time.Duration
-	destroyRetries         int
-	sshKeyBits             int
-
-	// Active sessions waiting for heartbeat
-	heartbeatWaiters sync.Map // sessionID -> chan struct{}
+	destroyTimeout time.Duration
+	destroyRetries int
+	sshKeyBits     int
 }
 
 // Option configures the provisioner service
@@ -99,38 +115,17 @@ func WithDeploymentID(id string) Option {
 	}
 }
 
-// WithAgentImage sets the Docker image for the node agent
-func WithAgentImage(image string) Option {
+// WithSSHVerifyTimeout sets how long to wait for SSH verification
+func WithSSHVerifyTimeout(d time.Duration) Option {
 	return func(s *Service) {
-		s.agentImage = image
+		s.sshVerifyTimeout = d
 	}
 }
 
-// WithAgentPort sets the port for the agent endpoint
-func WithAgentPort(port int) Option {
+// WithSSHCheckInterval sets how often to retry SSH connection
+func WithSSHCheckInterval(d time.Duration) Option {
 	return func(s *Service) {
-		s.agentPort = port
-	}
-}
-
-// WithShopperURL sets the public URL for agents to reach the shopper server
-func WithShopperURL(url string) Option {
-	return func(s *Service) {
-		s.shopperURL = url
-	}
-}
-
-// WithAgentBinaryURL sets the URL to download agent binary from
-func WithAgentBinaryURL(url string) Option {
-	return func(s *Service) {
-		s.agentBinURL = url
-	}
-}
-
-// WithHeartbeatTimeout sets how long to wait for agent heartbeat
-func WithHeartbeatTimeout(d time.Duration) Option {
-	return func(s *Service) {
-		s.heartbeatTimeout = d
+		s.sshCheckInterval = d
 	}
 }
 
@@ -141,25 +136,65 @@ func WithDestroyRetries(n int) Option {
 	}
 }
 
+// WithSSHVerifier sets a custom SSH verifier (useful for testing)
+func WithSSHVerifier(v SSHVerifier) Option {
+	return func(s *Service) {
+		s.sshVerifier = v
+	}
+}
+
+// WithHTTPVerifier sets a custom HTTP verifier (useful for testing)
+func WithHTTPVerifier(v HTTPVerifier) Option {
+	return func(s *Service) {
+		s.httpVerifier = v
+	}
+}
+
+// WithAPIVerifyTimeout sets how long to wait for API verification
+func WithAPIVerifyTimeout(d time.Duration) Option {
+	return func(s *Service) {
+		s.apiVerifyTimeout = d
+	}
+}
+
+// WithAPICheckInterval sets how often to retry API health check
+func WithAPICheckInterval(d time.Duration) Option {
+	return func(s *Service) {
+		s.apiCheckInterval = d
+	}
+}
+
 // New creates a new provisioner service
 func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Service {
 	s := &Service{
-		store:                  store,
-		providers:              providers,
-		logger:                 slog.Default(),
-		deploymentID:           uuid.New().String(),
-		agentImage:             "nvidia/cuda:12.1.0-runtime-ubuntu22.04",
-		agentPort:              DefaultAgentPort,
-		agentBinURL:            DefaultAgentBinaryURL,
-		heartbeatTimeout:       DefaultHeartbeatTimeout,
-		heartbeatCheckInterval: DefaultHeartbeatCheckInterval,
-		destroyTimeout:         DefaultDestroyTimeout,
-		destroyRetries:         DefaultDestroyRetries,
-		sshKeyBits:             DefaultSSHKeyBits,
+		store:            store,
+		providers:        providers,
+		logger:           slog.Default(),
+		deploymentID:     uuid.New().String(),
+		sshVerifyTimeout: DefaultSSHVerifyTimeout,
+		sshCheckInterval: DefaultSSHCheckInterval,
+		apiVerifyTimeout: DefaultAPIVerifyTimeout,
+		apiCheckInterval: DefaultAPICheckInterval,
+		destroyTimeout:   DefaultDestroyTimeout,
+		destroyRetries:   DefaultDestroyRetries,
+		sshKeyBits:       DefaultSSHKeyBits,
 	}
 
 	for _, opt := range opts {
 		opt(s)
+	}
+
+	// Create default SSH verifier if not provided
+	if s.sshVerifier == nil {
+		s.sshVerifier = sshverify.NewVerifier(
+			sshverify.WithVerifyTimeout(s.sshVerifyTimeout),
+			sshverify.WithCheckInterval(s.sshCheckInterval),
+		)
+	}
+
+	// Create default HTTP verifier if not provided
+	if s.httpVerifier == nil {
+		s.httpVerifier = NewDefaultHTTPVerifier()
 	}
 
 	return s
@@ -193,9 +228,6 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		return nil, fmt.Errorf("failed to generate SSH key: %w", err)
 	}
 
-	// Generate agent token
-	agentToken := uuid.New().String()
-
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(req.ReservationHrs) * time.Hour)
 
@@ -216,7 +248,6 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		Status:         models.StatusPending,
 		SSHPublicKey:   publicKey,
 		SSHPrivateKey:  privateKey,
-		AgentToken:     agentToken,
 		WorkloadType:   req.WorkloadType,
 		ReservationHrs: req.ReservationHrs,
 		IdleThreshold:  req.IdleThreshold,
@@ -248,13 +279,22 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		ShopperConsumerID:   req.ConsumerID,
 	}
 
+	// Build the provider request based on launch mode
 	instanceReq := provider.CreateInstanceRequest{
-		OfferID:      offer.ID,
+		OfferID:      offer.ID, // Full offer ID (e.g., tensordock-{uuid}-{gpu} for TensorDock)
 		SessionID:    session.ID,
 		SSHPublicKey: publicKey,
-		DockerImage:  s.agentImage,
-		EnvVars:      s.buildAgentEnv(session, tags),
 		Tags:         tags,
+	}
+
+	// Configure for entrypoint mode if specified
+	if req.LaunchMode == models.LaunchModeEntrypoint {
+		instanceReq.LaunchMode = provider.LaunchModeEntrypoint
+		instanceReq.DockerImage = req.DockerImage
+		instanceReq.ExposedPorts = req.ExposedPorts
+
+		// Build workload config from request
+		instanceReq.WorkloadConfig = s.buildWorkloadConfig(req)
 	}
 
 	session.Status = models.StatusProvisioning
@@ -321,68 +361,50 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	metrics.RecordSessionCreated(session.Provider)
 	metrics.UpdateSessionStatus(session.Provider, "", string(models.StatusProvisioning))
 
-	// PHASE 4: Wait for agent heartbeat (async - don't block API)
+	// PHASE 4: Wait for verification (async - don't block API)
 	// The caller can poll session status to check when it's running
-	go s.waitForHeartbeatAsync(context.Background(), session.ID, prov)
+	if req.LaunchMode == models.LaunchModeEntrypoint {
+		// Entrypoint mode: wait for API endpoint to be ready
+		go s.waitForAPIVerifyAsync(context.Background(), session.ID, prov)
+	} else {
+		// SSH mode: wait for SSH connectivity
+		go s.waitForSSHVerifyAsync(context.Background(), session.ID, prov)
+	}
 
 	return session, nil
 }
 
-// waitForHeartbeatAsync waits for agent heartbeat in the background
-func (s *Service) waitForHeartbeatAsync(ctx context.Context, sessionID string, prov provider.Provider) {
+// waitForSSHVerifyAsync waits for SSH verification in the background
+func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, prov provider.Provider) {
 	logger := s.logger.With(slog.String("session_id", sessionID))
-	logger.Info("waiting for agent heartbeat")
+	logger.Info("waiting for SSH verification")
 
-	// Create done channel for this session
-	done := make(chan struct{})
-	s.heartbeatWaiters.Store(sessionID, done)
-	defer s.heartbeatWaiters.Delete(sessionID)
+	start := time.Now()
 
-	timeout := time.NewTimer(s.heartbeatTimeout)
-	defer timeout.Stop()
+	// TensorDock-specific: wait for cloud-init to complete before polling
+	// TensorDock VMs need extra time for cloud-init runcmd to execute
+	session, err := s.store.Get(ctx, sessionID)
+	if err == nil && session.Provider == "tensordock" {
+		logger.Info("TensorDock: waiting 45s for cloud-init before SSH polling")
+		select {
+		case <-time.After(45 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+	}
 
-	ticker := time.NewTicker(s.heartbeatCheckInterval)
+	// Poll for SSH info and verify connectivity
+	ticker := time.NewTicker(s.sshCheckInterval)
 	defer ticker.Stop()
+
+	timeout := time.NewTimer(s.sshVerifyTimeout)
+	defer timeout.Stop()
 
 	for {
 		select {
-		case <-done:
-			// Heartbeat received
-			logger.Info("agent heartbeat received")
-			session, err := s.store.Get(ctx, sessionID)
-			if err != nil {
-				logger.Error("failed to get session", slog.String("error", err.Error()))
-				return
-			}
-
-			// Fetch SSH info if we don't have it yet
-			if session.SSHHost == "" && session.ProviderID != "" {
-				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
-				if err != nil {
-					logger.Warn("failed to get SSH info on heartbeat", slog.String("error", err.Error()))
-				} else if status.SSHHost != "" {
-					session.SSHHost = status.SSHHost
-					if status.SSHPort != 0 {
-						session.SSHPort = status.SSHPort
-					}
-					if status.SSHUser != "" {
-						session.SSHUser = status.SSHUser
-					}
-					logger.Info("SSH info updated on heartbeat",
-						slog.String("ssh_host", session.SSHHost),
-						slog.Int("ssh_port", session.SSHPort))
-				}
-			}
-
-			session.Status = models.StatusRunning
-			if err := s.store.Update(ctx, session); err != nil {
-				logger.Error("failed to update session to running", slog.String("error", err.Error()))
-			}
-			return
-
 		case <-timeout.C:
-			// Heartbeat timeout - destroy instance and fail session
-			logger.Error("agent heartbeat timeout, destroying instance")
+			// SSH verification timeout - destroy instance and fail session
+			logger.Error("SSH verification timeout, destroying instance")
 			session, err := s.store.Get(ctx, sessionID)
 			if err != nil {
 				logger.Error("failed to get session", slog.String("error", err.Error()))
@@ -391,12 +413,13 @@ func (s *Service) waitForHeartbeatAsync(ctx context.Context, sessionID string, p
 
 			if session.ProviderID != "" {
 				if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
-					logger.Error("failed to destroy instance after heartbeat timeout",
+					logger.Error("failed to destroy instance after SSH timeout",
 						slog.String("error", err.Error()))
 				}
 			}
 
-			s.failSession(ctx, session, "agent failed to start: heartbeat timeout")
+			s.failSession(ctx, session, "SSH verification timeout")
+			metrics.RecordSSHVerifyFailure()
 			return
 
 		case <-ticker.C:
@@ -407,12 +430,20 @@ func (s *Service) waitForHeartbeatAsync(ctx context.Context, sessionID string, p
 				continue
 			}
 
+			// Check if session is still in a valid state
+			if session.IsTerminal() {
+				logger.Info("session is terminal, stopping SSH verification")
+				return
+			}
+
 			// Poll provider for SSH info if we don't have it yet
 			if session.SSHHost == "" && session.ProviderID != "" {
 				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
 				if err != nil {
 					logger.Debug("failed to get instance status", slog.String("error", err.Error()))
-				} else if status.SSHHost != "" {
+					continue
+				}
+				if status.SSHHost != "" {
 					session.SSHHost = status.SSHHost
 					if status.SSHPort != 0 {
 						session.SSHPort = status.SSHPort
@@ -430,35 +461,37 @@ func (s *Service) waitForHeartbeatAsync(ctx context.Context, sessionID string, p
 				}
 			}
 
-			// Check if session received heartbeat
-			if !session.LastHeartbeat.IsZero() {
-				close(done)
+			// Try SSH verification if we have connection info
+			if session.SSHHost != "" && session.SSHPort > 0 {
+				logger.Debug("attempting SSH verification",
+					slog.String("host", session.SSHHost),
+					slog.Int("port", session.SSHPort))
+
+				// Try a single connection attempt
+				err := s.sshVerifier.VerifyOnce(ctx, session.SSHHost, session.SSHPort, session.SSHUser, session.SSHPrivateKey)
+				if err == nil {
+					// SSH verified successfully
+					duration := time.Since(start)
+					logger.Info("SSH verification successful",
+						slog.Duration("duration", duration))
+
+					session.Status = models.StatusRunning
+					if err := s.store.Update(ctx, session); err != nil {
+						logger.Error("failed to update session to running", slog.String("error", err.Error()))
+					}
+
+					metrics.RecordSSHVerifyDuration(session.Provider, duration)
+					return
+				}
+
+				logger.Debug("SSH verification attempt failed", slog.String("error", err.Error()))
 			}
 
 		case <-ctx.Done():
-			logger.Warn("context cancelled while waiting for heartbeat")
+			logger.Warn("context cancelled while waiting for SSH verification")
 			return
 		}
 	}
-}
-
-// RecordHeartbeat records a heartbeat from an agent with idle tracking
-func (s *Service) RecordHeartbeat(ctx context.Context, sessionID string, idleSeconds int) error {
-	if err := s.store.UpdateHeartbeatWithIdle(ctx, sessionID, time.Now(), idleSeconds); err != nil {
-		return fmt.Errorf("failed to update heartbeat: %w", err)
-	}
-
-	// Signal waiter if exists
-	if done, ok := s.heartbeatWaiters.Load(sessionID); ok {
-		select {
-		case <-done.(chan struct{}):
-			// Already closed
-		default:
-			close(done.(chan struct{}))
-		}
-	}
-
-	return nil
 }
 
 // DestroySession destroys a session with verification
@@ -516,7 +549,6 @@ func (s *Service) DestroySession(ctx context.Context, sessionID string) error {
 
 	metrics.RecordSessionDestroyed(session.Provider, "user_requested")
 	metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusStopped))
-	metrics.RemoveHeartbeatAge(session.ID)
 
 	return nil
 }
@@ -600,24 +632,6 @@ func (s *Service) failSession(ctx context.Context, session *models.Session, reas
 	}
 }
 
-// buildAgentEnv creates environment variables for the node agent
-func (s *Service) buildAgentEnv(session *models.Session, tags models.InstanceTags) map[string]string {
-	env := map[string]string{
-		"SHOPPER_URL":           s.shopperURL,
-		"SHOPPER_SESSION_ID":    session.ID,
-		"SHOPPER_DEPLOYMENT_ID": s.deploymentID,
-		"SHOPPER_EXPIRES_AT":    tags.ShopperExpiresAt.Format(time.RFC3339),
-		"SHOPPER_CONSUMER_ID":   session.ConsumerID,
-		"SHOPPER_AGENT_TOKEN":   session.AgentToken,
-		"SHOPPER_AGENT_PORT":    fmt.Sprintf("%d", s.agentPort),
-	}
-	// Include agent binary URL if configured (for non-Docker providers)
-	if s.agentBinURL != "" {
-		env["SHOPPER_AGENT_URL"] = s.agentBinURL
-	}
-	return env
-}
-
 // generateSSHKeyPair generates an RSA SSH key pair
 func (s *Service) generateSSHKeyPair() (privateKeyPEM, publicKeyOpenSSH string, err error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, s.sshKeyBits)
@@ -646,4 +660,173 @@ func (s *Service) generateSSHKeyPair() (privateKeyPEM, publicKeyOpenSSH string, 
 // GetDeploymentID returns the deployment identifier
 func (s *Service) GetDeploymentID() string {
 	return s.deploymentID
+}
+
+// buildWorkloadConfig builds a provider WorkloadConfig from session request
+func (s *Service) buildWorkloadConfig(req models.CreateSessionRequest) *provider.WorkloadConfig {
+	config := &provider.WorkloadConfig{
+		ModelID:      req.ModelID,
+		Quantization: req.Quantization,
+	}
+
+	// Determine workload type from session workload type
+	switch req.WorkloadType {
+	case models.WorkloadLLMVLLM:
+		config.Type = provider.WorkloadTypeVLLM
+	case models.WorkloadLLMTGI:
+		config.Type = provider.WorkloadTypeTGI
+	default:
+		config.Type = provider.WorkloadTypeCustom
+	}
+
+	return config
+}
+
+// waitForAPIVerifyAsync waits for API endpoint verification in the background
+func (s *Service) waitForAPIVerifyAsync(ctx context.Context, sessionID string, prov provider.Provider) {
+	logger := s.logger.With(slog.String("session_id", sessionID))
+	logger.Info("waiting for API verification")
+
+	start := time.Now()
+
+	// Poll for API info and verify connectivity
+	ticker := time.NewTicker(s.apiCheckInterval)
+	defer ticker.Stop()
+
+	timeout := time.NewTimer(s.apiVerifyTimeout)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-timeout.C:
+			// API verification timeout - destroy instance and fail session
+			logger.Error("API verification timeout, destroying instance")
+			session, err := s.store.Get(ctx, sessionID)
+			if err != nil {
+				logger.Error("failed to get session", slog.String("error", err.Error()))
+				return
+			}
+
+			if session.ProviderID != "" {
+				if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+					logger.Error("failed to destroy instance after API timeout",
+						slog.String("error", err.Error()))
+				}
+			}
+
+			s.failSession(ctx, session, "API verification timeout")
+			metrics.RecordAPIVerifyFailure()
+			return
+
+		case <-ticker.C:
+			// Get current session state
+			session, err := s.store.Get(ctx, sessionID)
+			if err != nil {
+				logger.Error("failed to get session", slog.String("error", err.Error()))
+				continue
+			}
+
+			// Check if session is still in a valid state
+			if session.IsTerminal() {
+				logger.Info("session is terminal, stopping API verification")
+				return
+			}
+
+			// Poll provider for connection info if we don't have it yet
+			if session.SSHHost == "" && session.ProviderID != "" {
+				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
+				if err != nil {
+					logger.Debug("failed to get instance status", slog.String("error", err.Error()))
+					continue
+				}
+				if status.SSHHost != "" {
+					session.SSHHost = status.SSHHost
+					if status.SSHPort != 0 {
+						session.SSHPort = status.SSHPort
+					}
+					if status.SSHUser != "" {
+						session.SSHUser = status.SSHUser
+					}
+					if err := s.store.Update(ctx, session); err != nil {
+						logger.Error("failed to update connection info", slog.String("error", err.Error()))
+					} else {
+						logger.Info("connection info updated",
+							slog.String("host", session.SSHHost))
+					}
+				}
+			}
+
+			// Try API verification if we have host info
+			if session.SSHHost != "" && session.APIPort > 0 {
+				apiURL := fmt.Sprintf("http://%s:%d/health", session.SSHHost, session.APIPort)
+				logger.Debug("attempting API verification",
+					slog.String("url", apiURL))
+
+				// Try a health check
+				err := s.httpVerifier.CheckHealth(ctx, apiURL)
+				if err == nil {
+					// API verified successfully
+					duration := time.Since(start)
+					logger.Info("API verification successful",
+						slog.Duration("duration", duration))
+
+					session.Status = models.StatusRunning
+					session.APIEndpoint = fmt.Sprintf("http://%s:%d", session.SSHHost, session.APIPort)
+					if err := s.store.Update(ctx, session); err != nil {
+						logger.Error("failed to update session to running", slog.String("error", err.Error()))
+					}
+
+					metrics.RecordAPIVerifyDuration(session.Provider, duration)
+					return
+				}
+
+				logger.Debug("API verification attempt failed", slog.String("error", err.Error()))
+			}
+
+		case <-ctx.Done():
+			logger.Warn("context cancelled while waiting for API verification")
+			return
+		}
+	}
+}
+
+// DefaultHTTPVerifier implements HTTPVerifier with standard HTTP client
+type DefaultHTTPVerifier struct {
+	client  *http.Client
+	timeout time.Duration
+}
+
+// NewDefaultHTTPVerifier creates a new default HTTP verifier
+func NewDefaultHTTPVerifier() *DefaultHTTPVerifier {
+	return &DefaultHTTPVerifier{
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		timeout: 10 * time.Second,
+	}
+}
+
+// CheckHealth checks if an HTTP endpoint is responding
+func (v *DefaultHTTPVerifier) CheckHealth(ctx context.Context, url string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := v.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	// Also accept 404 as "alive" since some servers return that for /health
+	if resp.StatusCode == 404 {
+		return nil
+	}
+
+	return fmt.Errorf("unhealthy status: %d", resp.StatusCode)
 }

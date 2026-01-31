@@ -7,7 +7,13 @@ import (
 	"time"
 )
 
-// LocationsResponse is the response from GET /locations
+// =============================================================================
+// Locations API Types (GET /locations)
+// =============================================================================
+
+// LocationsResponse is the response from GET /locations.
+// This endpoint returns all data centers and their available GPU types.
+// Authentication: Query parameters (api_key, api_token)
 type LocationsResponse struct {
 	Data LocationsData `json:"data"`
 }
@@ -17,25 +23,28 @@ type LocationsData struct {
 	Locations []Location `json:"locations"`
 }
 
-// Location represents a TensorDock data center location
+// Location represents a TensorDock data center location.
+// Each location has a unique UUID and contains multiple GPU types.
 type Location struct {
-	ID            string        `json:"id"`
-	City          string        `json:"city"`
-	StateProvince string        `json:"stateprovince"`
-	Country       string        `json:"country"`
-	Tier          int           `json:"tier"`
-	GPUs          []LocationGPU `json:"gpus"`
+	ID            string        `json:"id"`            // UUID, e.g., "1a779525-4c04-4f2c-aa45-58b47d54bb38"
+	City          string        `json:"city"`          // e.g., "Chicago"
+	StateProvince string        `json:"stateprovince"` // e.g., "Illinois"
+	Country       string        `json:"country"`       // e.g., "United States"
+	Tier          int           `json:"tier"`          // 1-3, higher is more reliable
+	GPUs          []LocationGPU `json:"gpus"`          // Available GPU types at this location
 }
 
-// LocationGPU represents GPU availability at a location
+// LocationGPU represents GPU availability at a location.
+// WARNING: Availability data is frequently stale. GPUs shown as available
+// may fail to provision with "No available nodes found".
 type LocationGPU struct {
-	V0Name          string          `json:"v0Name"`
-	DisplayName     string          `json:"displayName"`
-	MaxCount        int             `json:"max_count"`
-	PricePerHr      float64         `json:"price_per_hr"`
-	Resources       GPUResources    `json:"resources"`
-	NetworkFeatures NetworkFeatures `json:"network_features"`
-	Pricing         ResourcePricing `json:"pricing"`
+	V0Name          string          `json:"v0Name"`           // Internal name, e.g., "geforcertx3090-pcie-24gb"
+	DisplayName     string          `json:"displayName"`      // Human name, e.g., "NVIDIA GeForce RTX 3090 PCIe 24GB"
+	MaxCount        int             `json:"max_count"`        // Maximum GPUs available (often inaccurate)
+	PricePerHr      float64         `json:"price_per_hr"`     // Price per hour in USD
+	Resources       GPUResources    `json:"resources"`        // Resource limits
+	NetworkFeatures NetworkFeatures `json:"network_features"` // Network capabilities
+	Pricing         ResourcePricing `json:"pricing"`          // Per-resource pricing
 }
 
 // GPUResources describes resource limits for a GPU type
@@ -45,38 +54,45 @@ type GPUResources struct {
 	MaxStorageGb int `json:"max_storage_gb"`
 }
 
-// NetworkFeatures describes network capabilities
+// NetworkFeatures describes network capabilities at a location
 type NetworkFeatures struct {
 	DedicatedIPAvailable    bool `json:"dedicated_ip_available"`
 	PortForwardingAvailable bool `json:"port_forwarding_available"`
 	NetworkStorageAvailable bool `json:"network_storage_available"`
 }
 
-// ResourcePricing describes per-resource pricing
+// ResourcePricing describes per-resource pricing (in addition to GPU cost)
 type ResourcePricing struct {
 	PerVCPUHr      float64 `json:"per_vcpu_hr"`
 	PerGBRAMHr     float64 `json:"per_gb_ram_hr"`
 	PerGBStorageHr float64 `json:"per_gb_storage_hr"`
 }
 
-// InstancesResponse is the response from GET /instances
+// =============================================================================
+// Instances List API Types (GET /instances)
+// =============================================================================
+
+// InstancesResponse is the response from GET /instances.
+// NOTE: TensorDock's API is inconsistent - sometimes returns {"data": [...]}
+// (array directly) and sometimes {"data": {"instances": [...]}}.
+// The client handles both formats.
 type InstancesResponse struct {
 	Data InstancesData `json:"data"`
 }
 
-// InstancesData contains the instances array
+// InstancesData contains the instances array (nested format)
 type InstancesData struct {
 	Instances []Instance `json:"instances"`
 }
 
-// Instance represents a TensorDock VM instance
-// Note: TensorDock API uses camelCase for some fields
+// Instance represents a TensorDock VM instance from the list endpoint.
+// Note: Field names use mixed casing (ipAddress vs gpu_model) - this matches the API.
 type Instance struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
-	Status       string    `json:"status"`
-	IPAddress    string    `json:"ipAddress"` // camelCase in API response
-	GPUModel     string    `json:"gpu_model"`
+	Status       string    `json:"status"`       // "running", "stopped", "creating", etc.
+	IPAddress    string    `json:"ipAddress"`    // camelCase in API response
+	GPUModel     string    `json:"gpu_model"`    // snake_case in API response
 	GPUCount     int       `json:"gpu_count"`
 	VCPUs        int       `json:"vcpus"`
 	RAMGb        int       `json:"ram_gb"`
@@ -86,54 +102,91 @@ type Instance struct {
 	LocationID   string    `json:"location_id"`
 }
 
-// InstanceResponse is the response from GET /instances/{id}
-// Note: This endpoint returns the instance directly, NOT wrapped in "data"
+// =============================================================================
+// Instance Detail API Types (GET /instances/{id})
+// =============================================================================
+
+// InstanceResponse is the response from GET /instances/{id}.
+// NOTE: This endpoint returns the instance directly (NOT wrapped in "data").
+// This is different from POST /instances which wraps the response.
+//
+// Example response:
+//
+//	{
+//	  "type": "virtualmachine",
+//	  "id": "468b716a-6747-4cbe-9f13-afc153a21c14",
+//	  "name": "shopper-ssh-test-1234",
+//	  "status": "running",
+//	  "ipAddress": "174.94.145.71",
+//	  "portForwards": [{"internal_port": 22, "external_port": 20456}],
+//	  "rateHourly": 0.272999
+//	}
 type InstanceResponse struct {
 	Type         string        `json:"type"`
 	ID           string        `json:"id"`
 	Name         string        `json:"name"`
 	Status       string        `json:"status"`
-	IPAddress    string        `json:"ipAddress"` // camelCase in API response
-	PortForwards []PortForward `json:"portForwards"`
-	RateHourly   float64       `json:"rateHourly"`
+	IPAddress    string        `json:"ipAddress"`    // camelCase
+	PortForwards []PortForward `json:"portForwards"` // camelCase
+	RateHourly   float64       `json:"rateHourly"`   // Actual hourly rate
 }
 
-// CreateInstanceRequest is the request body for creating an instance
+// =============================================================================
+// Create Instance API Types (POST /instances)
+// =============================================================================
+
+// CreateInstanceRequest is the request body for creating an instance.
+// TensorDock uses JSON:API style with data.type and data.attributes.
 type CreateInstanceRequest struct {
 	Data CreateInstanceData `json:"data"`
 }
 
-// CreateInstanceData wraps the create request
+// CreateInstanceData wraps the create request attributes
 type CreateInstanceData struct {
-	Type       string                   `json:"type"`
+	Type       string                   `json:"type"`       // Always "virtualmachine"
 	Attributes CreateInstanceAttributes `json:"attributes"`
 }
 
-// CreateInstanceAttributes contains the instance configuration
+// CreateInstanceAttributes contains the instance configuration.
+//
+// Key behaviors discovered through testing:
+//
+//   - PortForwards: REQUIRED for Ubuntu VMs. TensorDock returns error
+//     "SSH port (22) must be forwarded for Ubuntu VMs" if omitted.
+//     TensorDock may assign a different external port than requested.
+//
+//   - SSHKey: Required field but TensorDock doesn't actually use it to
+//     install the key. Must use CloudInit.RunCmd for reliable installation.
+//
+//   - CloudInit: Use runcmd with base64-encoded SSH key for reliable
+//     key installation. The ssh_authorized_keys field doesn't work.
 type CreateInstanceAttributes struct {
-	Name         string          `json:"name"`
-	Type         string          `json:"type"`
-	Image        string          `json:"image"`
-	LocationID   string          `json:"location_id"`
-	Resources    ResourcesConfig `json:"resources"`
-	PortForwards []PortForward   `json:"port_forwards"`
-	SSHKey       string          `json:"ssh_key,omitempty"`
-	CloudInit    *CloudInit      `json:"cloud_init,omitempty"`
+	Name         string          `json:"name"`                   // Instance name (use shopper label format)
+	Type         string          `json:"type"`                   // Always "virtualmachine"
+	Image        string          `json:"image"`                  // OS image: ubuntu2404, ubuntu2204, debian12, etc.
+	LocationID   string          `json:"location_id"`            // Location UUID from /locations
+	Resources    ResourcesConfig `json:"resources"`              // CPU, RAM, storage, GPUs
+	PortForwards []PortForward   `json:"port_forwards"`          // REQUIRED for Ubuntu VMs
+	SSHKey       string          `json:"ssh_key,omitempty"`      // Required but doesn't work - use CloudInit
+	CloudInit    *CloudInit      `json:"cloud_init,omitempty"`   // For SSH key installation
 }
 
-// PortForward specifies a port forwarding rule
+// PortForward specifies a port forwarding rule.
+// IMPORTANT: TensorDock may assign a different external port than requested.
+// For example, you request internal:22 -> external:22, but receive external:20456.
+// Always check GetInstanceStatus to get the actual assigned port.
 type PortForward struct {
-	Protocol     string `json:"protocol"`
-	InternalPort int    `json:"internal_port"`
-	ExternalPort int    `json:"external_port"`
+	Protocol     string `json:"protocol"`      // "tcp" or "udp"
+	InternalPort int    `json:"internal_port"` // Port inside the VM
+	ExternalPort int    `json:"external_port"` // Requested external port (may be changed by TensorDock)
 }
 
 // ResourcesConfig specifies instance resources
 type ResourcesConfig struct {
-	VCPUCount int                   `json:"vcpu_count"`
-	RAMGb     int                   `json:"ram_gb"`
-	StorageGb int                   `json:"storage_gb"`
-	GPUs      map[string]GPUCount   `json:"gpus"`
+	VCPUCount int                 `json:"vcpu_count"` // Number of vCPUs
+	RAMGb     int                 `json:"ram_gb"`     // RAM in GB
+	StorageGb int                 `json:"storage_gb"` // Storage in GB (minimum 100)
+	GPUs      map[string]GPUCount `json:"gpus"`       // GPU type -> count mapping
 }
 
 // GPUCount specifies the count for a GPU model
@@ -141,19 +194,50 @@ type GPUCount struct {
 	Count int `json:"count"`
 }
 
-// CloudInit contains cloud-init configuration
-// TensorDock uses standard cloud-init fields: runcmd, packages, write_files, etc.
-// Note: TensorDock's ssh_key API field doesn't work - must use ssh_authorized_keys in cloud-init
+// CloudInit contains cloud-init configuration.
+//
+// TensorDock uses standard cloud-init fields but with important caveats:
+//
+//   - ssh_authorized_keys: Does NOT work reliably on TensorDock
+//   - runcmd: The only reliable way to install SSH keys
+//
+// Recommended SSH key installation pattern:
+//
+//	CloudInit{
+//	    RunCmd: []string{
+//	        "mkdir -p /root/.ssh",
+//	        "chmod 700 /root/.ssh",
+//	        "echo '<base64-key>' | base64 -d >> /root/.ssh/authorized_keys",
+//	        "chmod 600 /root/.ssh/authorized_keys",
+//	        "chown -R root:root /root/.ssh",
+//	    },
+//	}
+//
+// Cloud-init execution takes ~60-90 seconds after instance boot.
 type CloudInit struct {
 	Packages          []string `json:"packages,omitempty"`
 	PackageUpdate     bool     `json:"package_update,omitempty"`
 	PackageUpgrade    bool     `json:"package_upgrade,omitempty"`
-	RunCmd            []string `json:"runcmd,omitempty"`
-	SSHAuthorizedKeys []string `json:"ssh_authorized_keys,omitempty"`
+	RunCmd            []string `json:"runcmd,omitempty"`              // Commands to run after boot
+	SSHAuthorizedKeys []string `json:"ssh_authorized_keys,omitempty"` // Does NOT work - use RunCmd
 }
 
-// CreateInstanceResponse is the response from POST /instances
-// Note: Response is wrapped in "data" but has no "attributes" nesting
+// CreateInstanceResponse is the response from POST /instances.
+// NOTE: Unlike GET /instances/{id}, this response IS wrapped in "data".
+//
+// Example response:
+//
+//	{
+//	  "data": {
+//	    "type": "virtualmachine",
+//	    "id": "468b716a-6747-4cbe-9f13-afc153a21c14",
+//	    "name": "shopper-ssh-test-1234",
+//	    "status": "running"
+//	  }
+//	}
+//
+// IMPORTANT: The create response does NOT include the IP address.
+// You must poll GetInstanceStatus to get the IP (typically 5-30 seconds).
 type CreateInstanceResponse struct {
 	Data CreateInstanceResponseData `json:"data"`
 }
@@ -166,7 +250,15 @@ type CreateInstanceResponseData struct {
 	Status string `json:"status"`
 }
 
-// normalizeGPUName converts TensorDock GPU names to standardized names
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+// normalizeGPUName converts TensorDock GPU display names to standardized names.
+// Examples:
+//   - "NVIDIA GeForce RTX 4090 PCIe 24GB" -> "RTX 4090"
+//   - "NVIDIA A100 PCIe 80GB" -> "A100"
+//   - "GeForce RTX 3090 PCIe 24GB" -> "RTX 3090"
 func normalizeGPUName(name string) string {
 	name = strings.TrimSpace(name)
 
@@ -183,7 +275,11 @@ func normalizeGPUName(name string) string {
 	return name
 }
 
-// parseVRAMFromName extracts VRAM in GB from display name
+// parseVRAMFromName extracts VRAM in GB from a GPU display name.
+// Examples:
+//   - "NVIDIA GeForce RTX 4090 PCIe 24GB" -> 24
+//   - "NVIDIA A100 PCIe 80GB" -> 80
+//   - "Some GPU" -> 0 (no VRAM found)
 func parseVRAMFromName(name string) int {
 	// Look for patterns like "24GB", "48GB", etc.
 	re := regexp.MustCompile(`(\d+)\s*GB`)

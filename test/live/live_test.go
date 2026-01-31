@@ -21,9 +21,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	log.Println("═══════════════════════════════════════════════════════════════")
+	log.Println("===============================================================")
 	log.Println("  LIVE TEST SUITE - Real GPU Servers (Multi-Provider)")
-	log.Println("═══════════════════════════════════════════════════════════════")
+	log.Println("===============================================================")
 
 	// Load configuration
 	testConfig = DefaultTestConfig()
@@ -46,21 +46,31 @@ func TestMain(m *testing.M) {
 	// Create test environment
 	testEnv = NewLiveTestEnv(testConfig, testWatchdog)
 
+	// Pre-test orphan scan: Clean up any orphaned instances from previous runs
+	// This runs synchronously before tests to ensure a clean slate
+	log.Println("---------------------------------------------------------------")
+	log.Println("  PRE-TEST ORPHAN SCAN")
+	log.Println("---------------------------------------------------------------")
+	cleanupOrphanedInstancesPreTest()
+
 	// Suppress unused variable warning
 	_ = ctx
 
 	// Run tests
+	log.Println("---------------------------------------------------------------")
+	log.Println("  RUNNING TESTS")
+	log.Println("---------------------------------------------------------------")
 	code := m.Run()
 
 	// Print final stats
 	stats := testWatchdog.GetStats()
-	log.Println("═══════════════════════════════════════════════════════════════")
+	log.Println("===============================================================")
 	log.Printf("  FINAL STATS: Runtime=%v, Spend=$%.4f, Active=%d",
 		stats.TotalRuntime.Round(time.Second), stats.TotalSpend, stats.ActiveInstances)
 	for prov, spend := range stats.SpendByProv {
 		log.Printf("    %s: $%.4f", prov, spend)
 	}
-	log.Println("═══════════════════════════════════════════════════════════════")
+	log.Println("===============================================================")
 
 	// Ensure all instances cleaned up
 	if stats.ActiveInstances > 0 {
@@ -69,6 +79,56 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+// cleanupOrphanedInstancesPreTest scans all providers for orphaned shopper instances
+// and destroys them before running tests. This uses a testing.T-like logger since
+// we don't have a real testing.T in TestMain.
+func cleanupOrphanedInstancesPreTest() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	totalCleaned := 0
+
+	for provName := range testConfig.Providers {
+		if !testConfig.HasProvider(provName) {
+			continue
+		}
+
+		prov, err := testEnv.Providers.GetProvider(provName)
+		if err != nil {
+			log.Printf("  [%s] Failed to get provider: %v", provName, err)
+			continue
+		}
+
+		instances, err := prov.ListAllInstances(ctx)
+		if err != nil {
+			log.Printf("  [%s] Failed to list instances: %v", provName, err)
+			continue
+		}
+
+		if len(instances) == 0 {
+			log.Printf("  [%s] No orphaned instances found", provName)
+			continue
+		}
+
+		log.Printf("  [%s] Found %d orphaned instances to clean up", provName, len(instances))
+
+		for _, inst := range instances {
+			log.Printf("  [%s] Destroying orphan: %s (%s)", provName, inst.ID, inst.Name)
+
+			if err := prov.DestroyInstance(ctx, inst.ID); err != nil {
+				log.Printf("  [%s] Failed to destroy %s: %v", provName, inst.ID, err)
+			} else {
+				log.Printf("  [%s] Destroyed orphan: %s", provName, inst.ID)
+				totalCleaned++
+			}
+		}
+	}
+
+	if totalCleaned > 0 {
+		log.Printf("  Cleaned up %d total orphaned instances", totalCleaned)
+	}
 }
 
 // ==============================================================================
@@ -109,32 +169,7 @@ func TestL1_VastAI_ProvisionSmoke(t *testing.T) {
 	testEnv.WaitForStatus(t, resp.Session.ID, "stopped", 2*time.Minute)
 }
 
-func TestL2_VastAI_Heartbeat(t *testing.T) {
-	if !testConfig.HasProvider(ProviderVastAI) {
-		t.Skip("Vast.ai not configured")
-	}
-
-	resp := testEnv.ProvisionCheapGPU(t, ProviderVastAI)
-	defer testEnv.Cleanup(t, resp.Session.ID)
-
-	// Wait for running
-	testEnv.WaitForStatus(t, resp.Session.ID, "running", 5*time.Minute)
-
-	// Wait for heartbeats (agent sends every 30s)
-	t.Log("Waiting for heartbeats...")
-	time.Sleep(90 * time.Second)
-
-	// Verify heartbeat recorded
-	session := testEnv.GetSession(t, resp.Session.ID)
-	assert.False(t, session.LastHeartbeat.IsZero(), "Heartbeat should be recorded")
-	assert.WithinDuration(t, time.Now(), session.LastHeartbeat, 45*time.Second,
-		"Heartbeat should be recent")
-
-	// Cleanup
-	testEnv.DestroySession(t, resp.Session.ID)
-}
-
-func TestL3_VastAI_Extension(t *testing.T) {
+func TestL2_VastAI_Extension(t *testing.T) {
 	if !testConfig.HasProvider(ProviderVastAI) {
 		t.Skip("Vast.ai not configured")
 	}
@@ -159,7 +194,7 @@ func TestL3_VastAI_Extension(t *testing.T) {
 	testEnv.DestroySession(t, resp.Session.ID)
 }
 
-func TestL4_VastAI_GracefulShutdown(t *testing.T) {
+func TestL3_VastAI_GracefulShutdown(t *testing.T) {
 	if !testConfig.HasProvider(ProviderVastAI) {
 		t.Skip("Vast.ai not configured")
 	}
@@ -190,8 +225,8 @@ func TestL1_TensorDock_ProvisionSmoke(t *testing.T) {
 	resp := testEnv.ProvisionCheapGPU(t, ProviderTensorDock)
 	defer testEnv.Cleanup(t, resp.Session.ID)
 
-	// Wait for running
-	session := testEnv.WaitForStatus(t, resp.Session.ID, "running", 5*time.Minute)
+	// Wait for running - TensorDock needs extra time for cloud-init
+	session := testEnv.WaitForStatus(t, resp.Session.ID, "running", 8*time.Minute)
 	assert.Equal(t, "tensordock", session.Provider)
 
 	// Verify SSH info
@@ -202,7 +237,7 @@ func TestL1_TensorDock_ProvisionSmoke(t *testing.T) {
 	testEnv.WaitForStatus(t, resp.Session.ID, "stopped", 2*time.Minute)
 }
 
-func TestL2_TensorDock_Heartbeat(t *testing.T) {
+func TestL2_TensorDock_Extension(t *testing.T) {
 	if !testConfig.HasProvider(ProviderTensorDock) {
 		t.Skip("TensorDock not configured")
 	}
@@ -210,31 +245,8 @@ func TestL2_TensorDock_Heartbeat(t *testing.T) {
 	resp := testEnv.ProvisionCheapGPU(t, ProviderTensorDock)
 	defer testEnv.Cleanup(t, resp.Session.ID)
 
-	// Wait for running
-	testEnv.WaitForStatus(t, resp.Session.ID, "running", 5*time.Minute)
-
-	// Wait for heartbeats
-	t.Log("Waiting for heartbeats...")
-	time.Sleep(90 * time.Second)
-
-	// Verify heartbeat recorded
-	session := testEnv.GetSession(t, resp.Session.ID)
-	assert.False(t, session.LastHeartbeat.IsZero(), "Heartbeat should be recorded")
-
-	// Cleanup
-	testEnv.DestroySession(t, resp.Session.ID)
-}
-
-func TestL3_TensorDock_Extension(t *testing.T) {
-	if !testConfig.HasProvider(ProviderTensorDock) {
-		t.Skip("TensorDock not configured")
-	}
-
-	resp := testEnv.ProvisionCheapGPU(t, ProviderTensorDock)
-	defer testEnv.Cleanup(t, resp.Session.ID)
-
-	// Wait for running
-	testEnv.WaitForStatus(t, resp.Session.ID, "running", 5*time.Minute)
+	// Wait for running - TensorDock needs extra time for cloud-init
+	testEnv.WaitForStatus(t, resp.Session.ID, "running", 8*time.Minute)
 
 	originalExpiry := testEnv.GetSession(t, resp.Session.ID).ExpiresAt
 
@@ -249,15 +261,15 @@ func TestL3_TensorDock_Extension(t *testing.T) {
 	testEnv.DestroySession(t, resp.Session.ID)
 }
 
-func TestL4_TensorDock_GracefulShutdown(t *testing.T) {
+func TestL3_TensorDock_GracefulShutdown(t *testing.T) {
 	if !testConfig.HasProvider(ProviderTensorDock) {
 		t.Skip("TensorDock not configured")
 	}
 
 	resp := testEnv.ProvisionCheapGPU(t, ProviderTensorDock)
 
-	// Wait for running
-	testEnv.WaitForStatus(t, resp.Session.ID, "running", 5*time.Minute)
+	// Wait for running - TensorDock needs extra time for cloud-init
+	testEnv.WaitForStatus(t, resp.Session.ID, "running", 8*time.Minute)
 
 	// Signal done
 	testEnv.SignalDone(t, resp.Session.ID)
@@ -271,8 +283,8 @@ func TestL4_TensorDock_GracefulShutdown(t *testing.T) {
 // CROSS-PROVIDER COMPARISON TESTS
 // ==============================================================================
 
-// TestL5_CrossProvider_ProvisionBoth provisions from both providers to compare
-func TestL5_CrossProvider_ProvisionBoth(t *testing.T) {
+// TestL4_CrossProvider_ProvisionBoth provisions from both providers to compare
+func TestL4_CrossProvider_ProvisionBoth(t *testing.T) {
 	// Check both providers are enabled
 	if !testConfig.HasProvider(ProviderVastAI) || !testConfig.HasProvider(ProviderTensorDock) {
 		t.Skip("Both Vast.ai and TensorDock must be configured")
@@ -303,8 +315,8 @@ func TestL5_CrossProvider_ProvisionBoth(t *testing.T) {
 	testEnv.DestroySession(t, tensorResp.Session.ID)
 }
 
-// TestL6_ProviderFailover tests failover when cheapest isn't available
-func TestL6_ProviderFailover(t *testing.T) {
+// TestL5_ProviderFailover tests failover when cheapest isn't available
+func TestL5_ProviderFailover(t *testing.T) {
 	// Find cheapest across all providers
 	offer, provider := testEnv.FindCheapestGPU(t)
 	require.NotNil(t, offer)
