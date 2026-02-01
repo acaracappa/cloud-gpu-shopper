@@ -139,7 +139,7 @@ func TestOfferIDValidation(t *testing.T) {
 			name:    "missing prefix",
 			offerID: "12345678-1234-1234-1234-123456789012-gpu-name",
 			wantErr: true,
-			errMsg:  "missing prefix",
+			errMsg:  "missing required",
 		},
 		{
 			name:    "too short (truncated UUID)",
@@ -151,7 +151,7 @@ func TestOfferIDValidation(t *testing.T) {
 			name:    "empty offer ID",
 			offerID: "",
 			wantErr: true,
-			errMsg:  "missing prefix",
+			errMsg:  "missing required",
 		},
 		{
 			name:    "just prefix",

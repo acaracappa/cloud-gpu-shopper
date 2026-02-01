@@ -3,6 +3,7 @@ package vastai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
@@ -21,6 +23,154 @@ const (
 	defaultBaseURL = "https://console.vast.ai/api/v0"
 	defaultTimeout = 30 * time.Second
 )
+
+// Bug #48: Circuit breaker configuration for Vast.ai
+// CircuitBreakerState represents the current state of the circuit breaker
+type CircuitBreakerState int
+
+const (
+	// CircuitClosed is the normal operating state - requests are allowed
+	CircuitClosed CircuitBreakerState = iota
+	// CircuitOpen means too many failures occurred - requests are blocked
+	CircuitOpen
+	// CircuitHalfOpen allows a test request through to check if service recovered
+	CircuitHalfOpen
+)
+
+// CircuitBreakerConfig configures the circuit breaker behavior
+type CircuitBreakerConfig struct {
+	// FailureThreshold is the number of consecutive failures before opening the circuit
+	FailureThreshold int
+	// ResetTimeout is how long to wait before transitioning from Open to HalfOpen
+	ResetTimeout time.Duration
+	// MaxBackoff is the maximum backoff duration for exponential backoff
+	MaxBackoff time.Duration
+	// BaseBackoff is the initial backoff duration
+	BaseBackoff time.Duration
+}
+
+// DefaultCircuitBreakerConfig returns sensible defaults for the circuit breaker
+func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
+	return CircuitBreakerConfig{
+		FailureThreshold: 5,
+		ResetTimeout:     30 * time.Second,
+		MaxBackoff:       2 * time.Minute,
+		BaseBackoff:      1 * time.Second,
+	}
+}
+
+// circuitBreaker implements a simple circuit breaker pattern with exponential backoff
+type circuitBreaker struct {
+	mu               sync.Mutex
+	state            CircuitBreakerState
+	failures         int
+	lastFailure      time.Time
+	lastStateChange  time.Time
+	config           CircuitBreakerConfig
+	consecutiveWaits int // For exponential backoff
+}
+
+// newCircuitBreaker creates a new circuit breaker with the given configuration
+func newCircuitBreaker(config CircuitBreakerConfig) *circuitBreaker {
+	return &circuitBreaker{
+		state:  CircuitClosed,
+		config: config,
+	}
+}
+
+// allow returns true if a request should be allowed, false if circuit is open
+func (cb *circuitBreaker) allow() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
+	case CircuitClosed:
+		return true
+	case CircuitOpen:
+		// Check if we should transition to half-open
+		if time.Since(cb.lastStateChange) > cb.config.ResetTimeout {
+			cb.state = CircuitHalfOpen
+			cb.lastStateChange = time.Now()
+			return true
+		}
+		return false
+	case CircuitHalfOpen:
+		// Allow one test request
+		return true
+	default:
+		return true
+	}
+}
+
+// recordSuccess records a successful request
+func (cb *circuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failures = 0
+	cb.consecutiveWaits = 0
+	if cb.state == CircuitHalfOpen {
+		cb.state = CircuitClosed
+		cb.lastStateChange = time.Now()
+	}
+}
+
+// recordFailure records a failed request and potentially opens the circuit
+func (cb *circuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failures++
+	cb.lastFailure = time.Now()
+
+	if cb.state == CircuitHalfOpen {
+		// Failed while testing - go back to open
+		cb.state = CircuitOpen
+		cb.lastStateChange = time.Now()
+		cb.consecutiveWaits++
+		return
+	}
+
+	if cb.failures >= cb.config.FailureThreshold {
+		cb.state = CircuitOpen
+		cb.lastStateChange = time.Now()
+		cb.consecutiveWaits++
+	}
+}
+
+// getBackoff returns the current backoff duration using exponential backoff
+func (cb *circuitBreaker) getBackoff() time.Duration {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.consecutiveWaits == 0 {
+		return cb.config.BaseBackoff
+	}
+
+	// Cap consecutiveWaits to prevent integer overflow in bit shift
+	waits := cb.consecutiveWaits
+	const maxShift = 10
+	if waits > maxShift {
+		waits = maxShift
+	}
+
+	// Exponential backoff: base * 2^(waits-1), capped at maxBackoff
+	backoff := cb.config.BaseBackoff * time.Duration(1<<uint(waits-1))
+	if backoff > cb.config.MaxBackoff {
+		backoff = cb.config.MaxBackoff
+	}
+	return backoff
+}
+
+// State returns the current circuit breaker state (for monitoring/testing)
+func (cb *circuitBreaker) State() CircuitBreakerState {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state
+}
+
+// ErrCircuitOpen is returned when the circuit breaker is open
+var ErrCircuitOpen = errors.New("circuit breaker is open")
 
 // Client implements the provider.Provider interface for Vast.ai
 type Client struct {
@@ -32,6 +182,9 @@ type Client struct {
 	mu          sync.Mutex
 	lastRequest time.Time
 	minInterval time.Duration
+
+	// Bug #48: Circuit breaker for API calls
+	circuitBreaker *circuitBreaker
 }
 
 // ClientOption configures the Vast.ai client
@@ -58,13 +211,21 @@ func WithMinInterval(d time.Duration) ClientOption {
 	}
 }
 
+// WithCircuitBreaker configures the circuit breaker for API calls (Bug #48)
+func WithCircuitBreaker(config CircuitBreakerConfig) ClientOption {
+	return func(c *Client) {
+		c.circuitBreaker = newCircuitBreaker(config)
+	}
+}
+
 // NewClient creates a new Vast.ai client
 func NewClient(apiKey string, opts ...ClientOption) *Client {
 	c := &Client{
-		apiKey:      apiKey,
-		baseURL:     defaultBaseURL,
-		httpClient:  &http.Client{Timeout: defaultTimeout},
-		minInterval: time.Second, // Default 1 request per second
+		apiKey:         apiKey,
+		baseURL:        defaultBaseURL,
+		httpClient:     &http.Client{Timeout: defaultTimeout},
+		minInterval:    time.Second, // Default 1 request per second
+		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()), // Bug #48
 	}
 
 	for _, opt := range opts {
@@ -94,7 +255,21 @@ func (c *Client) SupportsFeature(feature provider.ProviderFeature) bool {
 }
 
 // ListOffers returns available GPU offers from Vast.ai
-func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]models.GPUOffer, error) {
+func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (offers []models.GPUOffer, err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("ListOffers", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListOffers", startTime, err)
+	}()
+
 	c.rateLimit()
 
 	// Build query - Vast.ai uses JSON query syntax
@@ -145,7 +320,7 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]m
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	offers := make([]models.GPUOffer, 0, len(result.Offers))
+	offers = make([]models.GPUOffer, 0, len(result.Offers))
 	for _, bundle := range result.Offers {
 		offer := bundle.ToGPUOffer()
 		if offer.MatchesFilter(filter) {
@@ -157,7 +332,21 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]m
 }
 
 // ListAllInstances returns all instances with our tags (for reconciliation)
-func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInstance, error) {
+func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.ProviderInstance, err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("ListAllInstances", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListAllInstances", startTime, err)
+	}()
+
 	c.rateLimit()
 
 	reqURL := fmt.Sprintf("%s/instances/", c.baseURL)
@@ -185,7 +374,7 @@ func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInsta
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	instances := make([]provider.ProviderInstance, 0)
+	instances = make([]provider.ProviderInstance, 0)
 	for _, inst := range result.Instances {
 		// Only include instances with our prefix
 		if sessionID, ok := models.ParseLabel(inst.Label); ok {
@@ -206,7 +395,21 @@ func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInsta
 }
 
 // CreateInstance provisions a new GPU instance
-func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
+func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (info *provider.InstanceInfo, err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("CreateInstance", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("CreateInstance", startTime, err)
+	}()
+
 	c.rateLimit()
 
 	// Build the create request based on launch mode
@@ -214,9 +417,10 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 
 	// Parse offer ID as bundle ID
 	// Offer IDs are in format "vastai-{id}" or just "{id}"
-	offerID := req.OfferID
-	if strings.HasPrefix(offerID, "vastai-") {
-		offerID = strings.TrimPrefix(offerID, "vastai-")
+	// Bug #60: Make prefix check case-insensitive and trim whitespace
+	offerID := strings.TrimSpace(req.OfferID)
+	if strings.HasPrefix(strings.ToLower(offerID), "vastai-") {
+		offerID = offerID[7:] // Remove "vastai-" prefix (7 chars)
 	}
 	bundleID, err := strconv.Atoi(offerID)
 	if err != nil {
@@ -275,7 +479,7 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	}
 
 	// Build instance info based on launch mode
-	info := &provider.InstanceInfo{
+	info = &provider.InstanceInfo{
 		ProviderInstanceID: instanceID,
 		SSHHost:            "", // Will be populated after instance starts
 		SSHPort:            22,
@@ -345,6 +549,7 @@ func (c *Client) buildSSHRequest(createReq CreateInstanceRequest, req provider.C
 }
 
 // buildEntrypointRequest builds a request for entrypoint mode (workload execution)
+// Uses Vast.ai template approach with environment variables (VLLM_MODEL, VLLM_ARGS)
 func (c *Client) buildEntrypointRequest(createReq CreateInstanceRequest, req provider.CreateInstanceRequest) CreateInstanceRequest {
 	// Determine image based on workload config or explicit setting
 	image := req.DockerImage
@@ -356,17 +561,38 @@ func (c *Client) buildEntrypointRequest(createReq CreateInstanceRequest, req pro
 	}
 
 	createReq.Image = image
-	createReq.RunType = "args" // Use args mode for entrypoint execution
 
-	// Build args from workload config or explicit entrypoint
-	if len(req.Entrypoint) > 0 {
-		createReq.Args = strings.Join(req.Entrypoint, " ")
-	} else if req.WorkloadConfig != nil {
+	// Use ssh_proxy mode to get SSH access alongside the workload
+	// This allows debugging and monitoring via SSH while running the workload
+	createReq.RunType = "ssh_proxy"
+
+	// Initialize env vars map
+	if createReq.Env == nil {
+		createReq.Env = make(map[string]string)
+	}
+
+	// Add caller-provided environment variables first
+	for k, v := range req.EnvVars {
+		createReq.Env[k] = v
+	}
+
+	// Build workload-specific configuration using environment variables
+	// This is the Vast.ai template approach - uses VLLM_MODEL and VLLM_ARGS
+	if req.WorkloadConfig != nil {
 		switch req.WorkloadConfig.Type {
 		case provider.WorkloadTypeVLLM:
-			createReq.Args = BuildVLLMArgs(req.WorkloadConfig)
+			// Use environment variables for vLLM template
+			vllmEnv := BuildVLLMEnvVars(req.WorkloadConfig)
+			for k, v := range vllmEnv {
+				createReq.Env[k] = v
+			}
+			log.Printf("[Vast.ai] vLLM template config: VLLM_MODEL=%s", req.WorkloadConfig.ModelID)
 		case provider.WorkloadTypeTGI:
-			createReq.Args = BuildTGIArgs(req.WorkloadConfig)
+			// TGI uses different env vars
+			createReq.Env["MODEL_ID"] = req.WorkloadConfig.ModelID
+			if req.WorkloadConfig.Quantization != "" {
+				createReq.Env["QUANTIZE"] = req.WorkloadConfig.Quantization
+			}
 		}
 	}
 
@@ -383,12 +609,7 @@ func (c *Client) buildEntrypointRequest(createReq CreateInstanceRequest, req pro
 		createReq.Ports = FormatPortsString(ports)
 	}
 
-	// Add environment variables (including HF_TOKEN for model downloads)
-	if len(req.EnvVars) > 0 {
-		createReq.Env = req.EnvVars
-	}
-
-	// Note: SSH key can still be provided for debugging access
+	// SSH key for debugging access
 	if req.SSHPublicKey != "" {
 		createReq.SSHKey = req.SSHPublicKey
 	}
@@ -397,7 +618,21 @@ func (c *Client) buildEntrypointRequest(createReq CreateInstanceRequest, req pro
 }
 
 // AttachSSHKey attaches an SSH public key to an instance
-func (c *Client) AttachSSHKey(ctx context.Context, instanceID string, sshPublicKey string) error {
+func (c *Client) AttachSSHKey(ctx context.Context, instanceID string, sshPublicKey string) (err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("AttachSSHKey", startTime, err)
+		return err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("AttachSSHKey", startTime, err)
+	}()
+
 	c.rateLimit()
 
 	reqURL := fmt.Sprintf("%s/instances/%s/ssh/", c.baseURL, instanceID)
@@ -430,7 +665,21 @@ func (c *Client) AttachSSHKey(ctx context.Context, instanceID string, sshPublicK
 }
 
 // DestroyInstance tears down a GPU instance
-func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
+func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("DestroyInstance", startTime, err)
+		return err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("DestroyInstance", startTime, err)
+	}()
+
 	c.rateLimit()
 
 	reqURL := fmt.Sprintf("%s/instances/%s/", c.baseURL, instanceID)
@@ -456,7 +705,21 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
 }
 
 // GetInstanceStatus returns current status of an instance
-func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
+func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (status *provider.InstanceStatus, err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
+	}()
+
 	c.rateLimit()
 
 	reqURL := fmt.Sprintf("%s/instances/%s/", c.baseURL, instanceID)
@@ -499,6 +762,9 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*pro
 		SSHHost:   result.SSHHost,
 		SSHPort:   result.SSHPort,
 		SSHUser:   "root",
+		// Port mappings for HTTP API access (vLLM, TGI, etc.)
+		PublicIP: result.PublicIP,
+		Ports:    result.ParsePortMappings(),
 	}, nil
 }
 
@@ -532,4 +798,67 @@ func (c *Client) handleError(resp *http.Response, operation string) error {
 	}
 
 	return provider.NewProviderError("vastai", operation, resp.StatusCode, message, baseErr)
+}
+
+// Bug #48: Circuit breaker helper methods
+
+// checkCircuitBreaker returns an error if the circuit breaker is open
+func (c *Client) checkCircuitBreaker() error {
+	if !c.circuitBreaker.allow() {
+		backoff := c.circuitBreaker.getBackoff()
+		log.Printf("[Vast.ai] Circuit breaker is open, backoff: %v", backoff)
+		return fmt.Errorf("%w: retry after %v", ErrCircuitOpen, backoff)
+	}
+	return nil
+}
+
+// recordAPIResult records the result of an API call to the circuit breaker
+func (c *Client) recordAPIResult(err error) {
+	if err == nil {
+		c.circuitBreaker.recordSuccess()
+		return
+	}
+
+	// Only count certain errors as failures for the circuit breaker
+	// Don't count validation errors, not found errors, etc.
+	var providerErr *provider.ProviderError
+	if errors.As(err, &providerErr) {
+		// Rate limits and server errors should trigger circuit breaker
+		if providerErr.StatusCode >= 500 || providerErr.StatusCode == 429 {
+			c.circuitBreaker.recordFailure()
+			return
+		}
+	}
+
+	// Network errors should trigger circuit breaker
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		// Don't trigger for context cancellation by caller
+		return
+	}
+
+	// Other network-level errors
+	if strings.Contains(err.Error(), "connection refused") ||
+		strings.Contains(err.Error(), "no such host") ||
+		strings.Contains(err.Error(), "network is unreachable") {
+		c.circuitBreaker.recordFailure()
+	}
+}
+
+// recordAPIMetrics records API call metrics including response time and call count
+func (c *Client) recordAPIMetrics(operation string, startTime time.Time, err error) {
+	duration := time.Since(startTime)
+	metrics.RecordProviderAPIResponseTime("vastai", operation, duration)
+
+	status := "success"
+	if err != nil {
+		if errors.Is(err, ErrCircuitOpen) {
+			status = "circuit_open"
+		} else {
+			status = "error"
+		}
+	}
+	metrics.RecordProviderAPICall("vastai", operation, status)
+
+	// Update circuit breaker state metric
+	metrics.UpdateProviderCircuitBreakerState("vastai", int(c.circuitBreaker.State()))
 }

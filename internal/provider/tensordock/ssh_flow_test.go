@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -451,6 +452,55 @@ func TestGetInstanceStatus_MultiplePortForwards(t *testing.T) {
 	require.NoError(t, err)
 	// Should find SSH port (internal 22) even among multiple forwards
 	assert.Equal(t, 20456, status.SSHPort)
+}
+
+// TestGetInstanceStatus_PortMappings verifies all port mappings are returned
+func TestGetInstanceStatus_PortMappings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/instances/") {
+			resp := InstanceResponse{
+				Type:      "virtualmachine",
+				ID:        "inst-123",
+				Name:      "shopper-session-abc",
+				Status:    "running",
+				IPAddress: "174.94.145.71",
+				PortForwards: []PortForward{
+					{Protocol: "tcp", InternalPort: 22, ExternalPort: 20456},
+					{Protocol: "tcp", InternalPort: 8000, ExternalPort: 30000}, // vLLM
+					{Protocol: "tcp", InternalPort: 8080, ExternalPort: 30080}, // HTTP
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", "test-token",
+		WithBaseURL(server.URL),
+		WithMinInterval(0))
+
+	ctx := context.Background()
+	status, err := client.GetInstanceStatus(ctx, "inst-123")
+
+	require.NoError(t, err)
+	assert.True(t, status.Running)
+	assert.Equal(t, "running", status.Status)
+	assert.Equal(t, "174.94.145.71", status.SSHHost)
+	assert.Equal(t, 20456, status.SSHPort)
+	assert.Equal(t, "root", status.SSHUser)
+
+	// Verify PublicIP is populated
+	assert.Equal(t, "174.94.145.71", status.PublicIP)
+
+	// Verify all port mappings are returned
+	require.NotNil(t, status.Ports)
+	assert.Equal(t, 20456, status.Ports[22], "SSH port mapping")
+	assert.Equal(t, 30000, status.Ports[8000], "vLLM port mapping")
+	assert.Equal(t, 30080, status.Ports[8080], "HTTP port mapping")
+
+	// Verify we can construct API URLs from the port mappings
+	apiURL := fmt.Sprintf("http://%s:%d/v1/completions", status.PublicIP, status.Ports[8000])
+	assert.Equal(t, "http://174.94.145.71:30000/v1/completions", apiURL)
 }
 
 // =============================================================================

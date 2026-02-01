@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"context"
+	"log/slog"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -313,6 +315,12 @@ func RecordAPIVerifyFailure() {
 	APIVerifyFailures.Inc()
 }
 
+// RecordProvisioningDuration records how long session provisioning took
+// Bug #57 fix: Add helper function for provisioning duration metric
+func RecordProvisioningDuration(provider string, duration time.Duration) {
+	ProvisioningDuration.WithLabelValues(provider).Observe(duration.Seconds())
+}
+
 // RecordProviderAPIResponseTime records the response time for a provider API call
 func RecordProviderAPIResponseTime(provider, operation string, duration time.Duration) {
 	ProviderAPIResponseTime.WithLabelValues(provider, operation).Observe(duration.Seconds())
@@ -334,4 +342,23 @@ func UpdateProviderCircuitBreakerState(provider string, state int) {
 func RecordHTTPRequest(method, path, status string, duration time.Duration) {
 	HTTPRequestDuration.WithLabelValues(method, path, status).Observe(duration.Seconds())
 	HTTPRequestsTotal.WithLabelValues(method, path, status).Inc()
+}
+
+// SessionCount holds the count of sessions for a provider/status combination
+type SessionCount struct {
+	Provider string
+	Status   string
+	Count    int
+}
+
+// InitializeSessionMetrics populates gauges from database state on startup.
+// This ensures metrics reflect reality before any reconciliation runs,
+// preventing negative gauge values from state transitions.
+func InitializeSessionMetrics(ctx context.Context, counts []SessionCount) error {
+	for _, c := range counts {
+		SessionsActive.WithLabelValues(c.Provider, c.Status).Set(float64(c.Count))
+	}
+	slog.Info("initialized session metrics from database",
+		slog.Int("label_combinations", len(counts)))
+	return nil
 }

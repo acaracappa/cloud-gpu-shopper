@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
@@ -23,4 +24,19 @@ type SessionNotFoundError struct {
 
 func (e *SessionNotFoundError) Error() string {
 	return fmt.Sprintf("session not found: %s", e.ID)
+}
+
+// HardMaxExceededError indicates extension would exceed 12-hour hard max
+type HardMaxExceededError struct {
+	SessionID       string
+	CurrentDuration time.Duration
+	RequestedHours  int
+	HardMaxHours    int
+}
+
+func (e *HardMaxExceededError) Error() string {
+	return fmt.Sprintf(
+		"extension would exceed %d-hour hard max: session %s has been running for %.1f hours, requested %d more hours",
+		e.HardMaxHours, e.SessionID, e.CurrentDuration.Hours(), e.RequestedHours,
+	)
 }

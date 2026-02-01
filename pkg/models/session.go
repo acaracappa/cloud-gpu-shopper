@@ -171,5 +171,6 @@ func (s *Session) IsTerminal() bool {
 type SessionListFilter struct {
 	ConsumerID string
 	Status     SessionStatus
+	Provider   string // Bug #100 fix: Add provider filter
 	Limit      int
 }

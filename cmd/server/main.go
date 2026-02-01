@@ -11,6 +11,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/api"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/config"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/tensordock"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/vastai"
@@ -131,6 +132,26 @@ func main() {
 	server := api.New(invService, provService, lifecycleManager, costTracker,
 		api.WithLogger(logger),
 		api.WithPort(cfg.Server.Port))
+
+	// Initialize metrics from database state BEFORE startup sweep
+	// This ensures gauges reflect reality before any reconciliation runs
+	storageCounts, err := sessionStore.CountSessionsByProviderAndStatus(ctx)
+	if err != nil {
+		logger.Error("failed to query session counts for metrics", slog.String("error", err.Error()))
+		// Continue startup - metrics will be incorrect but service can run
+	} else {
+		metricsCounts := make([]metrics.SessionCount, len(storageCounts))
+		for i, c := range storageCounts {
+			metricsCounts[i] = metrics.SessionCount{
+				Provider: c.Provider,
+				Status:   c.Status,
+				Count:    c.Count,
+			}
+		}
+		if err := metrics.InitializeSessionMetrics(ctx, metricsCounts); err != nil {
+			logger.Error("failed to initialize metrics", slog.String("error", err.Error()))
+		}
+	}
 
 	// Run startup sweep before accepting traffic (if enabled)
 	if cfg.Lifecycle.StartupSweepEnabled {

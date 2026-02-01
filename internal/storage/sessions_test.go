@@ -520,3 +520,88 @@ func TestSessionStore_GetActiveSessionByConsumerAndOffer_DifferentConsumer(t *te
 	require.NoError(t, err)
 	assert.Equal(t, "sess-consumer1", found.ID)
 }
+
+func TestSessionStore_CountSessionsByProviderAndStatus(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Create sessions with various provider/status combinations
+	sessions := []*models.Session{
+		{
+			ID: "sess-count-1", ConsumerID: "c1", Provider: "vastai", OfferID: "o1",
+			GPUType: "RTX4090", GPUCount: 1, Status: models.StatusRunning,
+			WorkloadType: "ml", ReservationHrs: 4, StoragePolicy: "destroy",
+			PricePerHour: 0.5, CreatedAt: now, ExpiresAt: now.Add(4 * time.Hour),
+		},
+		{
+			ID: "sess-count-2", ConsumerID: "c1", Provider: "vastai", OfferID: "o2",
+			GPUType: "RTX4090", GPUCount: 1, Status: models.StatusRunning,
+			WorkloadType: "ml", ReservationHrs: 4, StoragePolicy: "destroy",
+			PricePerHour: 0.5, CreatedAt: now, ExpiresAt: now.Add(4 * time.Hour),
+		},
+		{
+			ID: "sess-count-3", ConsumerID: "c1", Provider: "vastai", OfferID: "o3",
+			GPUType: "RTX4090", GPUCount: 1, Status: models.StatusPending,
+			WorkloadType: "ml", ReservationHrs: 4, StoragePolicy: "destroy",
+			PricePerHour: 0.5, CreatedAt: now, ExpiresAt: now.Add(4 * time.Hour),
+		},
+		{
+			ID: "sess-count-4", ConsumerID: "c1", Provider: "tensordock", OfferID: "o4",
+			GPUType: "A100", GPUCount: 1, Status: models.StatusRunning,
+			WorkloadType: "ml", ReservationHrs: 4, StoragePolicy: "destroy",
+			PricePerHour: 1.5, CreatedAt: now, ExpiresAt: now.Add(4 * time.Hour),
+		},
+		{
+			ID: "sess-count-5", ConsumerID: "c1", Provider: "vastai", OfferID: "o5",
+			GPUType: "RTX4090", GPUCount: 1, Status: models.StatusStopped,
+			WorkloadType: "ml", ReservationHrs: 4, StoragePolicy: "destroy",
+			PricePerHour: 0.5, CreatedAt: now.Add(-time.Hour), ExpiresAt: now, StoppedAt: now,
+		},
+		{
+			ID: "sess-count-6", ConsumerID: "c1", Provider: "vastai", OfferID: "o6",
+			GPUType: "RTX4090", GPUCount: 1, Status: models.StatusFailed,
+			WorkloadType: "ml", ReservationHrs: 4, StoragePolicy: "destroy",
+			PricePerHour: 0.5, CreatedAt: now.Add(-time.Hour), ExpiresAt: now,
+		},
+	}
+
+	for _, s := range sessions {
+		err := store.Create(ctx, s)
+		require.NoError(t, err)
+	}
+
+	// Count should exclude stopped and failed
+	counts, err := store.CountSessionsByProviderAndStatus(ctx)
+	require.NoError(t, err)
+
+	// Build a map for easier verification
+	countMap := make(map[string]int)
+	for _, c := range counts {
+		key := c.Provider + ":" + c.Status
+		countMap[key] = c.Count
+	}
+
+	// vastai:running = 2
+	assert.Equal(t, 2, countMap["vastai:running"])
+	// vastai:pending = 1
+	assert.Equal(t, 1, countMap["vastai:pending"])
+	// tensordock:running = 1
+	assert.Equal(t, 1, countMap["tensordock:running"])
+	// stopped and failed should not be present
+	assert.Equal(t, 0, countMap["vastai:stopped"])
+	assert.Equal(t, 0, countMap["vastai:failed"])
+}
+
+func TestSessionStore_CountSessionsByProviderAndStatus_Empty(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	// No sessions - should return empty slice
+	counts, err := store.CountSessionsByProviderAndStatus(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, counts)
+}

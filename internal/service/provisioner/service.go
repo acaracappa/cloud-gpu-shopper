@@ -64,10 +64,12 @@ const (
 
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
 // This reduces load on providers when instances take a long time to become ready.
+// Bug #21 fix: Added mutex for thread safety
 type ProgressiveBackoff struct {
 	Initial    time.Duration // Initial interval
 	Max        time.Duration // Maximum interval cap
 	Multiplier float64       // Multiplier for each step
+	mu         sync.Mutex    // Protects current
 	current    time.Duration // Current interval
 }
 
@@ -82,7 +84,11 @@ func NewProgressiveBackoff(initial, max time.Duration, multiplier float64) *Prog
 }
 
 // Next returns the current interval and advances to the next one
+// Bug #21 fix: Thread-safe with mutex
 func (pb *ProgressiveBackoff) Next() time.Duration {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
 	current := pb.current
 
 	// Calculate next interval
@@ -96,12 +102,18 @@ func (pb *ProgressiveBackoff) Next() time.Duration {
 }
 
 // Reset resets the backoff to the initial interval
+// Bug #21 fix: Thread-safe with mutex
 func (pb *ProgressiveBackoff) Reset() {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
 	pb.current = pb.Initial
 }
 
 // Current returns the current interval without advancing
+// Bug #21 fix: Thread-safe with mutex
 func (pb *ProgressiveBackoff) Current() time.Duration {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
 	return pb.current
 }
 
@@ -160,6 +172,10 @@ type Service struct {
 
 	// Verification goroutine tracking (for testing)
 	verifyWg sync.WaitGroup
+
+	// Bug #6 fix: Per-session destroy locks to prevent concurrent destroy operations
+	destroyLocks   map[string]*sync.Mutex
+	destroyLocksMu sync.Mutex
 }
 
 // Option configures the provisioner service
@@ -266,6 +282,7 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 		destroyRetries:       DefaultDestroyRetries,
 		sshKeyBits:           DefaultSSHKeyBits,
 		now:                  time.Now,
+		destroyLocks:         make(map[string]*sync.Mutex),
 	}
 
 	for _, opt := range opts {
@@ -346,8 +363,32 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	}
 
 	if err := s.store.Create(ctx, session); err != nil {
+		// Bug #47 fix: Handle race condition where another request created the session
+		// The database unique constraint catches this race at the DB level
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			// Try to find the existing session to return proper error
+			existing, findErr := s.store.GetActiveSessionByConsumerAndOffer(ctx, req.ConsumerID, req.OfferID)
+			if findErr == nil && existing != nil {
+				return nil, &DuplicateSessionError{
+					ConsumerID: req.ConsumerID,
+					OfferID:    req.OfferID,
+					SessionID:  existing.ID,
+					Status:     existing.Status,
+				}
+			}
+			// If we can't find it, still return a duplicate error
+			return nil, &DuplicateSessionError{
+				ConsumerID: req.ConsumerID,
+				OfferID:    req.OfferID,
+			}
+		}
 		return nil, fmt.Errorf("failed to create session record: %w", err)
 	}
+
+	// Bug fix: Increment pending gauge when session is first created.
+	// This ensures the gauge is properly initialized before any status transitions,
+	// preventing the gauge from going negative when transitioning from pending.
+	metrics.UpdateSessionStatus(session.Provider, "", string(models.StatusPending))
 
 	s.logger.Info("session record created",
 		slog.String("session_id", session.ID),
@@ -386,6 +427,8 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 			slog.String("session_id", session.ID),
 			slog.String("error", err.Error()))
 	}
+	// Bug #46 fix: Update metrics BEFORE CreateInstance so failSession can properly decrement
+	metrics.UpdateSessionStatus(session.Provider, string(models.StatusPending), string(models.StatusProvisioning))
 
 	instance, err := prov.CreateInstance(ctx, instanceReq)
 	if err != nil {
@@ -461,7 +504,8 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		"reservation_hours", session.ReservationHrs)
 
 	metrics.RecordSessionCreated(session.Provider)
-	metrics.UpdateSessionStatus(session.Provider, "", string(models.StatusProvisioning))
+	// Note: metrics.UpdateSessionStatus for provisioning is called earlier (before CreateInstance)
+	// to ensure failSession can properly decrement the gauge if CreateInstance fails
 
 	// PHASE 4: Wait for verification (async - don't block API)
 	// The caller can poll session status to check when it's running
@@ -560,6 +604,8 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 
 			s.failSession(ctx, session, "SSH verification timeout")
 			metrics.RecordSSHVerifyFailure()
+			// Bug #94 fix: Record session destroyed when SSH verification times out
+			metrics.RecordSessionDestroyed(session.Provider, "ssh_verify_timeout")
 			return
 
 		case <-pollTimer.C:
@@ -632,13 +678,18 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 						slog.Duration("duration", duration),
 						slog.Int("attempts", attemptCount))
 
+					oldStatus := session.Status
 					session.Status = models.StatusRunning
 					if err := s.store.Update(ctx, session); err != nil {
 						logger.Error("failed to update session to running", slog.String("error", err.Error()))
 					}
 
+					// Bug #46 fix: Update metrics gauge on state transition
+					metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusRunning))
 					metrics.RecordSSHVerifyDuration(session.Provider, duration)
 					metrics.RecordSSHVerifyAttempts(session.Provider, attemptCount)
+					// Bug #57 fix: Record provisioning duration when session becomes running
+					metrics.RecordProvisioningDuration(session.Provider, duration)
 					return
 				}
 
@@ -664,27 +715,63 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 	}
 }
 
+// getDestroyLock returns a per-session mutex for destroy operations
+// Bug #6 fix: Ensures only one destroy operation runs per session
+func (s *Service) getDestroyLock(sessionID string) *sync.Mutex {
+	s.destroyLocksMu.Lock()
+	defer s.destroyLocksMu.Unlock()
+
+	if lock, exists := s.destroyLocks[sessionID]; exists {
+		return lock
+	}
+
+	lock := &sync.Mutex{}
+	s.destroyLocks[sessionID] = lock
+	return lock
+}
+
+// cleanupDestroyLock removes the lock for a session after destroy completes
+func (s *Service) cleanupDestroyLock(sessionID string) {
+	s.destroyLocksMu.Lock()
+	defer s.destroyLocksMu.Unlock()
+	delete(s.destroyLocks, sessionID)
+}
+
 // DestroySession destroys a session with verification
 func (s *Service) DestroySession(ctx context.Context, sessionID string) error {
+	// Bug #6 fix: Acquire per-session lock to prevent concurrent destroy operations
+	lock := s.getDestroyLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	defer s.cleanupDestroyLock(sessionID)
+
 	session, err := s.store.Get(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("session not found: %w", err)
 	}
 
-	if session.IsTerminal() {
-		return nil // Already terminated
+	// Check for terminal OR stopping state (another destroy may have started)
+	if session.IsTerminal() || session.Status == models.StatusStopping {
+		s.logger.Debug("session already terminal or stopping, skipping destroy",
+			slog.String("session_id", sessionID),
+			slog.String("status", string(session.Status)))
+		return nil // Already terminated or being terminated
 	}
 
 	s.logger.Info("destroying session",
 		slog.String("session_id", sessionID),
 		slog.String("provider_id", session.ProviderID))
 
+	// Bug #46 fix: Track old status for metrics update
+	preDestroyStatus := session.Status
 	session.Status = models.StatusStopping
 	if err := s.store.Update(ctx, session); err != nil {
 		s.logger.Error("failed to update session to stopping",
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()))
 	}
+	// Bug #46 fix: Update metrics gauge on state transition to stopping
+	metrics.UpdateSessionStatus(session.Provider, string(preDestroyStatus), string(models.StatusStopping))
 
 	// Get provider
 	prov, err := s.providers.Get(session.Provider)
@@ -743,8 +830,14 @@ func (s *Service) destroyWithVerification(ctx context.Context, session *models.S
 			// Continue to verification - instance might still be gone
 		}
 
-		// Wait before checking status
-		time.Sleep(time.Duration(attempt+1) * 5 * time.Second)
+		// Bug #4 fix: Use select with context to respect cancellation during wait
+		delay := time.Duration(attempt+1) * 5 * time.Second
+		select {
+		case <-time.After(delay):
+			// Continue to verification
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 
 		// Verify destruction
 		status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
@@ -797,6 +890,7 @@ func (s *Service) ListSessions(ctx context.Context, filter models.SessionListFil
 
 // failSession marks a session as failed
 func (s *Service) failSession(ctx context.Context, session *models.Session, reason string) {
+	oldStatus := session.Status
 	session.Status = models.StatusFailed
 	session.Error = reason
 	session.StoppedAt = s.now()
@@ -805,6 +899,9 @@ func (s *Service) failSession(ctx context.Context, session *models.Session, reas
 			slog.String("session_id", session.ID),
 			slog.String("error", err.Error()))
 	}
+
+	// Bug #46 fix: Update metrics gauge on state transition
+	metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusFailed))
 }
 
 // generateSSHKeyPair generates an RSA SSH key pair
@@ -919,6 +1016,8 @@ func (s *Service) waitForAPIVerifyAsync(ctx context.Context, sessionID string, p
 
 			s.failSession(ctx, session, "API verification timeout")
 			metrics.RecordAPIVerifyFailure()
+			// Bug #94 fix: Record session destroyed when API verification times out
+			metrics.RecordSessionDestroyed(session.Provider, "api_verify_timeout")
 			return
 
 		case <-ticker.C:
@@ -973,13 +1072,18 @@ func (s *Service) waitForAPIVerifyAsync(ctx context.Context, sessionID string, p
 					logger.Info("API verification successful",
 						slog.Duration("duration", duration))
 
+					oldStatus := session.Status
 					session.Status = models.StatusRunning
 					session.APIEndpoint = fmt.Sprintf("http://%s:%d", session.SSHHost, session.APIPort)
 					if err := s.store.Update(ctx, session); err != nil {
 						logger.Error("failed to update session to running", slog.String("error", err.Error()))
 					}
 
+					// Bug #46 fix: Update metrics gauge on state transition
+					metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusRunning))
 					metrics.RecordAPIVerifyDuration(session.Provider, duration)
+					// Bug #57 fix: Record provisioning duration when session becomes running
+					metrics.RecordProvisioningDuration(session.Provider, duration)
 					return
 				}
 

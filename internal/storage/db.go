@@ -37,8 +37,11 @@ func New(dbPath string) (*DB, error) {
 	}
 
 	// Set connection pool settings
-	db.SetMaxOpenConns(1) // SQLite doesn't handle concurrent writes well
-	db.SetMaxIdleConns(1)
+	// Bug #5 fix: Increase connection pool to reduce bottleneck
+	// SQLite WAL mode supports concurrent reads with single writer
+	// Multiple read connections + one write connection improves throughput
+	db.SetMaxOpenConns(10) // Allow concurrent reads in WAL mode
+	db.SetMaxIdleConns(5)  // Keep some connections warm
 
 	return &DB{db}, nil
 }

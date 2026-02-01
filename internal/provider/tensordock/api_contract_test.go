@@ -758,7 +758,7 @@ func TestAPIContract_ParseOfferID_ValidFormat(t *testing.T) {
 func TestAPIContract_ParseOfferID_InvalidPrefix(t *testing.T) {
 	_, _, err := parseOfferID("vastai-123-456")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing prefix")
+	assert.Contains(t, err.Error(), "missing required")
 }
 
 func TestAPIContract_ParseOfferID_TooShort(t *testing.T) {

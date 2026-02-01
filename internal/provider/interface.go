@@ -124,6 +124,10 @@ type InstanceStatus struct {
 	SSHHost   string    // SSH host (populated when running)
 	SSHPort   int       // SSH port (populated when running)
 	SSHUser   string    // SSH user (populated when running)
+
+	// Port mappings for HTTP API access (entrypoint mode workloads)
+	PublicIP string         // Public IP address of the instance
+	Ports    map[int]int    // Container port -> external port mapping (e.g., 8000 -> 33526)
 }
 
 // ProviderInstance represents an instance discovered during reconciliation

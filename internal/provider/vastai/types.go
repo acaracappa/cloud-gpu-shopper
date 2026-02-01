@@ -2,6 +2,7 @@ package vastai
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,11 +16,14 @@ const (
 	// Using NVIDIA CUDA Ubuntu 22.04 image - stable and widely supported on Vast.ai
 	ImageSSHBase = "nvidia/cuda:12.2.0-runtime-ubuntu22.04"
 
-	// ImageVLLM is the vLLM inference server image
+	// ImageVLLM is the vLLM inference server image (official)
 	ImageVLLM = "vllm/vllm-openai:latest"
 
 	// ImageTGI is the Text Generation Inference server image
 	ImageTGI = "ghcr.io/huggingface/text-generation-inference:latest"
+
+	// ImageOllama is the Ollama server image
+	ImageOllama = "ollama/ollama:latest"
 )
 
 // Default ports for inference servers
@@ -127,6 +131,13 @@ type InstancesResponse struct {
 	Instances []Instance `json:"instances"`
 }
 
+// PortBinding represents a Docker-style port binding from Vast.ai
+// Example: {"HostIp": "0.0.0.0", "HostPort": "33526"}
+type PortBinding struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
 // Instance represents a Vast.ai instance
 type Instance struct {
 	ID             int    `json:"id"`
@@ -141,6 +152,15 @@ type Instance struct {
 	SSHHost  string `json:"ssh_host"`
 	SSHPort  int    `json:"ssh_port"`
 	PublicIP string `json:"public_ipaddr"`
+
+	// Port mappings - Vast.ai returns Docker-style port bindings
+	// Format: {"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "33526"}]}
+	Ports map[string][]PortBinding `json:"ports"`
+
+	// Direct port info (for machines with open ports)
+	DirectPortCount int `json:"direct_port_count"`
+	DirectPortStart int `json:"direct_port_start"`
+	DirectPortEnd   int `json:"direct_port_end"`
 
 	// GPU info
 	GPUName string  `json:"gpu_name"`
@@ -157,6 +177,10 @@ type Instance struct {
 	// Image
 	ImageUUID    string `json:"image_uuid"`
 	ImageRuntype string `json:"image_runtype"`
+
+	// Jupyter access
+	JupyterURL   string `json:"jupyter_url"`
+	JupyterToken string `json:"jupyter_token"`
 }
 
 // CreateInstanceRequest is the request body for creating an instance
@@ -237,6 +261,50 @@ func BuildVLLMArgs(config *provider.WorkloadConfig) string {
 	return strings.Join(args, " ")
 }
 
+// BuildVLLMEnvVars builds environment variables for vLLM template deployment
+// This is the preferred method for Vast.ai vLLM template which uses VLLM_MODEL and VLLM_ARGS
+func BuildVLLMEnvVars(config *provider.WorkloadConfig) map[string]string {
+	if config == nil || config.ModelID == "" {
+		return nil
+	}
+
+	env := make(map[string]string)
+
+	// Primary env var: model to load
+	env["VLLM_MODEL"] = config.ModelID
+
+	// Build args for VLLM_ARGS env var
+	var args []string
+
+	// GPU memory utilization
+	gpuMemUtil := config.GPUMemoryUtil
+	if gpuMemUtil <= 0 {
+		gpuMemUtil = 0.9
+	}
+	args = append(args, fmt.Sprintf("--gpu-memory-utilization %.2f", gpuMemUtil))
+
+	// Quantization
+	if config.Quantization != "" {
+		args = append(args, fmt.Sprintf("--quantization %s", config.Quantization))
+	}
+
+	// Max model length
+	if config.MaxModelLen > 0 {
+		args = append(args, fmt.Sprintf("--max-model-len %d", config.MaxModelLen))
+	}
+
+	// Tensor parallelism
+	if config.TensorParallel > 1 {
+		args = append(args, fmt.Sprintf("--tensor-parallel-size %d", config.TensorParallel))
+	}
+
+	if len(args) > 0 {
+		env["VLLM_ARGS"] = strings.Join(args, " ")
+	}
+
+	return env
+}
+
 // BuildTGIArgs builds container arguments for Text Generation Inference server
 func BuildTGIArgs(config *provider.WorkloadConfig) string {
 	if config == nil || config.ModelID == "" {
@@ -303,4 +371,60 @@ func FormatPortsString(ports []int) string {
 		portStrs = append(portStrs, fmt.Sprintf("%d/http", p))
 	}
 	return strings.Join(portStrs, ",")
+}
+
+// ParsePortMappings converts Docker-style port bindings to a simple container->external port map
+// Input format: {"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "33526"}]}
+// Output format: map[8000]33526
+func (inst *Instance) ParsePortMappings() map[int]int {
+	if inst.Ports == nil {
+		return nil
+	}
+
+	result := make(map[int]int)
+	for portSpec, bindings := range inst.Ports {
+		if len(bindings) == 0 {
+			continue
+		}
+
+		// Parse container port from "8000/tcp" or "8000/http" format
+		containerPort := parsePortFromSpec(portSpec)
+		if containerPort <= 0 {
+			continue
+		}
+
+		// Get the external port from the first binding
+		externalPort := parsePortNumber(bindings[0].HostPort)
+		if externalPort <= 0 {
+			continue
+		}
+
+		result[containerPort] = externalPort
+	}
+
+	return result
+}
+
+// parsePortFromSpec extracts the port number from a Docker port spec like "8000/tcp"
+func parsePortFromSpec(spec string) int {
+	// Split on "/" to separate port from protocol
+	parts := strings.Split(spec, "/")
+	if len(parts) == 0 {
+		return 0
+	}
+
+	port, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+// parsePortNumber converts a port string to int
+func parsePortNumber(s string) int {
+	port, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return port
 }

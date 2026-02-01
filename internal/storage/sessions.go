@@ -50,6 +50,12 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 	)
 
 	if err != nil {
+		// Bug #47 fix: Detect SQLite UNIQUE constraint violation for duplicate active sessions
+		// This catches races where two requests pass the app-level check simultaneously
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") &&
+			strings.Contains(err.Error(), "idx_sessions_consumer_offer_active") {
+			return ErrAlreadyExists
+		}
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 
@@ -289,8 +295,10 @@ func (s *SessionStore) GetSessionsByStatus(ctx context.Context, statuses ...mode
 
 // List returns sessions matching the filter (implements provisioner.SessionStore interface)
 func (s *SessionStore) List(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error) {
+	// Bug #100 fix: Pass provider filter to internal list function
 	return s.ListInternal(ctx, SessionFilter{
 		ConsumerID: filter.ConsumerID,
+		Provider:   filter.Provider,
 		Status:     filter.Status,
 		Limit:      filter.Limit,
 	})
@@ -312,6 +320,38 @@ func nullTime(t time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: t, Valid: true}
+}
+
+// ProviderStatusCount holds the count of sessions for a provider/status combination
+type ProviderStatusCount struct {
+	Provider string
+	Status   string
+	Count    int
+}
+
+// CountSessionsByProviderAndStatus returns counts of active sessions grouped by provider and status.
+// Only includes sessions that are not stopped or failed (i.e., pending, provisioning, running).
+func (s *SessionStore) CountSessionsByProviderAndStatus(ctx context.Context) ([]ProviderStatusCount, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT provider, status, COUNT(*) as count
+		FROM sessions
+		WHERE status NOT IN ('stopped', 'failed')
+		GROUP BY provider, status
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var counts []ProviderStatusCount
+	for rows.Next() {
+		var c ProviderStatusCount
+		if err := rows.Scan(&c.Provider, &c.Status, &c.Count); err != nil {
+			return nil, fmt.Errorf("failed to scan count: %w", err)
+		}
+		counts = append(counts, c)
+	}
+	return counts, rows.Err()
 }
 
 // GetActiveSessionByConsumerAndOffer returns an active session for the given consumer and offer, if one exists.

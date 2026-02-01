@@ -446,7 +446,12 @@ func TestManager_SignalDone_AlreadyStopped(t *testing.T) {
 	ctx := context.Background()
 	err := m.SignalDone(ctx, "sess-stopped")
 
-	require.NoError(t, err)
+	// Bug #70: SignalDone now returns SessionTerminalError for terminal sessions
+	require.Error(t, err)
+	var terminalErr *SessionTerminalError
+	require.ErrorAs(t, err, &terminalErr)
+	assert.Equal(t, "sess-stopped", terminalErr.ID)
+	assert.Equal(t, models.StatusStopped, terminalErr.Status)
 	assert.Empty(t, destroyer.getDestroyCalls())
 }
 

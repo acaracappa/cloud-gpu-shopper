@@ -14,6 +14,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/storage"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,7 +68,7 @@ func (m *mockSessionStore) Create(ctx context.Context, session *models.Session) 
 func (m *mockSessionStore) Get(ctx context.Context, id string) (*models.Session, error) {
 	s, ok := m.sessions[id]
 	if !ok {
-		return nil, &lifecycle.SessionNotFoundError{ID: id}
+		return nil, storage.ErrNotFound
 	}
 	return s, nil
 }
@@ -342,6 +343,23 @@ func TestListInventoryWithMaxPrice(t *testing.T) {
 	assert.Equal(t, 1, count) // Only RTX4090 at $0.50
 }
 
+func TestListInventoryInvalidProvider(t *testing.T) {
+	// Bug #2: Invalid provider should return 400, not 500
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/inventory?provider=invalid_provider", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var response ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.Contains(t, response.Error, "provider not found")
+}
+
 func TestGetOffer(t *testing.T) {
 	server := setupTestServer()
 
@@ -515,6 +533,22 @@ func TestSessionDone(t *testing.T) {
 	server.Router().ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestSessionDoneNotFound(t *testing.T) {
+	// Bug #1: Non-existent session should return 404, not 500
+	server := setupTestServer()
+
+	req := httptest.NewRequest("POST", "/api/v1/sessions/00000000-0000-0000-0000-000000000000/done", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var response ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.NotEmpty(t, response.Error)
 }
 
 func TestExtendSession(t *testing.T) {

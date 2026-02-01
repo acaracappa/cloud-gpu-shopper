@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
@@ -185,11 +186,14 @@ func (t *Tracker) Stop() {
 		t.mu.Unlock()
 		return
 	}
+	// Bug #53 fix: Capture channel references while holding lock to prevent race with Start()
+	stopCh := t.stopCh
+	doneCh := t.doneCh
 	t.mu.Unlock()
 
 	t.logger.Info("cost tracker stopping")
-	close(t.stopCh)
-	<-t.doneCh
+	close(stopCh)
+	<-doneCh
 
 	t.mu.Lock()
 	t.running = false
@@ -263,6 +267,9 @@ func (t *Tracker) recordCostsForRunningSessions(ctx context.Context) {
 		t.logger.Debug("recorded cost for session",
 			slog.String("session_id", session.ID),
 			slog.Float64("amount", session.PricePerHour))
+
+		// Bug #64 fix: Record cost in Prometheus metrics
+		metrics.RecordCost(session.Provider, session.PricePerHour)
 
 		t.metrics.mu.Lock()
 		t.metrics.CostsRecorded++
@@ -339,6 +346,9 @@ func (t *Tracker) sendAlert(ctx context.Context, consumer *models.Consumer, aler
 		slog.Float64("percentage", percentage*100),
 		slog.Float64("spend", consumer.CurrentSpend),
 		slog.Float64("limit", consumer.BudgetLimit))
+
+	// Bug #64 fix: Record budget alert in Prometheus metrics
+	metrics.RecordBudgetAlert(alertType)
 
 	if alertType == "warning" {
 		t.metrics.mu.Lock()

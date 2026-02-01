@@ -4,12 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/storage"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
@@ -62,6 +66,7 @@ type ExtendSessionRequest struct {
 type ListSessionsQuery struct {
 	ConsumerID string `form:"consumer_id"`
 	Status     string `form:"status"`
+	Provider   string `form:"provider"` // Bug #100 fix: Add provider filter
 	Limit      int    `form:"limit"`
 }
 
@@ -155,42 +160,198 @@ func (s *Server) handleListInventory(c *gin.Context) {
 		Location: c.Query("location"),
 	}
 
+	// Bug #12-14: Validate numeric params - return 400 for invalid values
 	if minVRAM := c.Query("min_vram"); minVRAM != "" {
-		if v, err := strconv.Atoi(minVRAM); err == nil {
-			filter.MinVRAM = v
+		v, err := strconv.Atoi(minVRAM)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_vram: must be a valid integer, got %q", minVRAM),
+				RequestID: c.GetString("request_id"),
+			})
+			return
 		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_vram: must be non-negative, got %d", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinVRAM = v
 	}
 
+	// Bug #12-14: Validate max_price - return 400 for invalid values
 	if maxPrice := c.Query("max_price"); maxPrice != "" {
-		if v, err := strconv.ParseFloat(maxPrice, 64); err == nil {
-			filter.MaxPrice = v
+		v, err := strconv.ParseFloat(maxPrice, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid max_price: must be a valid number, got %q", maxPrice),
+				RequestID: c.GetString("request_id"),
+			})
+			return
 		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid max_price: must be non-negative, got %v", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MaxPrice = v
 	}
 
-	if minGPUCount := c.Query("min_gpu_count"); minGPUCount != "" {
-		if v, err := strconv.Atoi(minGPUCount); err == nil {
-			filter.MinGPUCount = v
+	// Bug #24: Parse and validate gpu_count filter (treats it as min_gpu_count)
+	if gpuCount := c.Query("gpu_count"); gpuCount != "" {
+		v, err := strconv.Atoi(gpuCount)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid gpu_count: must be a valid integer, got %q", gpuCount),
+				RequestID: c.GetString("request_id"),
+			})
+			return
 		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid gpu_count: must be non-negative, got %d", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinGPUCount = v
+	}
+
+	// Also support min_gpu_count parameter
+	if minGPUCount := c.Query("min_gpu_count"); minGPUCount != "" {
+		v, err := strconv.Atoi(minGPUCount)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_gpu_count: must be a valid integer, got %q", minGPUCount),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_gpu_count: must be non-negative, got %d", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinGPUCount = v
+	}
+
+	// Bug #22: Parse and validate min_reliability filter
+	if minReliability := c.Query("min_reliability"); minReliability != "" {
+		v, err := strconv.ParseFloat(minReliability, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_reliability: must be a valid number, got %q", minReliability),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		if v < 0 || v > 1 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_reliability: must be between 0 and 1, got %v", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinReliability = v
 	}
 
 	if minConfidence := c.Query("min_availability_confidence"); minConfidence != "" {
-		if v, err := strconv.ParseFloat(minConfidence, 64); err == nil {
-			filter.MinAvailabilityConfidence = v
+		v, err := strconv.ParseFloat(minConfidence, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_availability_confidence: must be a valid number, got %q", minConfidence),
+				RequestID: c.GetString("request_id"),
+			})
+			return
 		}
+		if v < 0 || v > 1 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_availability_confidence: must be between 0 and 1, got %v", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinAvailabilityConfidence = v
+	}
+
+	// Bug #11, #72: Parse and validate pagination params
+	var limit, offset int
+	if limitStr := c.Query("limit"); limitStr != "" {
+		v, err := strconv.Atoi(limitStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid limit: must be a valid integer, got %q", limitStr),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		// Bug #72: Reject negative or zero limit
+		if v <= 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid limit: must be positive, got %d", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		limit = v
+	}
+
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		v, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid offset: must be a valid integer, got %q", offsetStr),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid offset: must be non-negative, got %d", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		offset = v
 	}
 
 	offers, err := s.inventory.ListOffers(ctx, filter)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
+		// Bug #2 fix: Return 400 for invalid provider, not 500
+		status := http.StatusInternalServerError
+		var providerNotFound *inventory.ProviderNotFoundError
+		if errors.As(err, &providerNotFound) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, ErrorResponse{
 			Error:     err.Error(),
 			RequestID: c.GetString("request_id"),
 		})
 		return
 	}
 
+	// Bug #11: Apply pagination
+	totalCount := len(offers)
+	if offset > 0 {
+		if offset >= len(offers) {
+			offers = []models.GPUOffer{}
+		} else {
+			offers = offers[offset:]
+		}
+	}
+	if limit > 0 && limit < len(offers) {
+		offers = offers[:limit]
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"offers": offers,
 		"count":  len(offers),
+		"total":  totalCount,
 	})
 }
 
@@ -219,8 +380,9 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 
 	var req CreateSessionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		// Bug #9: Sanitize validation errors to use JSON field names
 		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:     err.Error(),
+			Error:     sanitizeValidationError(err),
 			RequestID: c.GetString("request_id"),
 		})
 		return
@@ -323,8 +485,10 @@ func (s *Server) handleListSessions(c *gin.Context) {
 	}
 
 	// Build filter from query parameters
+	// Bug #100 fix: Parse provider query param and add to filter
 	filter := models.SessionListFilter{
 		ConsumerID: query.ConsumerID,
+		Provider:   query.Provider,
 		Limit:      query.Limit,
 	}
 	if query.Status != "" {
@@ -383,7 +547,17 @@ func (s *Server) handleSessionDone(c *gin.Context) {
 	sessionID := c.Param("id")
 
 	if err := s.lifecycle.SignalDone(ctx, sessionID); err != nil {
+		// Bug #1/#70 fix: Return proper HTTP status codes based on error type
 		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		} else {
+			// Bug #70 fix: Return 409 Conflict for terminal sessions
+			var terminalErr *lifecycle.SessionTerminalError
+			if errors.As(err, &terminalErr) {
+				status = http.StatusConflict
+			}
+		}
 		c.JSON(status, ErrorResponse{
 			Error:     err.Error(),
 			RequestID: c.GetString("request_id"),
@@ -403,15 +577,33 @@ func (s *Server) handleExtendSession(c *gin.Context) {
 
 	var req ExtendSessionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		// Bug #9: Sanitize validation errors to use JSON field names
 		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:     err.Error(),
+			Error:     sanitizeValidationError(err),
 			RequestID: c.GetString("request_id"),
 		})
 		return
 	}
 
 	if err := s.lifecycle.ExtendSession(ctx, sessionID, req.AdditionalHours); err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
+		// Bug #16/#18 fix: Return proper HTTP status codes based on error type
+		// Use typed error checking instead of string matching for reliability
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		} else {
+			// Check for terminal/stopping session error (409 Conflict)
+			var terminalErr *lifecycle.SessionTerminalError
+			if errors.As(err, &terminalErr) {
+				status = http.StatusConflict
+			}
+			// Check for hard max exceeded (400 Bad Request)
+			var hardMaxErr *lifecycle.HardMaxExceededError
+			if errors.As(err, &hardMaxErr) {
+				status = http.StatusBadRequest
+			}
+		}
+		c.JSON(status, ErrorResponse{
 			Error:     err.Error(),
 			RequestID: c.GetString("request_id"),
 		})
@@ -478,6 +670,24 @@ func (s *Server) handleGetCosts(c *gin.Context) {
 
 	// If session ID provided, get session cost
 	if params.SessionID != "" {
+		// Bug #49/#75 fix: Check if session exists before returning cost
+		// Return 404 if session_id provided but not found
+		_, err := s.provisioner.GetSession(ctx, params.SessionID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				c.JSON(http.StatusNotFound, ErrorResponse{
+					Error:     fmt.Sprintf("session not found: %s", params.SessionID),
+					RequestID: c.GetString("request_id"),
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error:     err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
 		cost, err := s.costTracker.GetSessionCost(ctx, params.SessionID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, ErrorResponse{
@@ -528,6 +738,20 @@ func (s *Server) handleGetCosts(c *gin.Context) {
 				return
 			}
 		}
+
+		// Bug #10: If no dates specified, default to current month to avoid zero dates
+		if params.StartDate == "" && params.EndDate == "" {
+			now := time.Now()
+			startTime = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+			endTime = startTime.AddDate(0, 1, 0)
+		} else if params.StartDate == "" {
+			// If only end date specified, default start to beginning of that month
+			startTime = time.Date(endTime.Year(), endTime.Month(), 1, 0, 0, 0, 0, endTime.Location())
+		} else if params.EndDate == "" {
+			// If only start date specified, default end to end of that month
+			endTime = time.Date(startTime.Year(), startTime.Month()+1, 1, 0, 0, 0, 0, startTime.Location())
+		}
+
 		summary, err = s.costTracker.GetSummary(ctx, models.CostQuery{
 			ConsumerID: params.ConsumerID,
 			StartTime:  startTime,
@@ -627,5 +851,56 @@ func formatDuration(d time.Duration) string {
 		return strconv.Itoa(hours) + "h " + strconv.Itoa(minutes) + "m"
 	}
 	return strconv.Itoa(minutes) + "m"
+}
+
+// Bug #9: sanitizeValidationError converts internal field names to JSON field names
+// in validation error messages to avoid leaking internal implementation details.
+func sanitizeValidationError(err error) string {
+	var validationErrs validator.ValidationErrors
+	if !errors.As(err, &validationErrs) {
+		return err.Error()
+	}
+
+	var messages []string
+	for _, fe := range validationErrs {
+		// Convert field name to JSON tag name (snake_case)
+		jsonFieldName := toSnakeCase(fe.Field())
+		switch fe.Tag() {
+		case "required":
+			messages = append(messages, fmt.Sprintf("%s is required", jsonFieldName))
+		case "min":
+			messages = append(messages, fmt.Sprintf("%s must be at least %s", jsonFieldName, fe.Param()))
+		case "max":
+			messages = append(messages, fmt.Sprintf("%s must be at most %s", jsonFieldName, fe.Param()))
+		default:
+			messages = append(messages, fmt.Sprintf("%s failed validation (%s)", jsonFieldName, fe.Tag()))
+		}
+	}
+	return strings.Join(messages, "; ")
+}
+
+// toSnakeCase converts a PascalCase or camelCase string to snake_case
+func toSnakeCase(s string) string {
+	// Handle common field name mappings
+	fieldMappings := map[string]string{
+		"ConsumerID":     "consumer_id",
+		"OfferID":        "offer_id",
+		"WorkloadType":   "workload_type",
+		"ReservationHrs": "reservation_hours",
+		"IdleThreshold":  "idle_threshold_minutes",
+		"StoragePolicy":  "storage_policy",
+		"LaunchMode":     "launch_mode",
+		"DockerImage":    "docker_image",
+		"ModelID":        "model_id",
+		"ExposedPorts":   "exposed_ports",
+		"Quantization":   "quantization",
+		"AdditionalHours": "additional_hours",
+	}
+	if mapped, ok := fieldMappings[s]; ok {
+		return mapped
+	}
+	// Fallback: convert PascalCase to snake_case using regex
+	re := regexp.MustCompile("([a-z0-9])([A-Z])")
+	return strings.ToLower(re.ReplaceAllString(s, "${1}_${2}"))
 }
 

@@ -174,22 +174,30 @@ func (r *Reconciler) Stop() {
 		r.mu.Unlock()
 		return
 	}
+	// Bug #3 fix: Capture channel references while holding lock to prevent race with Start()
+	stopCh := r.stopCh
+	doneCh := r.doneCh
 	r.mu.Unlock()
 
 	r.logger.Info("reconciler stopping")
-	close(r.stopCh)
-	<-r.doneCh
-
-	r.mu.Lock()
-	r.running = false
-	r.mu.Unlock()
+	close(stopCh)
+	<-doneCh
+	// Bug #14/16 fix: running flag is now set to false by the run() goroutine
+	// before closing doneCh, similar to Manager.Stop()
 
 	r.logger.Info("reconciler stopped")
 }
 
 // run is the main reconciliation loop
 func (r *Reconciler) run(ctx context.Context) {
-	defer close(r.doneCh)
+	// Bug #14/16 fix: Use defer pattern similar to Manager.run() to ensure
+	// running flag is set to false when exiting due to context cancellation
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		r.mu.Unlock()
+		close(r.doneCh)
+	}()
 
 	ticker := time.NewTicker(r.reconcileInterval)
 	defer ticker.Stop()

@@ -32,13 +32,13 @@ func TestParseOfferID_EdgeCases(t *testing.T) {
 			name:        "empty offer ID",
 			offerID:     "",
 			expectError: true,
-			errorMsg:    "missing prefix",
+			errorMsg:    "missing required",
 		},
 		{
 			name:        "missing tensordock prefix",
 			offerID:     "vastai-loc-123-rtx4090",
 			expectError: true,
-			errorMsg:    "missing prefix",
+			errorMsg:    "missing required",
 		},
 		{
 			name:        "only prefix",

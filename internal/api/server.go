@@ -148,12 +148,15 @@ func (s *Server) setupRouter() {
 // Start starts the HTTP server
 func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
+	// Bug #25 fix: Increase timeouts and connection limits to handle burst traffic
 	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      s.router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:           addr,
+		Handler:        s.router,
+		ReadTimeout:    60 * time.Second,  // Bug #25: Increased from 30s
+		WriteTimeout:   60 * time.Second,  // Bug #25: Increased from 30s
+		IdleTimeout:    120 * time.Second, // Bug #25: Increased from 60s
+		ReadHeaderTimeout: 10 * time.Second, // Bug #25: Add header read timeout
+		MaxHeaderBytes: 1 << 20, // Bug #25: 1MB max header size
 	}
 
 	s.logger.Info("starting API server", slog.String("addr", addr))

@@ -545,3 +545,112 @@ func TestFormatPortsString(t *testing.T) {
 	assert.Equal(t, "8000/http", FormatPortsString([]int{8000}))
 	assert.Equal(t, "8000/http,8080/http", FormatPortsString([]int{8000, 8080}))
 }
+
+func TestInstance_ParsePortMappings(t *testing.T) {
+	tests := []struct {
+		name     string
+		instance Instance
+		expected map[int]int
+	}{
+		{
+			name:     "nil ports",
+			instance: Instance{},
+			expected: nil,
+		},
+		{
+			name: "single TCP port",
+			instance: Instance{
+				Ports: map[string][]PortBinding{
+					"8000/tcp": {{HostIP: "0.0.0.0", HostPort: "33526"}},
+				},
+			},
+			expected: map[int]int{8000: 33526},
+		},
+		{
+			name: "multiple ports",
+			instance: Instance{
+				Ports: map[string][]PortBinding{
+					"8000/tcp":  {{HostIP: "0.0.0.0", HostPort: "33526"}},
+					"8080/http": {{HostIP: "0.0.0.0", HostPort: "44100"}},
+					"22/tcp":    {{HostIP: "0.0.0.0", HostPort: "20544"}},
+				},
+			},
+			expected: map[int]int{8000: 33526, 8080: 44100, 22: 20544},
+		},
+		{
+			name: "empty bindings array",
+			instance: Instance{
+				Ports: map[string][]PortBinding{
+					"8000/tcp": {},
+				},
+			},
+			expected: map[int]int{},
+		},
+		{
+			name: "invalid port spec",
+			instance: Instance{
+				Ports: map[string][]PortBinding{
+					"invalid": {{HostIP: "0.0.0.0", HostPort: "33526"}},
+				},
+			},
+			expected: map[int]int{},
+		},
+		{
+			name: "invalid host port",
+			instance: Instance{
+				Ports: map[string][]PortBinding{
+					"8000/tcp": {{HostIP: "0.0.0.0", HostPort: "invalid"}},
+				},
+			},
+			expected: map[int]int{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.instance.ParsePortMappings()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestClient_GetInstanceStatus_WithPortMappings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Contains(t, r.URL.Path, "/instances/")
+
+		response := map[string]interface{}{
+			"instances": map[string]interface{}{
+				"id":            12345,
+				"actual_status": "running",
+				"ssh_host":      "ssh.vast.ai",
+				"ssh_port":      20544,
+				"public_ipaddr": "65.130.162.74",
+				"start_date":    1706745600.0,
+				"ports": map[string][]map[string]string{
+					"8000/tcp": {{"HostIp": "0.0.0.0", "HostPort": "33526"}},
+					"8080/tcp": {{"HostIp": "0.0.0.0", "HostPort": "44100"}},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+	status, err := client.GetInstanceStatus(context.Background(), "12345")
+
+	require.NoError(t, err)
+	assert.True(t, status.Running)
+	assert.Equal(t, "running", status.Status)
+	assert.Equal(t, "ssh.vast.ai", status.SSHHost)
+	assert.Equal(t, 20544, status.SSHPort)
+	assert.Equal(t, "root", status.SSHUser)
+	assert.Equal(t, "65.130.162.74", status.PublicIP)
+
+	// Verify port mappings are parsed correctly
+	require.NotNil(t, status.Ports)
+	assert.Equal(t, 33526, status.Ports[8000])
+	assert.Equal(t, 44100, status.Ports[8080])
+}

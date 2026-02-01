@@ -1126,10 +1126,13 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 	// Find the actual SSH port from port forwards
 	// TensorDock may assign a different external port than requested
 	sshPort := 22
+	portMappings := make(map[int]int)
 	for _, pf := range result.PortForwards {
+		// Populate all port mappings (internal -> external)
+		portMappings[pf.InternalPort] = pf.ExternalPort
+		// Track SSH port specifically
 		if pf.InternalPort == 22 {
 			sshPort = pf.ExternalPort
-			break
 		}
 	}
 
@@ -1139,6 +1142,9 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 		SSHHost: result.IPAddress,
 		SSHPort: sshPort,
 		SSHUser: "root",
+		// Port mappings for HTTP API access (entrypoint mode workloads)
+		PublicIP: result.IPAddress,
+		Ports:    portMappings,
 	}, nil
 }
 
@@ -1300,18 +1306,35 @@ func (c *Client) handleError(resp *http.Response, operation string) error {
 // parseOfferID extracts location UUID and GPU name from an offer ID.
 // Format: "tensordock-{locationUUID}-{gpuName}"
 // Example: "tensordock-1a779525-4c04-4f2c-aa45-58b47d54bb38-geforcertx3090-pcie-24gb"
+//
+// Bug #61: Improved error messages to help users understand expected format
 func parseOfferID(offerID string) (locationID, gpuName string, err error) {
+	// Bug #61: Trim whitespace and make prefix check case-insensitive
+	offerID = strings.TrimSpace(offerID)
 	prefix := "tensordock-"
-	if !strings.HasPrefix(offerID, prefix) {
-		return "", "", fmt.Errorf("invalid offer ID format (missing prefix): %s", offerID)
+
+	// Check if it looks like a bare UUID (common user error)
+	if !strings.HasPrefix(strings.ToLower(offerID), prefix) {
+		// Check if it's a bare UUID pattern (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+		if len(offerID) == 36 && strings.Count(offerID, "-") == 4 {
+			return "", "", fmt.Errorf("invalid offer ID format: '%s' appears to be a bare UUID. "+
+				"TensorDock offer IDs must be in format 'tensordock-{locationUUID}-{gpuName}'. "+
+				"Use 'gpu-shopper inventory' to get valid offer IDs", offerID)
+		}
+		return "", "", fmt.Errorf("invalid offer ID format: '%s' is missing required 'tensordock-' prefix. "+
+			"Expected format: 'tensordock-{locationUUID}-{gpuName}'. "+
+			"Example: 'tensordock-1a779525-4c04-4f2c-aa45-58b47d54bb38-geforcertx3090-pcie-24gb'", offerID)
 	}
 
-	remainder := strings.TrimPrefix(offerID, prefix)
+	// Use case-insensitive prefix removal
+	remainder := offerID[len(prefix):]
 
 	// UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars)
 	// Need at least 36 (UUID) + 1 (dash) + 1 (GPU name char) = 38 chars
 	if len(remainder) < 38 {
-		return "", "", fmt.Errorf("invalid offer ID format (too short): %s", offerID)
+		return "", "", fmt.Errorf("invalid offer ID format: '%s' is too short. "+
+			"Expected format: 'tensordock-{locationUUID}-{gpuName}'. "+
+			"The location UUID should be 36 characters followed by a GPU name", offerID)
 	}
 
 	locationID = remainder[:36]
@@ -1449,6 +1472,12 @@ func locationGPUToOffer(loc Location, gpu LocationGPU) models.GPUOffer {
 	vram := parseVRAMFromName(gpu.DisplayName)
 	location := fmt.Sprintf("%s, %s, %s", loc.City, loc.StateProvince, loc.Country)
 
+	// Bug #37 fix: Cap reliability to 1.0 in case Tier > 3
+	reliability := float64(loc.Tier) / 3.0
+	if reliability > 1.0 {
+		reliability = 1.0
+	}
+
 	return models.GPUOffer{
 		ID:                     fmt.Sprintf("tensordock-%s-%s", loc.ID, gpu.V0Name),
 		Provider:               "tensordock",
@@ -1458,7 +1487,7 @@ func locationGPUToOffer(loc Location, gpu LocationGPU) models.GPUOffer {
 		VRAM:                   vram,
 		PricePerHour:           gpu.PricePerHr,
 		Location:               location,
-		Reliability:            float64(loc.Tier) / 3.0, // Tier 1-3, normalize to 0-1
+		Reliability:            reliability,
 		Available:              true,
 		MaxDuration:            0, // No maximum duration
 		FetchedAt:              time.Now(),

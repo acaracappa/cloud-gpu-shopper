@@ -47,6 +47,11 @@ type Service struct {
 	cacheTTL        time.Duration
 	backoffTTL      time.Duration
 	providerTimeout time.Duration
+
+	// Bug #19 fix: Track background refresh goroutines for graceful shutdown
+	refreshWg     sync.WaitGroup
+	shutdownCh    chan struct{}
+	shutdownOnce  sync.Once
 }
 
 // providerCache holds cached offers for a single provider
@@ -100,6 +105,7 @@ func New(providers []provider.Provider, opts ...Option) *Service {
 		cacheTTL:        DefaultCacheTTL,
 		backoffTTL:      BackoffCacheTTL,
 		providerTimeout: DefaultProviderTimeout,
+		shutdownCh:      make(chan struct{}), // Bug #19 fix: Initialize shutdown channel
 	}
 
 	for _, opt := range opts {
@@ -240,8 +246,16 @@ func (s *Service) getOffersWithCache(ctx context.Context, p provider.Provider, f
 }
 
 // triggerBackgroundRefresh starts a background goroutine to refresh the cache
+// Bug #19 fix: Track goroutines with WaitGroup and respect shutdown signal
 func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 	providerName := p.Name()
+
+	// Check if shutdown is in progress
+	select {
+	case <-s.shutdownCh:
+		return // Don't start new goroutines during shutdown
+	default:
+	}
 
 	s.mu.Lock()
 	cached, exists := s.cache[providerName]
@@ -254,11 +268,27 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 	}
 	s.mu.Unlock()
 
+	// Bug #19 fix: Track goroutine with WaitGroup
+	s.refreshWg.Add(1)
 	go func() {
+		defer s.refreshWg.Done()
+
 		ctx, cancel := context.WithTimeout(context.Background(), s.providerTimeout)
 		defer cancel()
 
 		s.logger.Debug("background refresh started", slog.String("provider", providerName))
+
+		// Bug #19 fix: Check for shutdown during the refresh
+		select {
+		case <-s.shutdownCh:
+			s.mu.Lock()
+			if cached, exists := s.cache[providerName]; exists {
+				cached.refreshing = false
+			}
+			s.mu.Unlock()
+			return
+		default:
+		}
 
 		offers, err := p.ListOffers(ctx, models.OfferFilter{})
 		now := time.Now()
@@ -401,7 +431,9 @@ func (s *Service) GetOffer(ctx context.Context, offerID string) (*models.GPUOffe
 			for _, offer := range cached.offers {
 				if offer.ID == offerID {
 					s.mu.RUnlock()
-					return &offer, nil
+					// Bug #52 fix: Apply staleness degradation before returning
+					adjusted := s.applyStalenessDegradation(offer)
+					return &adjusted, nil
 				}
 			}
 		}
@@ -416,7 +448,9 @@ func (s *Service) GetOffer(ctx context.Context, offerID string) (*models.GPUOffe
 
 	for _, offer := range allOffers {
 		if offer.ID == offerID {
-			return &offer, nil
+			// Bug #52 fix: Apply staleness degradation before returning
+			adjusted := s.applyStalenessDegradation(offer)
+			return &adjusted, nil
 		}
 	}
 
@@ -486,4 +520,15 @@ func (s *Service) ProviderNames() []string {
 		names[i] = p.Name()
 	}
 	return names
+}
+
+// Shutdown gracefully shuts down the inventory service
+// Bug #19 fix: Signals background refresh goroutines to stop and waits for completion
+func (s *Service) Shutdown() {
+	s.shutdownOnce.Do(func() {
+		s.logger.Info("inventory service shutting down, waiting for background refreshes")
+		close(s.shutdownCh)
+		s.refreshWg.Wait()
+		s.logger.Info("inventory service shutdown complete")
+	})
 }

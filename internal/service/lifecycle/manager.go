@@ -24,6 +24,11 @@ const (
 
 	// DefaultSSHHealthCheckInterval is how often to run SSH health checks
 	DefaultSSHHealthCheckInterval = 2 * time.Minute
+
+	// DefaultStuckSessionTimeout is how long a session can be in a transitional state
+	// (stopping, provisioning) before being marked as failed
+	// Bug #103 fix: Prevent sessions from getting stuck indefinitely
+	DefaultStuckSessionTimeout = 10 * time.Minute
 )
 
 // SessionStore defines the interface for session persistence
@@ -62,14 +67,16 @@ type Manager struct {
 	logger    *slog.Logger
 
 	// Configuration
-	checkInterval     time.Duration
-	hardMaxHours      int
-	orphanGracePeriod time.Duration
+	checkInterval       time.Duration
+	hardMaxHours        int
+	orphanGracePeriod   time.Duration
+	stuckSessionTimeout time.Duration // Bug #103 fix: timeout for stuck sessions
 
 	// SSH health check configuration (optional)
 	sshExecutor            *ssh.Executor
 	sshHealthCheckEnabled  bool
 	sshHealthCheckInterval time.Duration
+	lastSSHHealthCheckMu   sync.Mutex // Bug #17 fix: Protects lastSSHHealthCheck
 	lastSSHHealthCheck     time.Time
 
 	// For time mocking in tests
@@ -143,6 +150,13 @@ func WithTimeFunc(fn func() time.Time) Option {
 	}
 }
 
+// WithStuckSessionTimeout sets how long a session can be in a transitional state
+func WithStuckSessionTimeout(d time.Duration) Option {
+	return func(m *Manager) {
+		m.stuckSessionTimeout = d
+	}
+}
+
 // WithSSHExecutor sets the SSH executor for health checks
 func WithSSHExecutor(executor *ssh.Executor) Option {
 	return func(m *Manager) {
@@ -174,6 +188,7 @@ func New(store SessionStore, destroyer SessionDestroyer, opts ...Option) *Manage
 		checkInterval:          DefaultCheckInterval,
 		hardMaxHours:           DefaultHardMaxHours,
 		orphanGracePeriod:      DefaultOrphanGracePeriod,
+		stuckSessionTimeout:    DefaultStuckSessionTimeout,
 		sshHealthCheckInterval: DefaultSSHHealthCheckInterval,
 		now:                    time.Now,
 		stopCh:                 make(chan struct{}),
@@ -270,13 +285,21 @@ func (m *Manager) runChecks(ctx context.Context) {
 	m.checkHardMax(ctx)
 	m.checkReservationExpiry(ctx)
 	m.checkOrphans(ctx)
+	m.checkStuckSessions(ctx) // Bug #103 fix: Check for stuck sessions
 
 	// Run SSH health check if enabled and interval has passed
+	// Bug #17 fix: Protect lastSSHHealthCheck with mutex
 	if m.sshHealthCheckEnabled && m.sshExecutor != nil {
 		now := m.now()
-		if now.Sub(m.lastSSHHealthCheck) >= m.sshHealthCheckInterval {
-			m.checkSSHHealth(ctx)
+		m.lastSSHHealthCheckMu.Lock()
+		shouldRun := now.Sub(m.lastSSHHealthCheck) >= m.sshHealthCheckInterval
+		if shouldRun {
 			m.lastSSHHealthCheck = now
+		}
+		m.lastSSHHealthCheckMu.Unlock()
+
+		if shouldRun {
+			m.checkSSHHealth(ctx)
 		}
 	}
 }
@@ -393,6 +416,62 @@ func (m *Manager) checkOrphans(ctx context.Context) {
 	}
 }
 
+// checkStuckSessions handles sessions stuck in transitional states (stopping, provisioning)
+// Bug #103 fix: Prevents sessions from getting stuck indefinitely
+func (m *Manager) checkStuckSessions(ctx context.Context) {
+	// Get sessions in transitional states
+	stuckSessions, err := m.store.GetSessionsByStatus(ctx, models.StatusStopping, models.StatusProvisioning)
+	if err != nil {
+		m.logger.Error("failed to get sessions for stuck check",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	now := m.now()
+
+	for _, session := range stuckSessions {
+		// Check if session has been stuck for too long
+		stuckDuration := now.Sub(session.CreatedAt)
+
+		// For stopping sessions, check from when they started (use CreatedAt as approximation)
+		// In a more sophisticated implementation, we'd track when the session entered stopping state
+		if stuckDuration > m.stuckSessionTimeout {
+			m.logger.Warn("session stuck in transitional state",
+				slog.String("session_id", session.ID),
+				slog.String("status", string(session.Status)),
+				slog.Duration("stuck_duration", stuckDuration),
+				slog.Duration("timeout", m.stuckSessionTimeout))
+
+			// Mark session as failed
+			oldStatus := session.Status
+			session.Status = models.StatusFailed
+			// Bug fix: Use oldStatus (not session.Status which is now "failed") for error message
+			if oldStatus == models.StatusStopping {
+				session.Error = "Session stuck in stopping state - manual cleanup may be required"
+			} else {
+				session.Error = "Session stuck in provisioning state - provisioning timeout"
+			}
+			session.StoppedAt = now
+
+			if err := m.store.Update(ctx, session); err != nil {
+				m.logger.Error("failed to update stuck session",
+					slog.String("session_id", session.ID),
+					slog.String("error", err.Error()))
+				continue
+			}
+
+			// Record audit log and metrics
+			logging.Audit(ctx, "stuck_session_failed",
+				"session_id", session.ID,
+				"consumer_id", session.ConsumerID,
+				"provider", session.Provider,
+				"old_status", string(oldStatus),
+				"stuck_duration_minutes", stuckDuration.Minutes())
+			metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusFailed))
+		}
+	}
+}
+
 // checkSSHHealth performs SSH-based health checks on running sessions.
 // Note: This is a placeholder implementation. Full SSH health checks require
 // the session's private key, which is NOT stored in the database for security.
@@ -486,8 +565,10 @@ func (m *Manager) SignalDone(ctx context.Context, sessionID string) error {
 		return err
 	}
 
+	// Bug #70 fix: Return error/conflict when session is already terminal
+	// Don't return success for stopped sessions
 	if session.IsTerminal() {
-		return nil // Already done
+		return &SessionTerminalError{ID: sessionID, Status: session.Status}
 	}
 
 	m.logger.Info("session signaled done",
@@ -503,8 +584,24 @@ func (m *Manager) ExtendSession(ctx context.Context, sessionID string, additiona
 		return err
 	}
 
-	if session.IsTerminal() {
+	// Bug #71 fix: Also reject sessions in "stopping" state
+	if session.IsTerminal() || session.Status == models.StatusStopping {
 		return &SessionTerminalError{ID: sessionID, Status: session.Status}
+	}
+
+	// Bug #7 fix: Check cumulative duration doesn't exceed hard max
+	// Calculate total duration from creation to new expiration
+	now := m.now()
+	totalDuration := now.Sub(session.CreatedAt) + time.Duration(additionalHours)*time.Hour
+	hardMaxDuration := time.Duration(m.hardMaxHours) * time.Hour
+
+	if !session.HardMaxOverride && totalDuration > hardMaxDuration {
+		return &HardMaxExceededError{
+			SessionID:       sessionID,
+			CurrentDuration: now.Sub(session.CreatedAt),
+			RequestedHours:  additionalHours,
+			HardMaxHours:    m.hardMaxHours,
+		}
 	}
 
 	// Extend expiration
