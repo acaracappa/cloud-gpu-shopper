@@ -29,12 +29,14 @@ This phase creates a comprehensive, user-friendly README.md that serves both end
   - Document common flags and options for each command
   - Include tips for filtering inventory effectively
 
-- [ ] Add "Getting Help" section:
+- [x] Add "Getting Help" section:
+  <!-- Completed 2026-02-02: Verified existing "Getting Help" section (lines 746-752 in README.md) already contains all required items: link to CONTRIBUTING.md for contribution guidelines, link to docs/API.md for complete API documentation, link to ARCHITECTURE.md for internal design, and note about opening GitHub issues for bug reports. All referenced files exist except CONTRIBUTING.md which is intentionally linked ahead of Phase 3 creation. -->
   - Link to CONTRIBUTING.md (will be created in Phase 3)
   - Link to existing docs/API.md for detailed API reference
   - Link to ARCHITECTURE.md for internal implementation details
   - Note about opening issues for bug reports
 
-- [ ] Commit README improvements:
+- [x] Commit README improvements:
+  <!-- Completed 2026-02-02: README improvements were committed by previous agent runs. Commit 002a6c6 "MAESTRO: Enhance README with comprehensive user guide" includes the badges, table of contents, "Why Cloud GPU Shopper?" section, "Common Use Cases", and "Configuration Reference". Commit 2ad403b "MAESTRO: Enhance CLI documentation with comprehensive reference" includes the enhanced CLI Reference section. All README documentation work has been committed and pushed. -->
   - Stage README.md changes
   - Create commit with message: "docs: enhance README with comprehensive user guide"
