@@ -8,7 +8,9 @@ Thank you for your interest in contributing to Cloud GPU Shopper! This guide wil
 - [Development Setup](#development-setup)
 - [IDE Recommendations](#ide-recommendations)
 - [Useful Development Commands](#useful-development-commands)
+- [Testing](#testing)
 - [Code Style and Formatting](#code-style-and-formatting)
+- [Pull Request Process](#pull-request-process)
 
 ## Prerequisites
 
@@ -616,3 +618,164 @@ import (
     "github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 ```
+
+## Pull Request Process
+
+This section explains how to contribute code changes to the project.
+
+### Fork and Branch Workflow
+
+1. **Fork the repository** on GitHub to your own account
+2. **Clone your fork** locally:
+   ```bash
+   git clone https://github.com/YOUR-USERNAME/cloud-gpu-shopper.git
+   cd cloud-gpu-shopper
+   git remote add upstream https://github.com/cloud-gpu-shopper/cloud-gpu-shopper.git
+   ```
+3. **Keep your fork updated** before starting new work:
+   ```bash
+   git fetch upstream
+   git checkout main
+   git merge upstream/main
+   ```
+4. **Create a feature branch** from `main`:
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+
+### Branch Naming Conventions
+
+Use descriptive branch names with these prefixes:
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `feature/` | New functionality | `feature/add-lambda-provider` |
+| `fix/` | Bug fixes | `fix/session-timeout-race` |
+| `docs/` | Documentation changes | `docs/api-examples` |
+| `refactor/` | Code refactoring (no behavior change) | `refactor/extract-ssh-client` |
+| `test/` | Test additions or improvements | `test/lifecycle-edge-cases` |
+| `chore/` | Maintenance tasks | `chore/update-dependencies` |
+
+### Commit Message Format
+
+Follow conventional commits style for clear, scannable history:
+
+```
+<type>(<scope>): <short description>
+
+[optional body with more details]
+
+[optional footer with references]
+```
+
+**Types:**
+- `feat`: New feature
+- `fix`: Bug fix
+- `docs`: Documentation only
+- `style`: Formatting (no code change)
+- `refactor`: Code restructuring (no behavior change)
+- `test`: Adding or updating tests
+- `chore`: Maintenance tasks
+
+**Examples:**
+
+```bash
+# Feature
+git commit -m "feat(provider): add Lambda Labs provider support"
+
+# Bug fix with issue reference
+git commit -m "fix(lifecycle): prevent session leak on shutdown
+
+Sessions were not being cleaned up when the server received SIGTERM.
+Added graceful shutdown handler to destroy active instances.
+
+Fixes #42"
+
+# Documentation
+git commit -m "docs(api): add rate limiting examples"
+```
+
+**Guidelines:**
+- Keep the first line under 72 characters
+- Use imperative mood ("add" not "added", "fix" not "fixed")
+- Reference issues when relevant (`Fixes #123`, `Closes #456`)
+
+### PR Description Template
+
+When creating a pull request, include:
+
+```markdown
+## Summary
+
+Brief description of what this PR does and why.
+
+## Changes
+
+- Bullet point list of specific changes
+- Include new files, modified behavior, etc.
+
+## Testing
+
+How you tested these changes:
+- [ ] Unit tests added/updated
+- [ ] E2E tests pass (`go test -tags=e2e ./test/e2e/...`)
+- [ ] Manually tested with [describe scenario]
+
+## Related Issues
+
+Closes #XXX (if applicable)
+
+## Checklist
+
+- [ ] Code follows project style guidelines
+- [ ] Tests pass locally (`go test -race ./...`)
+- [ ] Documentation updated (if applicable)
+- [ ] No sensitive data (API keys, credentials) committed
+```
+
+### Code Review Process
+
+1. **Self-review first**: Before requesting review, check your own PR for:
+   - Code formatting (`go fmt ./...`)
+   - Passing tests (`go test -race ./...`)
+   - No debug code or TODOs that should be addressed
+   - Clear commit messages
+
+2. **Request review**: Assign reviewers or let maintainers triage
+
+3. **Respond to feedback**:
+   - Address all comments (resolve or discuss)
+   - Push new commits rather than force-pushing (preserves review history)
+   - Mark conversations resolved after addressing
+
+4. **Approval requirements**:
+   - At least one maintainer approval required
+   - All automated checks must pass
+   - All conversations resolved
+
+### CI/CD Checks
+
+All pull requests must pass these automated checks:
+
+| Check | Command | Purpose |
+|-------|---------|---------|
+| Build | `go build ./cmd/...` | Ensures code compiles |
+| Unit Tests | `go test ./...` | Runs all unit tests |
+| Race Detection | `go test -race ./...` | Detects race conditions |
+| E2E Tests | `go test -tags=e2e ./test/e2e/...` | Tests API flows |
+| Formatting | `go fmt ./...` | Enforces code style |
+| Vet | `go vet ./...` | Catches common issues |
+
+If a check fails, click on the details link in the GitHub UI to see the error output and fix the issue before requesting review.
+
+### Merge Requirements
+
+Before a PR can be merged:
+
+1. **All CI checks pass** (see above)
+2. **At least one approval** from a maintainer
+3. **No merge conflicts** with the target branch
+4. **All review conversations resolved**
+5. **Branch is up to date** with the target branch
+
+Maintainers will typically use "Squash and merge" to keep the commit history clean. If your PR has multiple meaningful commits that should be preserved, mention this in your PR description.
