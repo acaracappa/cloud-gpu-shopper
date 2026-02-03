@@ -22,7 +22,8 @@ This phase creates a comprehensive, user-friendly README.md that serves both end
   - Add "Configuration Reference" section listing all environment variables with descriptions
   - Add clear section headers and improve navigation with a table of contents
 
-- [ ] Enhance CLI documentation in README:
+- [x] Enhance CLI documentation in README:
+  <!-- Completed 2026-02-02: Completely rewrote CLI Reference section. Added: Global Flags section with GPU_SHOPPER_URL tip; documented all commands (inventory, provision, sessions, shutdown, costs, transfer, cleanup-orphans) with accurate flags matching actual implementation; added realistic example output for each command; added CLI Tips section with filtering, automation patterns, and monitoring examples. Fixed flag names to match code (--gpu not --gpu-type, --min-gpus not --min-gpu-count, etc.) and documented previously missing commands (shutdown, transfer, cleanup-orphans). -->
   - Expand CLI command examples with realistic use cases
   - Add example output snippets for key commands (inventory, provision, sessions)
   - Document common flags and options for each command

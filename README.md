@@ -176,6 +176,22 @@ done
 
 ## CLI Reference
 
+### Global Flags
+
+All commands support these global flags:
+
+```bash
+--server string    GPU Shopper server URL (default: $GPU_SHOPPER_URL or "http://localhost:8080")
+-o, --output string    Output format: "table" or "json" (default: "table")
+```
+
+**Tip:** Set `GPU_SHOPPER_URL` environment variable to avoid passing `--server` repeatedly:
+```bash
+export GPU_SHOPPER_URL=http://gpu-shopper.internal:8080
+```
+
+---
+
 ### inventory
 
 List available GPU offers from all providers.
@@ -184,21 +200,42 @@ List available GPU offers from all providers.
 ./bin/gpu-shopper inventory [flags]
 
 Flags:
-  --provider string      Filter by provider ("vastai", "tensordock")
-  --gpu-type string      Filter by GPU type (e.g., "RTX 4090", "A100")
-  --min-vram int         Minimum VRAM in GB
-  --max-price float      Maximum price per hour in USD
-  --min-gpu-count int    Minimum number of GPUs
-  --json                 Output as JSON
+  -p, --provider string   Filter by provider ("vastai", "tensordock")
+  -g, --gpu string        Filter by GPU type (e.g., "RTX4090", "A100")
+      --min-vram int      Minimum VRAM in GB
+      --max-price float   Maximum price per hour in USD
+      --min-gpus int      Minimum number of GPUs
 ```
 
-Example output:
+**Example: Find cheap RTX 4090s**
+```bash
+$ ./bin/gpu-shopper inventory -g RTX4090 --max-price 0.50
+
+ID              PROVIDER    GPU    COUNT  VRAM   PRICE/HR  LOCATION
+vastai-12345    vastai      RTX4090  1    24GB   $0.42     us-west
+vastai-12346    vastai      RTX4090  1    24GB   $0.45     us-east
+tensordock-789  tensordock  RTX4090  1    24GB   $0.48     eu-west
+
+Total: 3 offers
 ```
-OFFER ID          PROVIDER    GPU TYPE    VRAM   PRICE/HR   LOCATION
-vastai-12345      vastai      RTX 4090    24GB   $0.45      US-West
-vastai-12346      vastai      RTX 4090    24GB   $0.48      US-East
-tensordock-789    tensordock  A100        40GB   $1.20      EU-West
+
+**Example: Find multi-GPU A100 instances**
+```bash
+$ ./bin/gpu-shopper inventory -g A100 --min-gpus 4 --min-vram 40
+
+ID              PROVIDER    GPU    COUNT  VRAM   PRICE/HR  LOCATION
+vastai-99001    vastai      A100     8    80GB   $8.50     us-central
+tensordock-445  tensordock  A100     4    40GB   $4.80     us-east
+
+Total: 2 offers
 ```
+
+**Example: JSON output for scripting**
+```bash
+./bin/gpu-shopper inventory -g RTX4090 -o json | jq '.offers[0].id'
+```
+
+---
 
 ### provision
 
@@ -208,69 +245,354 @@ Provision a new GPU session.
 ./bin/gpu-shopper provision [flags]
 
 Flags:
-  --offer-id string      GPU offer ID to provision (required)
-  --consumer-id string   Identifier for your application (required)
-  --hours int            Reservation duration in hours, 1-12 (required)
-  --workload-type string Workload type: "llm", "training", "batch" (default "llm")
+  -c, --consumer string     Consumer ID - identifies your application (required)
+  -i, --offer string        Specific offer ID to provision
+  -g, --gpu string          GPU type to auto-select cheapest offer (e.g., "RTX4090", "A100")
+  -w, --workload string     Workload type (default: "llm")
+                            Options: llm, llm_vllm, llm_tgi, training, batch, interactive
+  -t, --hours int           Reservation hours, 1-12 (default: 2)
+      --idle-timeout int    Idle timeout in minutes, 0 = disabled (default: 0)
+      --storage string      Storage policy: "destroy" or "preserve" (default: "destroy")
+      --save-key string     Save SSH private key to this file path
 ```
+
+**Note:** Either `--offer` or `--gpu` must be provided. Using `--gpu` auto-selects the cheapest available offer of that GPU type.
+
+**Example: Provision with auto-select**
+```bash
+$ ./bin/gpu-shopper provision -c my-llm-service -g RTX4090 -t 4
+
+Auto-selected offer vastai-12345 (RTX4090, $0.42/hr)
+
+Session provisioned successfully!
+
+Session ID:    sess-abc123
+Provider:      vastai
+GPU Type:      RTX4090
+Status:        provisioning
+Price/Hour:    $0.42
+Expires At:    2026-02-02 18:00:00
+
+SSH Connection:
+  Host: 192.168.1.100
+  Port: 22
+  User: root
+
+SSH Private Key (save this, shown only once):
+---BEGIN---
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAA...
+-----END OPENSSH PRIVATE KEY-----
+---END---
+
+Note: The session is provisioning. Check status with:
+  gpu-shopper sessions get sess-abc123
+```
+
+**Example: Provision with key file saved**
+```bash
+./bin/gpu-shopper provision -c training-job -i tensordock-789 -t 8 \
+  -w training --save-key ~/.ssh/session_key
+chmod 600 ~/.ssh/session_key
+ssh -i ~/.ssh/session_key root@192.168.1.100
+```
+
+**Example: Provision for vLLM inference**
+```bash
+./bin/gpu-shopper provision -c vllm-api -g A100 -w llm_vllm -t 6 --idle-timeout 30
+```
+
+---
 
 ### sessions
 
 Manage active GPU sessions.
 
 ```bash
-# List all sessions
-./bin/gpu-shopper sessions list [--consumer-id string] [--status string]
+./bin/gpu-shopper sessions <subcommand> [flags]
 
-# Get session details
-./bin/gpu-shopper sessions get <session-id>
-
-# Signal work complete (triggers cleanup)
-./bin/gpu-shopper sessions done <session-id>
-
-# Extend a session
-./bin/gpu-shopper sessions extend <session-id> --hours 2
-
-# Force destroy a session
-./bin/gpu-shopper sessions destroy <session-id>
+Subcommands:
+  list      List all sessions
+  get       Get session details
+  done      Signal session completion (graceful shutdown)
+  extend    Extend session reservation
+  delete    Force delete a session
 ```
 
-Example output for `sessions list`:
+**sessions list**
+```bash
+./bin/gpu-shopper sessions list [flags]
+
+Flags:
+  -c, --consumer string   Filter by consumer ID
+  -s, --status string     Filter by status (provisioning, running, stopping, terminated, failed)
 ```
-SESSION ID     CONSUMER      GPU TYPE    STATUS     EXPIRES AT
-sess-abc123    my-app        RTX 4090    running    2026-01-29 14:00:00
-sess-def456    training-1    A100        running    2026-01-29 18:00:00
+
+**Example:**
+```bash
+$ ./bin/gpu-shopper sessions list -c my-app
+
+ID           CONSUMER  PROVIDER    GPU       STATUS   PRICE/HR  EXPIRES
+sess-abc123  my-app    vastai      RTX4090   running  $0.42     2026-02-02 18:00:00
+sess-def456  my-app    tensordock  A100      running  $1.20     2026-02-02 20:00:00
+
+Total: 2 sessions
 ```
+
+**sessions get**
+```bash
+$ ./bin/gpu-shopper sessions get sess-abc123
+
+Session ID:     sess-abc123
+Consumer ID:    my-app
+Provider:       vastai
+GPU Type:       RTX4090
+GPU Count:      1
+Status:         running
+Workload Type:  llm
+Price/Hour:     $0.42
+Created At:     2026-02-02 14:00:00
+Expires At:     2026-02-02 18:00:00
+
+SSH Connection:
+  ssh -p 22 root@192.168.1.100
+```
+
+**sessions done**
+```bash
+$ ./bin/gpu-shopper sessions done sess-abc123
+Session sess-abc123 shutdown initiated.
+```
+
+**sessions extend**
+```bash
+./bin/gpu-shopper sessions extend <session-id> [flags]
+
+Flags:
+  -t, --hours int   Additional hours to extend, 1-12 (default: 1)
+```
+
+**Example:**
+```bash
+$ ./bin/gpu-shopper sessions extend sess-abc123 -t 2
+Session sess-abc123 extended by 2 hours.
+New expiration: 2026-02-02 20:00:00
+```
+
+**sessions delete**
+```bash
+$ ./bin/gpu-shopper sessions delete sess-abc123
+Session sess-abc123 destroyed.
+```
+
+---
+
+### shutdown
+
+Shutdown a GPU session (alternative to `sessions done`).
+
+```bash
+./bin/gpu-shopper shutdown <session-id> [flags]
+
+Flags:
+  -f, --force   Force immediate shutdown (skip graceful termination)
+```
+
+**Example: Graceful shutdown**
+```bash
+$ ./bin/gpu-shopper shutdown sess-abc123
+Session sess-abc123 shutdown initiated.
+The session will terminate gracefully.
+```
+
+**Example: Force shutdown**
+```bash
+$ ./bin/gpu-shopper shutdown sess-abc123 --force
+Session sess-abc123 forcefully destroyed.
+```
+
+---
 
 ### costs
 
-View cost information.
+View cost information and summaries.
 
 ```bash
 ./bin/gpu-shopper costs [flags]
 
 Flags:
-  --consumer-id string   Filter by consumer
-  --session-id string    Get cost for specific session
-
-# Get monthly summary
-./bin/gpu-shopper costs summary [--consumer-id string]
+  -c, --consumer string   Filter by consumer ID
+  -s, --session string    Get cost for specific session
+  -p, --period string     Time period: "daily" or "monthly"
+      --start string      Start date (YYYY-MM-DD)
+      --end string        End date (YYYY-MM-DD)
 ```
 
-Example output:
-```
-COST SUMMARY (my-app)
-Total Cost:      $45.67
-Sessions:        12
-Hours Used:      98.5
+**Example: View all costs**
+```bash
+$ ./bin/gpu-shopper costs
+
+Cost Summary
+============
+
+Total Cost:    $145.67
+Sessions:      28
+Hours Used:    298.5
 
 By Provider:
-  vastai:        $30.00
-  tensordock:    $15.67
+  vastai       $95.00
+  tensordock   $50.67
 
 By GPU Type:
-  RTX 4090:      $25.00
-  A100:          $20.67
+  RTX4090      $85.00
+  A100         $60.67
+```
+
+**Example: Filter by consumer and date range**
+```bash
+./bin/gpu-shopper costs -c my-app --start 2026-01-01 --end 2026-01-31
+```
+
+**costs summary**
+```bash
+./bin/gpu-shopper costs summary [flags]
+
+Flags:
+  -c, --consumer string   Filter by consumer ID
+```
+
+---
+
+### transfer
+
+Transfer files to/from GPU sessions using SFTP.
+
+```bash
+./bin/gpu-shopper transfer <subcommand> [flags]
+
+Subcommands:
+  upload     Upload a file to a session
+  download   Download a file from a session
+
+Flags (all subcommands):
+  -k, --key string       SSH private key file (required)
+  -t, --timeout duration Transfer timeout (default: 5m)
+```
+
+**Example: Upload model weights**
+```bash
+./bin/gpu-shopper transfer upload ./model.bin sess-abc123:/workspace/model.bin \
+  -k ~/.ssh/session_key
+```
+
+**Example: Download training results**
+```bash
+./bin/gpu-shopper transfer download sess-abc123:/workspace/output/checkpoint.pt \
+  ./checkpoint.pt -k ~/.ssh/session_key
+```
+
+---
+
+### cleanup-orphans
+
+Find and destroy orphan GPU instances directly from providers. **Works without the API server.**
+
+This is a safety command for emergency cleanup when instances may have been orphaned due to server issues.
+
+```bash
+./bin/gpu-shopper cleanup-orphans [flags]
+
+Flags:
+      --execute           Actually destroy instances (default is dry-run)
+      --force             Skip confirmation prompt when destroying
+  -p, --provider string   Target specific provider ("vastai", "tensordock")
+```
+
+**Requires environment variables:**
+- `VASTAI_API_KEY` for Vast.ai
+- `TENSORDOCK_AUTH_ID` and `TENSORDOCK_API_TOKEN` for TensorDock
+
+**Example: Dry-run (default)**
+```bash
+$ ./bin/gpu-shopper cleanup-orphans
+
+Scanning for orphan instances...
+
+Checking vastai...
+  Found 2 shopper-managed instances
+Checking tensordock...
+  Found 1 shopper-managed instances
+
+PROVIDER    INSTANCE ID  NAME                  STATUS   PRICE/HR  STARTED
+--------    -----------  ----                  ------   --------  -------
+vastai      12345        gpu-shopper-abc123    running  $0.420    2026-02-02 10:00
+vastai      12346        gpu-shopper-def456    running  $0.450    2026-02-01 22:00
+tensordock  td-789       gpu-shopper-session   running  $1.200    2026-02-02 08:00
+
+Total: 3 instances, $2.070/hr combined cost
+
+This was a dry-run. To actually destroy these instances, run:
+  gpu-shopper cleanup-orphans --execute
+```
+
+**Example: Execute cleanup**
+```bash
+$ ./bin/gpu-shopper cleanup-orphans --execute
+
+Scanning for orphan instances...
+[... table output ...]
+
+WARNING: You are about to destroy 3 instance(s).
+Type 'yes' to confirm: yes
+
+Destroying instances...
+  Destroying vastai/12345... OK
+  Destroying vastai/12346... OK
+  Destroying tensordock/td-789... OK
+
+Cleanup complete: 3 destroyed, 0 failed
+```
+
+**Example: Target single provider with no confirmation**
+```bash
+./bin/gpu-shopper cleanup-orphans -p vastai --execute --force
+```
+
+---
+
+### CLI Tips
+
+**Filtering inventory effectively:**
+```bash
+# Find the absolute cheapest available GPU
+./bin/gpu-shopper inventory --max-price 0.30 -o json | jq -r '.offers[0]'
+
+# Compare prices across providers for same GPU
+./bin/gpu-shopper inventory -g A100 | sort -t'$' -k6 -n
+
+# Find high-VRAM GPUs for large models
+./bin/gpu-shopper inventory --min-vram 48
+```
+
+**Automation patterns:**
+```bash
+# Provision and capture session ID
+SESSION_ID=$(./bin/gpu-shopper provision -c batch-job -g RTX4090 -t 2 -o json | jq -r '.session.id')
+
+# Wait for session to be running
+while [ "$(./bin/gpu-shopper sessions get $SESSION_ID -o json | jq -r '.status')" != "running" ]; do
+  sleep 5
+done
+
+# Run your workload...
+
+# Clean up when done
+./bin/gpu-shopper sessions done $SESSION_ID
+```
+
+**Monitor costs in real-time:**
+```bash
+watch -n 60 './bin/gpu-shopper costs -c my-app'
 ```
 
 ## API Overview
