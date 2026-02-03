@@ -15,7 +15,7 @@ This phase creates a comprehensive CONTRIBUTING.md guide that makes it easy for 
   - IDE recommendations (VS Code with Go extension, GoLand)
   - Useful development commands quick reference
 
-- [ ] Add testing documentation to CONTRIBUTING.md:
+- [x] Add testing documentation to CONTRIBUTING.md:
   - How to run the full test suite (`go test ./...`)
   - How to run tests with race detection (`go test -race ./...`)
   - How to run E2E tests (`go test -tags=e2e ./test/e2e/...`)
@@ -26,6 +26,8 @@ This phase creates a comprehensive CONTRIBUTING.md guide that makes it easy for 
     - Proper cleanup with `t.Cleanup()`
     - Time-injectable services
   - Note about live provider tests (require API keys, use sparingly)
+
+  ✅ Completed: Added comprehensive testing documentation section to CONTRIBUTING.md with all subtasks covered.
 
 - [ ] Add code style and formatting guidelines to CONTRIBUTING.md:
   - Go formatting (`go fmt ./...`)

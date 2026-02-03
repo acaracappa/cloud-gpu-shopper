@@ -213,3 +213,157 @@ cd deploy && docker-compose --profile monitoring up -d
 # View logs
 cd deploy && docker-compose logs -f server
 ```
+
+## Testing
+
+This project maintains high test quality standards. All tests should be race-free, deterministic, and properly isolated.
+
+### Running Tests
+
+```bash
+# Run the full test suite
+go test ./...
+
+# Run tests with race detection (recommended for development)
+go test -race ./...
+
+# Run tests with coverage report
+go test -cover ./...
+
+# Run tests with detailed coverage output
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out  # View in browser
+```
+
+### Running E2E Tests
+
+End-to-end tests use a mock provider and test the full API flow:
+
+```bash
+# Run E2E tests (requires the e2e build tag)
+go test -tags=e2e ./test/e2e/...
+
+# Run E2E tests with verbose output
+go test -tags=e2e -v ./test/e2e/...
+```
+
+The E2E tests automatically set up:
+- An in-process API server
+- A mock provider that simulates Vast.ai behavior
+- A temporary SQLite database
+
+### Live Provider Tests
+
+Live tests run against real GPU providers and **incur actual costs**. Use sparingly and only when necessary:
+
+```bash
+# Run live tests (requires API keys and the live build tag)
+go test -tags=live ./test/live/...
+```
+
+**Requirements for live tests:**
+- `VASTAI_API_KEY` environment variable for Vast.ai tests
+- `TENSORDOCK_AUTH_ID` and `TENSORDOCK_API_TOKEN` for TensorDock tests
+- Budget allocation (tests have spending limits built in)
+
+**Warning:** Live tests provision real GPU instances. Always verify cleanup completed successfully.
+
+### Test Quality Standards
+
+All tests in this project should follow these standards:
+
+#### 1. Race-Free Tests
+
+Tests must pass with race detection enabled:
+
+```bash
+go test -race ./...
+```
+
+- Use proper synchronization (mutexes, channels) for shared state
+- Avoid data races in test setup and assertions
+- All CI runs include race detection
+
+#### 2. Deterministic Tests with `require.Eventually()`
+
+Never use `time.Sleep()` to wait for asynchronous operations. Instead, use `require.Eventually()` from testify:
+
+```go
+// BAD - Non-deterministic, may fail or be slow
+time.Sleep(100 * time.Millisecond)
+assert.Equal(t, expected, getValue())
+
+// GOOD - Deterministic, polls until condition is met
+require.Eventually(t, func() bool {
+    return getValue() == expected
+}, 5*time.Second, 10*time.Millisecond, "value should equal expected")
+```
+
+This approach:
+- Makes tests faster (no fixed waits)
+- Makes tests more reliable (no flaky timeouts)
+- Provides clear failure messages
+
+#### 3. Proper Cleanup with `t.Cleanup()`
+
+Always clean up resources using `t.Cleanup()` to ensure cleanup runs even if tests fail:
+
+```go
+func TestSomething(t *testing.T) {
+    db, err := openTestDatabase()
+    require.NoError(t, err)
+    t.Cleanup(func() {
+        db.Close()
+    })
+
+    server := startTestServer()
+    t.Cleanup(func() {
+        server.Stop()
+    })
+
+    // Test code...
+}
+```
+
+#### 4. Time-Injectable Services
+
+Services that depend on time should accept a time function for deterministic testing:
+
+```go
+// Production code
+type Manager struct {
+    timeFunc func() time.Time
+}
+
+func WithTimeFunc(fn func() time.Time) Option {
+    return func(m *Manager) {
+        m.timeFunc = fn
+    }
+}
+
+// Test code - control time precisely
+baseTime := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+currentTime := baseTime
+
+m := NewManager(
+    WithTimeFunc(func() time.Time { return currentTime }),
+)
+
+// Simulate time progression without waiting
+currentTime = baseTime.Add(2 * time.Hour)
+m.checkExpiry() // Now sees 2 hours elapsed
+```
+
+This pattern is used throughout the codebase (see `internal/service/lifecycle/manager.go` for examples).
+
+### Test Organization
+
+```
+├── internal/
+│   └── */
+│       └── *_test.go      # Unit tests alongside source
+├── test/
+│   ├── e2e/               # End-to-end API tests
+│   ├── live/              # Live provider tests (real instances)
+│   └── mockprovider/      # Mock provider for testing
+```
