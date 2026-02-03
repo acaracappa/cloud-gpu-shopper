@@ -8,6 +8,7 @@ Thank you for your interest in contributing to Cloud GPU Shopper! This guide wil
 - [Development Setup](#development-setup)
 - [IDE Recommendations](#ide-recommendations)
 - [Useful Development Commands](#useful-development-commands)
+- [Code Style and Formatting](#code-style-and-formatting)
 
 ## Prerequisites
 
@@ -366,4 +367,252 @@ This pattern is used throughout the codebase (see `internal/service/lifecycle/ma
 │   ├── e2e/               # End-to-end API tests
 │   ├── live/              # Live provider tests (real instances)
 │   └── mockprovider/      # Mock provider for testing
+```
+
+## Code Style and Formatting
+
+This section covers coding conventions and style guidelines to maintain consistency across the codebase.
+
+### Formatting
+
+All Go code must be formatted with `gofmt`:
+
+```bash
+# Format all files
+go fmt ./...
+
+# Check formatting without modifying files
+gofmt -l .
+```
+
+Configure your IDE to format on save (see [IDE Recommendations](#ide-recommendations)).
+
+### Linting
+
+While no strict linting configuration is enforced, we recommend running basic Go checks:
+
+```bash
+# Run the built-in vet tool for common issues
+go vet ./...
+
+# Check for shadowed variables (optional but recommended)
+go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow@latest
+go vet -vettool=$(which shadow) ./...
+```
+
+If you use `golangci-lint`, a sensible default configuration works well with this project.
+
+### Naming Conventions
+
+Follow existing patterns in the codebase:
+
+#### Packages
+- Use short, lowercase, single-word names (e.g., `provider`, `storage`, `lifecycle`)
+- Avoid generic names like `util` or `common` - be specific (e.g., `filetransfer` instead of `utils`)
+
+#### Types and Interfaces
+- Use PascalCase for exported types: `GPUOffer`, `SessionStatus`, `ProviderFeature`
+- Interface names typically describe behavior: `Provider`, not `IProvider`
+- Error types end with `Error`: `SessionNotFoundError`, `StaleInventoryError`
+
+#### Functions and Methods
+- Use descriptive names: `CreateInstance`, `GetInstanceStatus`, `IsRetryable`
+- Boolean functions often start with `Is`, `Has`, `Can`, `Should`: `IsExpired()`, `IsOurs()`, `ShouldRetryWithDifferentOffer()`
+- Constructors use `New` prefix: `NewProviderError`, `NewManager`
+
+#### Constants
+- Exported constants use PascalCase: `FeatureIdleDetection`, `LaunchModeSSH`
+- Group related constants together with a type when appropriate
+
+#### Variables
+- Use camelCase for local variables: `sessionID`, `pricePerHour`
+- Exported variables use PascalCase: `ErrNotFound`, `DefaultTimeout`
+
+### Error Handling
+
+This project uses structured error handling. Follow these patterns:
+
+#### Sentinel Errors
+
+Define package-level sentinel errors for common cases:
+
+```go
+// Package-level errors in errors.go or at the top of the main file
+var (
+    ErrNotFound      = errors.New("record not found")
+    ErrAlreadyExists = errors.New("record already exists")
+)
+```
+
+#### Custom Error Types
+
+For errors that need context, create structured error types:
+
+```go
+// SessionNotFoundError indicates the requested session doesn't exist
+type SessionNotFoundError struct {
+    ID string
+}
+
+func (e *SessionNotFoundError) Error() string {
+    return fmt.Sprintf("session not found: %s", e.ID)
+}
+```
+
+#### Error Wrapping
+
+Use `fmt.Errorf` with `%w` to wrap errors, preserving the chain:
+
+```go
+if err := db.Save(session); err != nil {
+    return fmt.Errorf("saving session %s: %w", session.ID, err)
+}
+```
+
+#### Error Checking
+
+Use `errors.Is()` and `errors.As()` for error inspection:
+
+```go
+// Check for sentinel errors
+if errors.Is(err, ErrNotFound) {
+    return nil, http.StatusNotFound
+}
+
+// Check for error types
+var staleErr *StaleInventoryError
+if errors.As(err, &staleErr) {
+    // Handle stale inventory specifically
+}
+```
+
+#### Error Helper Functions
+
+Create `Is*` helper functions for common error checks:
+
+```go
+// IsRetryable checks if the error is retryable
+func IsRetryable(err error) bool {
+    if IsRateLimitError(err) {
+        return true
+    }
+    var pe *ProviderError
+    if errors.As(err, &pe) {
+        return pe.StatusCode >= 500 && pe.StatusCode < 600
+    }
+    return false
+}
+```
+
+### Logging
+
+Use the `internal/logging` package for consistent structured logging:
+
+```go
+import "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
+
+// Use context-aware logging functions
+logging.Info(ctx, "session created", "session_id", sessionID, "consumer_id", consumerID)
+logging.Error(ctx, "failed to provision", "error", err, "offer_id", offerID)
+logging.Debug(ctx, "cache hit", "key", cacheKey)
+logging.Warn(ctx, "rate limit approaching", "remaining", remaining)
+```
+
+#### Logging Guidelines
+
+1. **Use structured logging**: Pass key-value pairs, not formatted strings
+   ```go
+   // GOOD
+   logging.Info(ctx, "session started", "session_id", s.ID, "duration", duration)
+
+   // AVOID
+   logging.Info(ctx, fmt.Sprintf("session %s started for %v", s.ID, duration))
+   ```
+
+2. **Include context**: Always pass `ctx` to enable request ID correlation
+
+3. **Log at appropriate levels**:
+   - `Debug`: Development-time details, verbose diagnostics
+   - `Info`: Normal operations, state changes, key events
+   - `Warn`: Degraded but functioning (rate limits, retries)
+   - `Error`: Operation failures, unexpected errors
+
+4. **Use audit logging** for security-relevant events:
+   ```go
+   logging.Audit(ctx, "instance_destroyed", "session_id", sessionID, "provider", provider)
+   ```
+
+### Comment Guidelines
+
+#### When to Comment
+
+- **Exported items**: All exported types, functions, constants, and variables need doc comments
+- **Complex logic**: Explain non-obvious algorithms or business rules
+- **TODOs**: Use `// TODO:` for planned improvements
+- **Bug references**: Use `// Bug #123 fix:` when fixing specific issues
+
+#### Comment Style
+
+```go
+// GPUOffer represents an available GPU instance from a provider.
+// Offers are refreshed periodically and may become unavailable.
+type GPUOffer struct {
+    ID          string
+    Provider    string
+    PricePerHour float64
+}
+
+// CreateSession provisions a new GPU session for the given consumer.
+// It returns the session details and SSH private key for access.
+// Returns StaleInventoryError if the offer is no longer available.
+func (s *Service) CreateSession(ctx context.Context, req CreateRequest) (*Session, error) {
+    // Validate consumer has budget remaining
+    if err := s.validateBudget(ctx, req.ConsumerID); err != nil {
+        return nil, err
+    }
+
+    // TODO: Add support for multiple simultaneous sessions per consumer
+    ...
+}
+```
+
+#### Avoid Unnecessary Comments
+
+```go
+// AVOID - comment restates the obvious
+// Increment counter by 1
+counter++
+
+// GOOD - no comment needed for self-explanatory code
+counter++
+```
+
+### Code Organization
+
+#### File Structure
+
+- Keep files focused on a single responsibility
+- Place interfaces in their own file or at the top of the primary implementation file
+- Group related types together
+- Put error definitions in `errors.go` files
+
+#### Import Ordering
+
+Organize imports in three groups, separated by blank lines:
+
+```go
+import (
+    // Standard library
+    "context"
+    "errors"
+    "fmt"
+
+    // Third-party packages
+    "github.com/gin-gonic/gin"
+    "github.com/stretchr/testify/require"
+
+    // Project packages
+    "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
+    "github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
+)
 ```

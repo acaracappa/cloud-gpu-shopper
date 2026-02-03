@@ -29,13 +29,22 @@ This phase creates a comprehensive CONTRIBUTING.md guide that makes it easy for 
 
   ✅ Completed: Added comprehensive testing documentation section to CONTRIBUTING.md with all subtasks covered.
 
-- [ ] Add code style and formatting guidelines to CONTRIBUTING.md:
+- [x] Add code style and formatting guidelines to CONTRIBUTING.md:
   - Go formatting (`go fmt ./...`)
   - Linting recommendations (`golangci-lint` if used)
   - Naming conventions (follow existing patterns in codebase)
   - Error handling patterns (check existing code for examples)
   - Logging patterns (reference internal/logging package)
   - Comment guidelines (when and how to document code)
+
+  ✅ Completed: Added comprehensive code style and formatting section to CONTRIBUTING.md covering:
+     - Formatting with `go fmt` and IDE integration
+     - Linting with `go vet` and optional `golangci-lint`
+     - Naming conventions (packages, types, functions, constants, variables)
+     - Error handling patterns (sentinel errors, custom types, wrapping, helper functions)
+     - Logging patterns using `internal/logging` package with structured logging
+     - Comment guidelines (when to comment, style, avoiding unnecessary comments)
+     - Code organization (file structure, import ordering)
 
 - [ ] Add pull request process to CONTRIBUTING.md:
   - Fork and branch workflow
