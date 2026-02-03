@@ -11,6 +11,7 @@ Thank you for your interest in contributing to Cloud GPU Shopper! This guide wil
 - [Testing](#testing)
 - [Code Style and Formatting](#code-style-and-formatting)
 - [Pull Request Process](#pull-request-process)
+- [Issue Reporting Guidelines](#issue-reporting-guidelines)
 
 ## Prerequisites
 
@@ -779,3 +780,155 @@ Before a PR can be merged:
 5. **Branch is up to date** with the target branch
 
 Maintainers will typically use "Squash and merge" to keep the commit history clean. If your PR has multiple meaningful commits that should be preserved, mention this in your PR description.
+
+## Issue Reporting Guidelines
+
+Good issue reports help us understand and resolve problems quickly. This section covers how to report bugs, request features, and report security vulnerabilities.
+
+### Bug Reports
+
+When reporting a bug, please include as much detail as possible:
+
+**Required Information:**
+
+1. **Summary**: A clear, concise description of the bug
+2. **Steps to Reproduce**: Numbered steps to reproduce the issue
+   ```
+   1. Start the server with `go run ./cmd/server`
+   2. Make a request to `/api/v1/sessions` with payload {...}
+   3. Wait for the session to expire
+   4. Observe error in logs
+   ```
+3. **Expected Behavior**: What you expected to happen
+4. **Actual Behavior**: What actually happened (include error messages)
+
+**Helpful Additional Information:**
+
+- Go version (`go version`)
+- Operating system and version
+- Relevant environment variables (redact API keys!)
+- Log output with `DEBUG` level enabled
+- Provider being used (Vast.ai, TensorDock, or both)
+
+**Bug Report Template:**
+
+```markdown
+## Bug Report
+
+### Summary
+[Brief description of the issue]
+
+### Steps to Reproduce
+1. [First step]
+2. [Second step]
+3. [And so on...]
+
+### Expected Behavior
+[What you expected to happen]
+
+### Actual Behavior
+[What actually happened]
+
+### Error Output
+```
+[Paste any error messages or stack traces]
+```
+
+### Environment
+- Go version:
+- OS:
+- Provider(s):
+
+### Additional Context
+[Any other relevant information]
+```
+
+### Feature Requests
+
+We welcome feature requests! When proposing a new feature:
+
+1. **Search existing issues** first to avoid duplicates
+2. **Explain the use case**: Why do you need this feature? What problem does it solve?
+3. **Describe the proposed solution**: How do you envision it working?
+4. **Consider alternatives**: Have you considered other approaches?
+
+**Feature Request Template:**
+
+```markdown
+## Feature Request
+
+### Problem Statement
+[Describe the problem or limitation you're facing]
+
+### Proposed Solution
+[Describe your proposed feature or enhancement]
+
+### Alternatives Considered
+[List any alternative solutions you've considered]
+
+### Additional Context
+[Any other relevant information, mockups, or examples]
+```
+
+**Note:** Feature requests are evaluated based on:
+- Alignment with the project's "menu, not middleman" philosophy
+- Benefit to the broader user base
+- Implementation complexity and maintenance burden
+- Compatibility with existing architecture
+
+### Security Vulnerability Reporting
+
+**⚠️ IMPORTANT: Do not report security vulnerabilities through public GitHub issues.**
+
+If you discover a security vulnerability, please follow responsible disclosure:
+
+1. **Email the maintainers directly** at [security contact - check repository for current contact]
+2. **Include in your report:**
+   - Description of the vulnerability
+   - Steps to reproduce
+   - Potential impact
+   - Any suggested fixes (optional)
+
+3. **Wait for acknowledgment** before disclosing publicly
+4. **Allow reasonable time** for the issue to be patched
+
+**What qualifies as a security vulnerability:**
+- Authentication or authorization bypasses
+- Credential leakage (API keys, SSH keys)
+- SQL injection or command injection
+- Unauthorized access to other users' sessions
+- Denial of service vulnerabilities
+- Information disclosure of sensitive data
+
+**What is NOT a security vulnerability:**
+- Theoretical attacks without proof of concept
+- Issues requiring physical access to the server
+- Self-inflicted damage (e.g., deleting your own sessions)
+- Issues in dependencies (report these to the upstream project)
+
+### Issue Labels
+
+Understanding issue labels helps you find relevant issues and understand the triage process:
+
+| Label | Description |
+|-------|-------------|
+| `bug` | Confirmed bugs that need fixing |
+| `enhancement` | Feature requests and improvements |
+| `documentation` | Documentation improvements needed |
+| `good first issue` | Suitable for new contributors |
+| `help wanted` | Extra attention needed |
+| `provider:vastai` | Related to Vast.ai provider |
+| `provider:tensordock` | Related to TensorDock provider |
+| `priority:high` | Critical issues needing immediate attention |
+| `priority:low` | Nice-to-have, can be addressed later |
+| `wontfix` | Issue will not be addressed (see comments for reason) |
+| `duplicate` | This issue already exists |
+
+### Tips for Effective Issues
+
+1. **One issue per report**: Don't combine multiple bugs or features
+2. **Be specific**: Vague issues are hard to act on
+3. **Check existing issues**: Search before creating new ones
+4. **Stay engaged**: Respond to follow-up questions
+5. **Test with latest version**: Ensure the issue exists in the current codebase
+6. **Provide context**: Include what you were trying to accomplish

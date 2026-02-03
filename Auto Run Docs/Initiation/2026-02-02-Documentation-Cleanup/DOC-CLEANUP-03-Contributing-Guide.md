@@ -64,11 +64,18 @@ This phase creates a comprehensive CONTRIBUTING.md guide that makes it easy for 
      - CI/CD checks table (Build, Unit Tests, Race Detection, E2E Tests, Formatting, Vet)
      - Merge requirements checklist
 
-- [ ] Add issue reporting guidelines to CONTRIBUTING.md:
+- [x] Add issue reporting guidelines to CONTRIBUTING.md:
   - Bug report template suggestions (steps to reproduce, expected vs actual)
   - Feature request guidance
   - Security vulnerability reporting process
   - Label explanations if applicable
+
+  ✅ Completed: Added comprehensive issue reporting guidelines section to CONTRIBUTING.md covering:
+     - Bug report section with required information, helpful additional details, and a complete template
+     - Feature request guidance with template and evaluation criteria
+     - Security vulnerability reporting process with responsible disclosure guidelines
+     - Issue label explanations table (bug, enhancement, documentation, good first issue, provider-specific, priority levels)
+     - Tips for effective issue reporting
 
 - [ ] Commit contributing guide:
   - Stage CONTRIBUTING.md
