@@ -24,15 +24,15 @@ const (
 
 // ValidationResult contains the result of a validation check
 type ValidationResult struct {
-	Type       ValidationType    `json:"type"`
-	Success    bool              `json:"success"`
-	Duration   time.Duration     `json:"duration"`
-	Message    string            `json:"message,omitempty"`
-	Error      string            `json:"error,omitempty"`
-	Details    map[string]string `json:"details,omitempty"`
-	SessionID  string            `json:"session_id"`
-	Provider   string            `json:"provider"`
-	Timestamp  time.Time         `json:"timestamp"`
+	Type      ValidationType    `json:"type"`
+	Success   bool              `json:"success"`
+	Duration  time.Duration     `json:"duration"`
+	Message   string            `json:"message,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Details   map[string]string `json:"details,omitempty"`
+	SessionID string            `json:"session_id"`
+	Provider  string            `json:"provider"`
+	Timestamp time.Time         `json:"timestamp"`
 }
 
 // ValidationTask represents a validation task for the QA agent
@@ -50,11 +50,11 @@ type ValidationTask struct {
 
 // QAConfig configures the QA agent behavior
 type QAConfig struct {
-	SSHTimeout        time.Duration
-	HTTPTimeout       time.Duration
-	ModelTimeout      time.Duration
-	RetryInterval     time.Duration
-	MaxRetries        int
+	SSHTimeout    time.Duration
+	HTTPTimeout   time.Duration
+	ModelTimeout  time.Duration
+	RetryInterval time.Duration
+	MaxRetries    int
 }
 
 // DefaultQAConfig returns default QA agent configuration
@@ -280,8 +280,8 @@ func (qa *QAAgent) ValidateLLMEndpoint(ctx context.Context, task ValidationTask)
 
 	// Simple test prompt
 	testReq := map[string]interface{}{
-		"prompt":     "Hello, my name is",
-		"max_tokens": 10,
+		"prompt":      "Hello, my name is",
+		"max_tokens":  10,
 		"temperature": 0.1,
 	}
 

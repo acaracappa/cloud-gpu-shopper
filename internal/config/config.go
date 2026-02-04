@@ -53,8 +53,9 @@ type TensorDockConfig struct {
 
 // InventoryConfig holds inventory cache configuration
 type InventoryConfig struct {
-	DefaultCacheTTL time.Duration `mapstructure:"default_cache_ttl"`
-	BackoffCacheTTL time.Duration `mapstructure:"backoff_cache_ttl"`
+	DefaultCacheTTL   time.Duration `mapstructure:"default_cache_ttl"`
+	BackoffCacheTTL   time.Duration `mapstructure:"backoff_cache_ttl"`
+	TensorDockCacheTTL time.Duration `mapstructure:"tensordock_cache_ttl"` // Shorter TTL for volatile TensorDock inventory
 }
 
 // LifecycleConfig holds lifecycle management configuration
@@ -157,6 +158,7 @@ func setDefaults(v *viper.Viper) {
 	// Inventory defaults
 	v.SetDefault("inventory.default_cache_ttl", time.Minute)
 	v.SetDefault("inventory.backoff_cache_ttl", 5*time.Minute)
+	v.SetDefault("inventory.tensordock_cache_ttl", 30*time.Second) // Shorter TTL for volatile TensorDock inventory
 
 	// Lifecycle defaults
 	v.SetDefault("lifecycle.check_interval", time.Minute)

@@ -555,3 +555,64 @@ func TestService_FilterByMinGPUCount(t *testing.T) {
 		assert.GreaterOrEqual(t, o.GPUCount, 4)
 	}
 }
+
+func TestService_ProviderSpecificCacheTTL(t *testing.T) {
+	// Test that provider-specific TTLs work correctly
+	// TensorDock should have a shorter TTL than the default
+
+	vastaiOffers := []models.GPUOffer{
+		{ID: "vastai-1", Provider: "vastai", GPUType: "RTX4090", PricePerHour: 0.50, Available: true},
+	}
+	tensordockOffers := []models.GPUOffer{
+		{ID: "tensordock-1", Provider: "tensordock", GPUType: "RTX3090", PricePerHour: 0.30, Available: true},
+	}
+
+	vastaiProvider := &mockProvider{name: "vastai", offers: vastaiOffers}
+	tensordockProvider := &mockProvider{name: "tensordock", offers: tensordockOffers}
+
+	// Set default TTL to 200ms and TensorDock-specific TTL to 50ms
+	svc := New(
+		[]provider.Provider{vastaiProvider, tensordockProvider},
+		WithLogger(newTestLogger()),
+		WithCacheTTL(200*time.Millisecond),
+		WithProviderCacheTTL("tensordock", 50*time.Millisecond),
+	)
+
+	ctx := context.Background()
+
+	// First fetch - both providers called
+	_, err := svc.ListOffers(ctx, models.OfferFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), vastaiProvider.callCount.Load())
+	assert.Equal(t, int32(1), tensordockProvider.callCount.Load())
+
+	// Wait for TensorDock cache to expire but not vastai
+	time.Sleep(75 * time.Millisecond)
+
+	// Second fetch - only TensorDock should be refreshed (its cache expired)
+	_, err = svc.ListOffers(ctx, models.OfferFilter{})
+	require.NoError(t, err)
+
+	// TensorDock cache should have expired and triggered a refresh
+	// Vastai cache should still be valid
+	assert.Equal(t, int32(1), vastaiProvider.callCount.Load(), "vastai should still be cached")
+	assert.Equal(t, int32(2), tensordockProvider.callCount.Load(), "tensordock cache should have expired")
+}
+
+func TestService_GetCacheTTL(t *testing.T) {
+	p := &mockProvider{name: "vastai", offers: nil}
+	svc := New(
+		[]provider.Provider{p},
+		WithCacheTTL(time.Minute),
+		WithProviderCacheTTL("tensordock", 30*time.Second),
+	)
+
+	// Default TTL for unknown provider
+	assert.Equal(t, time.Minute, svc.getCacheTTL("vastai"))
+
+	// Provider-specific TTL
+	assert.Equal(t, 30*time.Second, svc.getCacheTTL("tensordock"))
+
+	// Unknown provider falls back to default
+	assert.Equal(t, time.Minute, svc.getCacheTTL("unknown"))
+}

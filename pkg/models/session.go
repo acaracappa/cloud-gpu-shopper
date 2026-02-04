@@ -18,12 +18,12 @@ const (
 type WorkloadType string
 
 const (
-	WorkloadLLM         WorkloadType = "llm"          // LLM inference hosting (generic)
-	WorkloadLLMVLLM     WorkloadType = "llm_vllm"     // LLM inference via vLLM
-	WorkloadLLMTGI      WorkloadType = "llm_tgi"      // LLM inference via TGI
-	WorkloadTraining    WorkloadType = "training"     // ML model training
-	WorkloadBatch       WorkloadType = "batch"        // Batch processing job
-	WorkloadInteractive WorkloadType = "interactive"  // Interactive SSH session
+	WorkloadLLM         WorkloadType = "llm"         // LLM inference hosting (generic)
+	WorkloadLLMVLLM     WorkloadType = "llm_vllm"    // LLM inference via vLLM
+	WorkloadLLMTGI      WorkloadType = "llm_tgi"     // LLM inference via TGI
+	WorkloadTraining    WorkloadType = "training"    // ML model training
+	WorkloadBatch       WorkloadType = "batch"       // Batch processing job
+	WorkloadInteractive WorkloadType = "interactive" // Interactive SSH session
 )
 
 // LaunchMode determines how the instance is configured
@@ -70,9 +70,16 @@ type Session struct {
 
 	// Workload configuration (entrypoint mode)
 	DockerImage  string `json:"docker_image,omitempty"`
-	ModelID      string `json:"model_id,omitempty"`      // HuggingFace model ID
+	ModelID      string `json:"model_id,omitempty"`     // HuggingFace model ID
 	Quantization string `json:"quantization,omitempty"` // Quantization method
 	ExposedPorts []int  `json:"exposed_ports,omitempty"`
+
+	// Template-based provisioning (Vast.ai)
+	TemplateHashID string `json:"template_hash_id,omitempty"` // Vast.ai template hash_id
+	TemplateName   string `json:"template_name,omitempty"`    // Template name for display
+
+	// Storage configuration
+	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
 
 	// Configuration
 	WorkloadType    WorkloadType  `json:"workload_type"`
@@ -105,6 +112,13 @@ type CreateSessionRequest struct {
 	ModelID      string     `json:"model_id,omitempty"`      // HuggingFace model ID
 	ExposedPorts []int      `json:"exposed_ports,omitempty"` // Ports to expose (e.g., 8000)
 	Quantization string     `json:"quantization,omitempty"`  // Quantization method
+
+	// Template-based provisioning (Vast.ai)
+	// If TemplateHashID is set, use the template instead of building config from DockerImage
+	TemplateHashID string `json:"template_hash_id,omitempty"` // Vast.ai template hash_id
+
+	// Storage configuration
+	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
 }
 
 // SessionResponse is the API response for a session (hides sensitive fields after creation)
@@ -123,6 +137,9 @@ type SessionResponse struct {
 	APIEndpoint    string        `json:"api_endpoint,omitempty"`
 	APIPort        int           `json:"api_port,omitempty"`
 	ModelID        string        `json:"model_id,omitempty"`
+	TemplateHashID string        `json:"template_hash_id,omitempty"` // Vast.ai template used
+	TemplateName   string        `json:"template_name,omitempty"`    // Template name for display
+	DiskGB         int           `json:"disk_gb,omitempty"`          // Disk space in GB
 	WorkloadType   WorkloadType  `json:"workload_type"`
 	ReservationHrs int           `json:"reservation_hours"`
 	PricePerHour   float64       `json:"price_per_hour"`
@@ -147,6 +164,9 @@ func (s *Session) ToResponse() SessionResponse {
 		APIEndpoint:    s.APIEndpoint,
 		APIPort:        s.APIPort,
 		ModelID:        s.ModelID,
+		TemplateHashID: s.TemplateHashID,
+		TemplateName:   s.TemplateName,
+		DiskGB:         s.DiskGB,
 		WorkloadType:   s.WorkloadType,
 		ReservationHrs: s.ReservationHrs,
 		PricePerHour:   s.PricePerHour,

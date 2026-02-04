@@ -160,6 +160,90 @@ Get a specific offer by ID.
 **Errors**
 - `404 Not Found` - Offer not found
 
+### GET /api/v1/inventory/:id/compatible-templates
+
+Get templates compatible with a specific offer (Vast.ai only).
+
+**Response**
+```json
+{
+  "offer_id": "vastai-12345",
+  "compatible_templates": [
+    {
+      "hash_id": "a8a44c7363cbca20056020397e3bf072",
+      "name": "Ollama",
+      "image": "vastai/ollama",
+      "recommended_disk_space": 32
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
+## Templates (Vast.ai Only)
+
+Templates are pre-configured Docker images with optimized settings for specific workloads. They simplify provisioning by bundling image, environment variables, and startup commands.
+
+### GET /api/v1/templates
+
+List available templates.
+
+**Query Parameters**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| name | string | Filter by template name (case-insensitive partial match) |
+
+**Response**
+```json
+{
+  "templates": [
+    {
+      "id": 338630,
+      "hash_id": "a8a44c7363cbca20056020397e3bf072",
+      "name": "Ollama",
+      "image": "vastai/ollama",
+      "tag": "0.15.4",
+      "env": "-p 1111:1111 -p 21434:21434 -e OLLAMA_MODEL=qwen3:14b ...",
+      "onstart": "entrypoint.sh",
+      "runtype": "jupyter",
+      "use_ssh": true,
+      "ssh_direct": true,
+      "recommended": true,
+      "recommended_disk_space": 32,
+      "extra_filters": "{\"cpu_arch\": {\"in\": [\"arm64\", \"amd64\"]}}",
+      "creator_id": 62897,
+      "created_at": "2026-02-02T13:27:28-05:00",
+      "count_created": 302
+    }
+  ],
+  "count": 1
+}
+```
+
+### GET /api/v1/templates/:hash_id
+
+Get a specific template by hash ID.
+
+**Response**
+```json
+{
+  "id": 338630,
+  "hash_id": "a8a44c7363cbca20056020397e3bf072",
+  "name": "Ollama",
+  "image": "vastai/ollama",
+  "tag": "0.15.4",
+  "runtype": "jupyter",
+  "use_ssh": true,
+  "recommended": true,
+  "recommended_disk_space": 32
+}
+```
+
+**Errors**
+- `404 Not Found` - Template not found
+
 ---
 
 ## Sessions
@@ -176,7 +260,9 @@ Create a new GPU session.
   "workload_type": "llm",
   "reservation_hours": 2,
   "idle_threshold_minutes": 30,
-  "storage_policy": "destroy"
+  "storage_policy": "destroy",
+  "disk_gb": 100,
+  "template_hash_id": "a8a44c7363cbca20056020397e3bf072"
 }
 ```
 
@@ -193,6 +279,8 @@ Create a new GPU session.
 | model_id | string | No | HuggingFace model ID (for vLLM/TGI workloads) |
 | exposed_ports | array | No | Ports to expose (e.g., [8000]) |
 | quantization | string | No | Quantization method (e.g., "awq", "gptq") |
+| disk_gb | int | No | Disk space in GB (default: 50). Cannot be changed after instance creation. |
+| template_hash_id | string | No | Vast.ai template hash ID. When provided, uses the template's image, env vars, and startup commands. SSH access is always enabled. |
 
 **Response** (201 Created)
 ```json
@@ -210,6 +298,7 @@ Create a new GPU session.
     "workload_type": "llm",
     "reservation_hours": 2,
     "price_per_hour": 0.45,
+    "disk_gb": 100,
     "created_at": "2026-01-29T12:00:00Z",
     "expires_at": "2026-01-29T14:00:00Z"
   },
@@ -218,6 +307,12 @@ Create a new GPU session.
 ```
 
 **Note**: `ssh_private_key` is only returned once at creation. Poll the session status until it transitions to "running" (SSH verification complete) before connecting.
+
+**Disk Allocation Notes**:
+- Default disk size is 50GB if `disk_gb` is not specified
+- Disk size cannot be changed after instance creation (Vast.ai limitation)
+- For large models, allocate sufficient disk space (e.g., DeepSeek-V2.5 236B requires ~132GB)
+- Vast.ai templates include a `recommended_disk_space` field that can guide allocation
 
 ### GET /api/v1/sessions
 

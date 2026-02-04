@@ -11,7 +11,7 @@ services:
     environment:
       - DATABASE_PATH=/app/data/gpu-shopper.db
       - VASTAI_API_KEY=${VASTAI_API_KEY:-}
-      - TENSORDOCK_API_KEY=${TENSORDOCK_API_KEY:-}
+      - TENSORDOCK_API_TOKEN=${TENSORDOCK_API_TOKEN:-}
       - TENSORDOCK_AUTH_ID=${TENSORDOCK_AUTH_ID:-}
       - LOG_LEVEL=info
     volumes:

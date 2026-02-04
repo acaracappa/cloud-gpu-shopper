@@ -116,16 +116,16 @@ func TestParseOfferID_EdgeCases(t *testing.T) {
 
 func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 	tests := []struct {
-		name       string
-		serverFunc func(w http.ResponseWriter, r *http.Request)
-		expectErr  bool
+		name        string
+		serverFunc  func(w http.ResponseWriter, r *http.Request)
+		expectErr   bool
 		errContains string
 	}{
 		{
 			name: "connection refused",
 			// Using a server that closes immediately
-			serverFunc: nil, // Will use closed server
-			expectErr:  true,
+			serverFunc:  nil, // Will use closed server
+			expectErr:   true,
 			errContains: "request failed",
 		},
 		{
@@ -134,7 +134,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusInternalServerError)
 				w.Write([]byte("Internal Server Error"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 500",
 		},
 		{
@@ -143,7 +143,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusBadGateway)
 				w.Write([]byte("<html>Bad Gateway</html>"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 502",
 		},
 		{
@@ -152,7 +152,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				w.Write([]byte("Service Temporarily Unavailable"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 503",
 		},
 		{
@@ -161,7 +161,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusTooManyRequests)
 				w.Write([]byte("Rate limit exceeded"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "rate limit",
 		},
 		{
@@ -170,7 +170,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Invalid API credentials"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 401",
 		},
 		{
@@ -179,7 +179,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte("Access denied"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 403",
 		},
 	}
@@ -265,63 +265,63 @@ func TestClient_ListOffers_ContextCancelled(t *testing.T) {
 
 func TestClient_ListOffers_InvalidJSON(t *testing.T) {
 	tests := []struct {
-		name     string
-		response string
+		name      string
+		response  string
 		expectErr bool
 	}{
 		{
-			name:     "empty response body",
-			response: "",
+			name:      "empty response body",
+			response:  "",
 			expectErr: true,
 		},
 		{
-			name:     "null response",
-			response: "null",
+			name:      "null response",
+			response:  "null",
 			expectErr: false, // json.Unmarshal handles null
 		},
 		{
-			name:     "malformed JSON",
-			response: "{invalid json}",
+			name:      "malformed JSON",
+			response:  "{invalid json}",
 			expectErr: true,
 		},
 		{
-			name:     "truncated JSON",
-			response: `{"data": {"locations": [{"id": "123"`,
+			name:      "truncated JSON",
+			response:  `{"data": {"locations": [{"id": "123"`,
 			expectErr: true,
 		},
 		{
-			name:     "HTML instead of JSON",
-			response: `<!DOCTYPE html><html><body>Error</body></html>`,
+			name:      "HTML instead of JSON",
+			response:  `<!DOCTYPE html><html><body>Error</body></html>`,
 			expectErr: true,
 		},
 		{
-			name:     "plain text error",
-			response: `Error: something went wrong`,
+			name:      "plain text error",
+			response:  `Error: something went wrong`,
 			expectErr: true,
 		},
 		{
-			name:     "wrong structure - array instead of object",
-			response: `["item1", "item2"]`,
+			name:      "wrong structure - array instead of object",
+			response:  `["item1", "item2"]`,
 			expectErr: true,
 		},
 		{
-			name:     "empty data object",
-			response: `{"data": {}}`,
+			name:      "empty data object",
+			response:  `{"data": {}}`,
 			expectErr: false, // Valid structure, just empty
 		},
 		{
-			name:     "null locations array",
-			response: `{"data": {"locations": null}}`,
+			name:      "null locations array",
+			response:  `{"data": {"locations": null}}`,
 			expectErr: false, // Should handle gracefully
 		},
 		{
-			name:     "wrong type for locations",
-			response: `{"data": {"locations": "not an array"}}`,
+			name:      "wrong type for locations",
+			response:  `{"data": {"locations": "not an array"}}`,
 			expectErr: true,
 		},
 		{
-			name:     "mixed valid/invalid location entries",
-			response: `{"data": {"locations": [{"id": "valid"}, null, {"id": "also-valid"}]}}`,
+			name:      "mixed valid/invalid location entries",
+			response:  `{"data": {"locations": [{"id": "valid"}, null, {"id": "also-valid"}]}}`,
 			expectErr: false, // Go's JSON decoder handles null entries gracefully
 		},
 	}
@@ -424,18 +424,18 @@ func TestClient_CreateInstance_APIErrors(t *testing.T) {
 			isStale:     true,
 		},
 		{
-			name:        "resource unavailable (stale inventory)",
-			statusCode:  http.StatusOK,
-			response:    `{"status": 400, "error": "Resource unavailable"}`,
-			expectErr:   true,
-			isStale:     true,
+			name:       "resource unavailable (stale inventory)",
+			statusCode: http.StatusOK,
+			response:   `{"status": 400, "error": "Resource unavailable"}`,
+			expectErr:  true,
+			isStale:    true,
 		},
 		{
-			name:        "out of stock (stale inventory)",
-			statusCode:  http.StatusOK,
-			response:    `{"status": 400, "error": "GPU model is out of stock"}`,
-			expectErr:   true,
-			isStale:     true,
+			name:       "out of stock (stale inventory)",
+			statusCode: http.StatusOK,
+			response:   `{"status": 400, "error": "GPU model is out of stock"}`,
+			expectErr:  true,
+			isStale:    true,
 		},
 		{
 			name:        "HTTP 200 with error in body",
@@ -580,12 +580,12 @@ func TestClient_CreateInstance_RequestValidation(t *testing.T) {
 
 func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name        string
-		instanceID  string
-		statusCode  int
-		response    string
-		expectErr   bool
-		errContains string
+		name            string
+		instanceID      string
+		statusCode      int
+		response        string
+		expectErr       bool
+		errContains     string
 		expectedSSHPort int
 	}{
 		{
@@ -597,27 +597,27 @@ func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 			errContains: "",
 		},
 		{
-			name:        "no port forwards defaults to port 22",
-			instanceID:  "inst-123",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-123", "status": "running", "ipAddress": "1.2.3.4", "portForwards": []}`,
-			expectErr:   false,
+			name:            "no port forwards defaults to port 22",
+			instanceID:      "inst-123",
+			statusCode:      http.StatusOK,
+			response:        `{"id": "inst-123", "status": "running", "ipAddress": "1.2.3.4", "portForwards": []}`,
+			expectErr:       false,
 			expectedSSHPort: 22,
 		},
 		{
-			name:        "dynamic SSH port assignment",
-			instanceID:  "inst-456",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-456", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 22, "external_port": 20456}]}`,
-			expectErr:   false,
+			name:            "dynamic SSH port assignment",
+			instanceID:      "inst-456",
+			statusCode:      http.StatusOK,
+			response:        `{"id": "inst-456", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 22, "external_port": 20456}]}`,
+			expectErr:       false,
 			expectedSSHPort: 20456,
 		},
 		{
-			name:        "no IP address yet (still provisioning)",
-			instanceID:  "inst-789",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-789", "status": "creating", "ipAddress": "", "portForwards": []}`,
-			expectErr:   false,
+			name:       "no IP address yet (still provisioning)",
+			instanceID: "inst-789",
+			statusCode: http.StatusOK,
+			response:   `{"id": "inst-789", "status": "creating", "ipAddress": "", "portForwards": []}`,
+			expectErr:  false,
 		},
 		{
 			name:        "invalid JSON response",
@@ -628,11 +628,11 @@ func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 			errContains: "decode",
 		},
 		{
-			name:        "multiple port forwards - finds SSH",
-			instanceID:  "inst-multi",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-multi", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 80, "external_port": 8080}, {"internal_port": 22, "external_port": 2222}]}`,
-			expectErr:   false,
+			name:            "multiple port forwards - finds SSH",
+			instanceID:      "inst-multi",
+			statusCode:      http.StatusOK,
+			response:        `{"id": "inst-multi", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 80, "external_port": 8080}, {"internal_port": 22, "external_port": 2222}]}`,
+			expectErr:       false,
 			expectedSSHPort: 2222,
 		},
 	}
@@ -677,46 +677,46 @@ func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 
 func TestClient_DestroyInstance_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name        string
-		instanceID  string
-		statusCode  int
-		response    string
-		expectErr   bool
+		name       string
+		instanceID string
+		statusCode int
+		response   string
+		expectErr  bool
 	}{
 		{
-			name:        "already deleted (404) is success",
-			instanceID:  "deleted-inst",
-			statusCode:  http.StatusNotFound,
-			response:    `{"error": "Instance not found"}`,
-			expectErr:   false, // 404 is treated as success
+			name:       "already deleted (404) is success",
+			instanceID: "deleted-inst",
+			statusCode: http.StatusNotFound,
+			response:   `{"error": "Instance not found"}`,
+			expectErr:  false, // 404 is treated as success
 		},
 		{
-			name:        "successful deletion",
-			instanceID:  "inst-123",
-			statusCode:  http.StatusOK,
-			response:    `{}`,
-			expectErr:   false,
+			name:       "successful deletion",
+			instanceID: "inst-123",
+			statusCode: http.StatusOK,
+			response:   `{}`,
+			expectErr:  false,
 		},
 		{
-			name:        "no content response",
-			instanceID:  "inst-456",
-			statusCode:  http.StatusNoContent,
-			response:    ``,
-			expectErr:   false,
+			name:       "no content response",
+			instanceID: "inst-456",
+			statusCode: http.StatusNoContent,
+			response:   ``,
+			expectErr:  false,
 		},
 		{
-			name:        "server error",
-			instanceID:  "inst-789",
-			statusCode:  http.StatusInternalServerError,
-			response:    `{"error": "Internal error"}`,
-			expectErr:   true,
+			name:       "server error",
+			instanceID: "inst-789",
+			statusCode: http.StatusInternalServerError,
+			response:   `{"error": "Internal error"}`,
+			expectErr:  true,
 		},
 		{
-			name:        "rate limited",
-			instanceID:  "inst-rate",
-			statusCode:  http.StatusTooManyRequests,
-			response:    `{"error": "Rate limit exceeded"}`,
-			expectErr:   true,
+			name:       "rate limited",
+			instanceID: "inst-rate",
+			statusCode: http.StatusTooManyRequests,
+			response:   `{"error": "Rate limit exceeded"}`,
+			expectErr:  true,
 		},
 	}
 
@@ -751,11 +751,11 @@ func TestClient_DestroyInstance_EdgeCases(t *testing.T) {
 
 func TestClient_ListAllInstances_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name           string
-		statusCode     int
-		response       string
-		expectErr      bool
-		expectedCount  int
+		name          string
+		statusCode    int
+		response      string
+		expectErr     bool
+		expectedCount int
 	}{
 		{
 			name:          "empty array format",
@@ -786,10 +786,10 @@ func TestClient_ListAllInstances_EdgeCases(t *testing.T) {
 			expectedCount: 2,
 		},
 		{
-			name:          "unauthorized returns error",
-			statusCode:    http.StatusUnauthorized,
-			response:      `{"error": "Invalid credentials"}`,
-			expectErr:     true,
+			name:       "unauthorized returns error",
+			statusCode: http.StatusUnauthorized,
+			response:   `{"error": "Invalid credentials"}`,
+			expectErr:  true,
 		},
 		{
 			name:          "server error returns empty list",
@@ -799,10 +799,10 @@ func TestClient_ListAllInstances_EdgeCases(t *testing.T) {
 			expectedCount: 0, // Non-401 errors return empty list
 		},
 		{
-			name:          "invalid JSON array in data",
-			statusCode:    http.StatusOK,
-			response:      `{"data": "not an array or object"}`,
-			expectErr:     true,
+			name:       "invalid JSON array in data",
+			statusCode: http.StatusOK,
+			response:   `{"data": "not an array or object"}`,
+			expectErr:  true,
 		},
 	}
 
@@ -1015,18 +1015,14 @@ func TestBuildSSHKeyCloudInit(t *testing.T) {
 			cloudInit := buildSSHKeyCloudInit(tt.sshKey)
 
 			assert.NotNil(t, cloudInit)
-			assert.Len(t, cloudInit.RunCmd, 5)
 
-			// Verify directory creation
-			assert.Equal(t, "mkdir -p /root/.ssh", cloudInit.RunCmd[0])
-			assert.Equal(t, "chmod 700 /root/.ssh", cloudInit.RunCmd[1])
+			// New implementation uses only runcmd (no write_files)
+			assert.Nil(t, cloudInit.WriteFiles)
 
-			// Verify base64 encoding command is present
-			assert.Contains(t, cloudInit.RunCmd[2], "base64 -d")
-
-			// Verify permissions
-			assert.Equal(t, "chmod 600 /root/.ssh/authorized_keys", cloudInit.RunCmd[3])
-			assert.Equal(t, "chown -R root:root /root/.ssh", cloudInit.RunCmd[4])
+			// Verify runcmd has all commands for both root and user
+			assert.Len(t, cloudInit.RunCmd, 11)
+			assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
+			assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
 		})
 	}
 }
@@ -1044,10 +1040,10 @@ func TestNormalizeGPUName_EdgeCases(t *testing.T) {
 		{"   ", ""},
 		// TrimPrefix + TrimSpace behavior: TrimSpace happens first, then prefix removal
 		// "NVIDIA " -> TrimSpace -> "NVIDIA" -> no prefix match (prefix is "NVIDIA " with space)
-		{"NVIDIA ", "NVIDIA"},                                  // TrimSpace removes trailing, doesn't match "NVIDIA "
-		{"NVIDIA   ", "NVIDIA"},                                // Same - after TrimSpace becomes "NVIDIA"
-		{"GeForce ", "GeForce"},                                // Same logic
-		{"Tesla   ", "Tesla"},                                  // Same logic
+		{"NVIDIA ", "NVIDIA"},   // TrimSpace removes trailing, doesn't match "NVIDIA "
+		{"NVIDIA   ", "NVIDIA"}, // Same - after TrimSpace becomes "NVIDIA"
+		{"GeForce ", "GeForce"}, // Same logic
+		{"Tesla   ", "Tesla"},   // Same logic
 		{"NVIDIA GeForce RTX 4090 PCIe 24GB", "RTX 4090"},
 		{"  NVIDIA GeForce RTX 4090 PCIe 24GB  ", "RTX 4090"},
 		{"Unknown GPU Model", "Unknown GPU Model"},
@@ -1071,8 +1067,8 @@ func TestParseVRAMFromName_EdgeCases(t *testing.T) {
 		{"No VRAM info", 0},
 		{"24GB", 24},
 		{"24 GB", 24},
-		{"24gb", 24},  // Case-insensitive: gb is valid
-		{"24 Gb", 24}, // Case-insensitive: Gb is valid
+		{"24gb", 24},                   // Case-insensitive: gb is valid
+		{"24 Gb", 24},                  // Case-insensitive: Gb is valid
 		{"Multiple 24GB and 48GB", 24}, // Returns first match
 		{"0GB", 0},
 		{"1024GB", 1024},

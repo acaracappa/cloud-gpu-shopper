@@ -57,9 +57,9 @@ func (e *DuplicateSessionError) Error() string {
 // This suggests the offer appeared available but was not actually available.
 // Callers should consider retrying with a different offer.
 type StaleInventoryError struct {
-	OfferID      string
-	Provider     string
-	OriginalErr  error
+	OfferID     string
+	Provider    string
+	OriginalErr error
 }
 
 func (e *StaleInventoryError) Error() string {

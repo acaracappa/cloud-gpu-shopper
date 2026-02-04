@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
@@ -49,6 +50,20 @@ type CreateSessionRequest struct {
 	ModelID      string `json:"model_id,omitempty"`      // HuggingFace model ID
 	ExposedPorts []int  `json:"exposed_ports,omitempty"` // Ports to expose (e.g., 8000)
 	Quantization string `json:"quantization,omitempty"`  // Quantization method
+
+	// Template-based provisioning (Vast.ai)
+	TemplateHashID string `json:"template_hash_id,omitempty"` // Vast.ai template hash_id
+
+	// Storage configuration
+	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
+}
+
+// ListTemplatesQuery defines query parameters for listing templates
+type ListTemplatesQuery struct {
+	Recommended bool   `form:"recommended"`
+	UseSSH      bool   `form:"use_ssh"`
+	Name        string `form:"name"`
+	Image       string `form:"image"`
 }
 
 // CreateSessionResponse is the response after creating a session
@@ -81,22 +96,22 @@ type CostQueryParams struct {
 
 // SessionDiagnosticsResponse contains diagnostic information for a session
 type SessionDiagnosticsResponse struct {
-	SessionID    string                 `json:"session_id"`
-	Status       models.SessionStatus   `json:"status"`
-	Provider     string                 `json:"provider"`
-	GPUType      string                 `json:"gpu_type"`
-	GPUCount     int                    `json:"gpu_count"`
-	SSHHost      string                 `json:"ssh_host,omitempty"`
-	SSHPort      int                    `json:"ssh_port,omitempty"`
-	SSHUser      string                 `json:"ssh_user,omitempty"`
-	LaunchMode   string                 `json:"launch_mode,omitempty"`
-	APIEndpoint  string                 `json:"api_endpoint,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	ExpiresAt    time.Time              `json:"expires_at"`
-	Uptime       string                 `json:"uptime"`
-	TimeToExpiry string                 `json:"time_to_expiry"`
-	SSHAvailable bool                   `json:"ssh_available"`
-	Note         string                 `json:"note"`
+	SessionID    string               `json:"session_id"`
+	Status       models.SessionStatus `json:"status"`
+	Provider     string               `json:"provider"`
+	GPUType      string               `json:"gpu_type"`
+	GPUCount     int                  `json:"gpu_count"`
+	SSHHost      string               `json:"ssh_host,omitempty"`
+	SSHPort      int                  `json:"ssh_port,omitempty"`
+	SSHUser      string               `json:"ssh_user,omitempty"`
+	LaunchMode   string               `json:"launch_mode,omitempty"`
+	APIEndpoint  string               `json:"api_endpoint,omitempty"`
+	CreatedAt    time.Time            `json:"created_at"`
+	ExpiresAt    time.Time            `json:"expires_at"`
+	Uptime       string               `json:"uptime"`
+	TimeToExpiry string               `json:"time_to_expiry"`
+	SSHAvailable bool                 `json:"ssh_available"`
+	Note         string               `json:"note"`
 }
 
 // Handlers
@@ -429,6 +444,8 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		ModelID:        req.ModelID,
 		ExposedPorts:   req.ExposedPorts,
 		Quantization:   req.Quantization,
+		TemplateHashID: req.TemplateHashID,
+		DiskGB:         req.DiskGB,
 	}
 
 	session, err := s.provisioner.CreateSession(ctx, createReq, offer)
@@ -883,17 +900,17 @@ func sanitizeValidationError(err error) string {
 func toSnakeCase(s string) string {
 	// Handle common field name mappings
 	fieldMappings := map[string]string{
-		"ConsumerID":     "consumer_id",
-		"OfferID":        "offer_id",
-		"WorkloadType":   "workload_type",
-		"ReservationHrs": "reservation_hours",
-		"IdleThreshold":  "idle_threshold_minutes",
-		"StoragePolicy":  "storage_policy",
-		"LaunchMode":     "launch_mode",
-		"DockerImage":    "docker_image",
-		"ModelID":        "model_id",
-		"ExposedPorts":   "exposed_ports",
-		"Quantization":   "quantization",
+		"ConsumerID":      "consumer_id",
+		"OfferID":         "offer_id",
+		"WorkloadType":    "workload_type",
+		"ReservationHrs":  "reservation_hours",
+		"IdleThreshold":   "idle_threshold_minutes",
+		"StoragePolicy":   "storage_policy",
+		"LaunchMode":      "launch_mode",
+		"DockerImage":     "docker_image",
+		"ModelID":         "model_id",
+		"ExposedPorts":    "exposed_ports",
+		"Quantization":    "quantization",
 		"AdditionalHours": "additional_hours",
 	}
 	if mapped, ok := fieldMappings[s]; ok {
@@ -904,3 +921,138 @@ func toSnakeCase(s string) string {
 	return strings.ToLower(re.ReplaceAllString(s, "${1}_${2}"))
 }
 
+// Template handlers
+
+func (s *Server) handleListTemplates(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var query ListTemplatesQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Build filter from query parameters
+	filter := models.TemplateFilter{
+		Recommended: query.Recommended,
+		UseSSH:      query.UseSSH,
+		Name:        query.Name,
+		Image:       query.Image,
+	}
+
+	// Get the Vast.ai provider (templates are only available from Vast.ai)
+	templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "template provider not available: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	templates, err := templateProvider.ListTemplates(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to list templates: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"templates": templates,
+		"count":     len(templates),
+	})
+}
+
+func (s *Server) handleGetTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	hashID := c.Param("hash_id")
+
+	// Get the Vast.ai provider (templates are only available from Vast.ai)
+	templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "template provider not available: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	template, err := templateProvider.GetTemplate(ctx, hashID)
+	if err != nil {
+		// Check if template not found using typed error
+		if errors.Is(err, provider.ErrTemplateNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:     err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to get template: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, template)
+}
+
+func (s *Server) handleGetCompatibleTemplates(c *gin.Context) {
+	ctx := c.Request.Context()
+	offerID := c.Param("id")
+
+	// Get the offer first
+	offer, err := s.inventory.GetOffer(ctx, offerID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     "offer not found: " + offerID,
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Templates are only available for Vast.ai
+	if offer.Provider != "vastai" {
+		c.JSON(http.StatusOK, gin.H{
+			"compatible_templates": []models.CompatibleTemplate{},
+			"count":                0,
+			"offer_id":             offerID,
+			"provider":             offer.Provider,
+			"note":                 "templates are only available for Vast.ai offers",
+		})
+		return
+	}
+
+	// Get the Vast.ai provider
+	templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "template provider not available: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Get compatible templates using filter matching
+	compatibleTemplates, err := templateProvider.GetCompatibleTemplates(ctx, offerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to get compatible templates: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"compatible_templates": compatibleTemplates,
+		"count":                len(compatibleTemplates),
+		"offer_id":             offerID,
+		"gpu_type":             offer.GPUType,
+		"vram_gb":              offer.VRAM,
+	})
+}

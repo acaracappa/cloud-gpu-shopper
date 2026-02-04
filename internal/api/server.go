@@ -127,6 +127,11 @@ func (s *Server) setupRouter() {
 		// Inventory
 		v1.GET("/inventory", s.handleListInventory)
 		v1.GET("/inventory/:id", s.handleGetOffer)
+		v1.GET("/inventory/:id/compatible-templates", s.handleGetCompatibleTemplates)
+
+		// Templates (Vast.ai only)
+		v1.GET("/templates", s.handleListTemplates)
+		v1.GET("/templates/:hash_id", s.handleGetTemplate)
 
 		// Sessions
 		v1.POST("/sessions", s.handleCreateSession)
@@ -150,13 +155,13 @@ func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 	// Bug #25 fix: Increase timeouts and connection limits to handle burst traffic
 	s.httpServer = &http.Server{
-		Addr:           addr,
-		Handler:        s.router,
-		ReadTimeout:    60 * time.Second,  // Bug #25: Increased from 30s
-		WriteTimeout:   60 * time.Second,  // Bug #25: Increased from 30s
-		IdleTimeout:    120 * time.Second, // Bug #25: Increased from 60s
-		ReadHeaderTimeout: 10 * time.Second, // Bug #25: Add header read timeout
-		MaxHeaderBytes: 1 << 20, // Bug #25: 1MB max header size
+		Addr:              addr,
+		Handler:           s.router,
+		ReadTimeout:       60 * time.Second,  // Bug #25: Increased from 30s
+		WriteTimeout:      60 * time.Second,  // Bug #25: Increased from 30s
+		IdleTimeout:       120 * time.Second, // Bug #25: Increased from 60s
+		ReadHeaderTimeout: 10 * time.Second,  // Bug #25: Add header read timeout
+		MaxHeaderBytes:    1 << 20,           // Bug #25: 1MB max header size
 	}
 
 	s.logger.Info("starting API server", slog.String("addr", addr))

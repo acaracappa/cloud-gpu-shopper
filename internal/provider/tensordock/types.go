@@ -90,9 +90,9 @@ type InstancesData struct {
 type Instance struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
-	Status       string    `json:"status"`       // "running", "stopped", "creating", etc.
-	IPAddress    string    `json:"ipAddress"`    // camelCase in API response
-	GPUModel     string    `json:"gpu_model"`    // snake_case in API response
+	Status       string    `json:"status"`    // "running", "stopped", "creating", etc.
+	IPAddress    string    `json:"ipAddress"` // camelCase in API response
+	GPUModel     string    `json:"gpu_model"` // snake_case in API response
 	GPUCount     int       `json:"gpu_count"`
 	VCPUs        int       `json:"vcpus"`
 	RAMGb        int       `json:"ram_gb"`
@@ -143,7 +143,7 @@ type CreateInstanceRequest struct {
 
 // CreateInstanceData wraps the create request attributes
 type CreateInstanceData struct {
-	Type       string                   `json:"type"`       // Always "virtualmachine"
+	Type       string                   `json:"type"` // Always "virtualmachine"
 	Attributes CreateInstanceAttributes `json:"attributes"`
 }
 
@@ -161,14 +161,14 @@ type CreateInstanceData struct {
 //   - CloudInit: Use runcmd with base64-encoded SSH key for reliable
 //     key installation. The ssh_authorized_keys field doesn't work.
 type CreateInstanceAttributes struct {
-	Name         string          `json:"name"`                   // Instance name (use shopper label format)
-	Type         string          `json:"type"`                   // Always "virtualmachine"
-	Image        string          `json:"image"`                  // OS image: ubuntu2404, ubuntu2204, debian12, etc.
-	LocationID   string          `json:"location_id"`            // Location UUID from /locations
-	Resources    ResourcesConfig `json:"resources"`              // CPU, RAM, storage, GPUs
-	PortForwards []PortForward   `json:"port_forwards"`          // REQUIRED for Ubuntu VMs
-	SSHKey       string          `json:"ssh_key,omitempty"`      // Required but doesn't work - use CloudInit
-	CloudInit    *CloudInit      `json:"cloud_init,omitempty"`   // For SSH key installation
+	Name         string          `json:"name"`                 // Instance name (use shopper label format)
+	Type         string          `json:"type"`                 // Always "virtualmachine"
+	Image        string          `json:"image"`                // OS image: ubuntu2404, ubuntu2204, debian12, etc.
+	LocationID   string          `json:"location_id"`          // Location UUID from /locations
+	Resources    ResourcesConfig `json:"resources"`            // CPU, RAM, storage, GPUs
+	PortForwards []PortForward   `json:"port_forwards"`        // REQUIRED for Ubuntu VMs
+	SSHKey       string          `json:"ssh_key,omitempty"`    // Required but doesn't work - use CloudInit
+	CloudInit    *CloudInit      `json:"cloud_init,omitempty"` // For SSH key installation
 }
 
 // PortForward specifies a port forwarding rule.
@@ -199,27 +199,45 @@ type GPUCount struct {
 // TensorDock uses standard cloud-init fields but with important caveats:
 //
 //   - ssh_authorized_keys: Does NOT work reliably on TensorDock
-//   - runcmd: The only reliable way to install SSH keys
+//   - write_files: Most reliable way to install SSH keys
+//   - runcmd: For post-boot commands (permissions, etc.)
 //
-// Recommended SSH key installation pattern:
+// Recommended SSH key installation pattern (using write_files + runcmd):
 //
 //	CloudInit{
+//	    WriteFiles: []WriteFile{
+//	        {
+//	            Path:        "/root/.ssh/authorized_keys",
+//	            Content:     "<base64-encoded-key>",
+//	            Encoding:    "b64",
+//	            Permissions: "0600",
+//	            Owner:       "root:root",
+//	        },
+//	    },
 //	    RunCmd: []string{
 //	        "mkdir -p /root/.ssh",
 //	        "chmod 700 /root/.ssh",
-//	        "echo '<base64-key>' | base64 -d >> /root/.ssh/authorized_keys",
-//	        "chmod 600 /root/.ssh/authorized_keys",
-//	        "chown -R root:root /root/.ssh",
 //	    },
 //	}
 //
 // Cloud-init execution takes ~60-90 seconds after instance boot.
 type CloudInit struct {
-	Packages          []string `json:"packages,omitempty"`
-	PackageUpdate     bool     `json:"package_update,omitempty"`
-	PackageUpgrade    bool     `json:"package_upgrade,omitempty"`
-	RunCmd            []string `json:"runcmd,omitempty"`              // Commands to run after boot
-	SSHAuthorizedKeys []string `json:"ssh_authorized_keys,omitempty"` // Does NOT work - use RunCmd
+	Packages          []string    `json:"packages,omitempty"`
+	PackageUpdate     bool        `json:"package_update,omitempty"`
+	PackageUpgrade    bool        `json:"package_upgrade,omitempty"`
+	WriteFiles        []WriteFile `json:"write_files,omitempty"`         // For file creation (most reliable for SSH keys)
+	RunCmd            []string    `json:"runcmd,omitempty"`              // Commands to run after boot
+	SSHAuthorizedKeys []string    `json:"ssh_authorized_keys,omitempty"` // Does NOT work - use WriteFiles
+}
+
+// WriteFile represents a file to be written by cloud-init.
+// This is the most reliable method for SSH key installation on TensorDock.
+type WriteFile struct {
+	Path        string `json:"path"`                  // Absolute path to the file
+	Content     string `json:"content"`               // File content (can be base64-encoded)
+	Encoding    string `json:"encoding,omitempty"`    // "b64" for base64-encoded content
+	Permissions string `json:"permissions,omitempty"` // File permissions (e.g., "0600")
+	Owner       string `json:"owner,omitempty"`       // Owner in "user:group" format
 }
 
 // CreateInstanceResponse is the response from POST /instances.

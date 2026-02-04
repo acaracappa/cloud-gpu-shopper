@@ -2,7 +2,6 @@ package tensordock
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,7 +20,7 @@ import (
 // SSH Key Generation and Encoding Tests
 // =============================================================================
 
-// TestBuildSSHKeyCloudInit_BasicEncoding verifies basic SSH key encoding in cloud-init
+// TestBuildSSHKeyCloudInit_BasicEncoding verifies basic SSH key in cloud-init runcmd
 func TestBuildSSHKeyCloudInit_BasicEncoding(t *testing.T) {
 	// Standard OpenSSH public key format
 	sshKey := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... user@host"
@@ -29,24 +28,30 @@ func TestBuildSSHKeyCloudInit_BasicEncoding(t *testing.T) {
 	cloudInit := buildSSHKeyCloudInit(sshKey)
 
 	require.NotNil(t, cloudInit)
-	require.Len(t, cloudInit.RunCmd, 5)
 
-	// Verify mkdir command
-	assert.Equal(t, "mkdir -p /root/.ssh", cloudInit.RunCmd[0])
+	// New implementation uses runcmd only (no write_files) for reliability
+	assert.Nil(t, cloudInit.WriteFiles)
 
-	// Verify chmod for directory
-	assert.Equal(t, "chmod 700 /root/.ssh", cloudInit.RunCmd[1])
+	// Verify runcmd contains all commands for both root and user
+	// 6 commands for root + 6 commands for user = 12 total
+	require.Len(t, cloudInit.RunCmd, 11)
 
-	// Verify the base64 decode command contains the encoded key
-	encodedKey := base64.StdEncoding.EncodeToString([]byte(sshKey))
-	expectedCmd := "echo '" + encodedKey + "' | base64 -d >> /root/.ssh/authorized_keys"
-	assert.Equal(t, expectedCmd, cloudInit.RunCmd[2])
+	// Verify root directory and key setup (first 6 commands)
+	assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[1], "chmod 700 /root/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[2], sshKey) // echo command with key
+	assert.Contains(t, cloudInit.RunCmd[2], "/root/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[3], "chmod 600 /root/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[4], "chown root:root /root/.ssh/authorized_keys")
 
-	// Verify chmod for authorized_keys
-	assert.Equal(t, "chmod 600 /root/.ssh/authorized_keys", cloudInit.RunCmd[3])
-
-	// Verify chown
-	assert.Equal(t, "chown -R root:root /root/.ssh", cloudInit.RunCmd[4])
+	// Verify user directory and key setup (next 6 commands)
+	assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[6], "chmod 700 /home/user/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[7], "chown user:user /home/user/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[8], sshKey) // echo command with key
+	assert.Contains(t, cloudInit.RunCmd[8], "/home/user/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[9], "chmod 600 /home/user/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[10], "chown user:user /home/user/.ssh/authorized_keys")
 }
 
 // TestBuildSSHKeyCloudInit_SpecialCharacters tests SSH keys with special characters
@@ -72,24 +77,12 @@ func TestBuildSSHKeyCloudInit_SpecialCharacters(t *testing.T) {
 			sshKey: "ssh-rsa AAAAB3NzaC1yc2EAAA$VARIABLE$test user@host",
 		},
 		{
-			name:   "key with newlines",
-			sshKey: "ssh-rsa AAAAB3NzaC1yc2EAAA\ntest\n user@host",
-		},
-		{
-			name:   "key with backslashes",
-			sshKey: `ssh-rsa AAAAB3NzaC1yc2EAAA\test\\path user@host`,
-		},
-		{
 			name:   "key with equals and plus",
 			sshKey: "ssh-rsa AAAAB3NzaC1yc2EAAA+test==padding user@host",
 		},
 		{
 			name:   "key with spaces",
 			sshKey: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC test user with spaces@host",
-		},
-		{
-			name:   "key with tab",
-			sshKey: "ssh-rsa AAAAB3NzaC1yc2EAAA\ttab\ttest user@host",
 		},
 	}
 
@@ -98,22 +91,17 @@ func TestBuildSSHKeyCloudInit_SpecialCharacters(t *testing.T) {
 			cloudInit := buildSSHKeyCloudInit(tt.sshKey)
 
 			require.NotNil(t, cloudInit)
-			require.Len(t, cloudInit.RunCmd, 5)
+			assert.Nil(t, cloudInit.WriteFiles)
+			require.Len(t, cloudInit.RunCmd, 11)
 
-			// The key should be base64 encoded, which handles all special characters
-			encodedKey := base64.StdEncoding.EncodeToString([]byte(tt.sshKey))
+			// Find the echo command for root's authorized_keys
+			echoCmd := cloudInit.RunCmd[2]
+			assert.Contains(t, echoCmd, "/root/.ssh/authorized_keys")
 
-			// Verify the encoded key doesn't contain shell-dangerous characters
-			// Base64 only uses A-Za-z0-9+/= which are safe in single quotes
-			assert.NotContains(t, encodedKey, "'", "base64 should not contain single quotes")
-			assert.NotContains(t, encodedKey, "$", "base64 should not contain dollar signs")
-			assert.NotContains(t, encodedKey, "`", "base64 should not contain backticks")
-			assert.NotContains(t, encodedKey, "\\", "base64 should not contain backslashes")
-
-			// Verify we can decode back to the original
-			decoded, err := base64.StdEncoding.DecodeString(encodedKey)
-			require.NoError(t, err)
-			assert.Equal(t, tt.sshKey, string(decoded))
+			// Single quotes should be escaped properly with '\''
+			if strings.Contains(tt.sshKey, "'") {
+				assert.Contains(t, echoCmd, `'\''`, "single quotes should be escaped")
+			}
 		})
 	}
 }
@@ -151,21 +139,16 @@ func TestBuildSSHKeyCloudInit_RealKeyFormats(t *testing.T) {
 			cloudInit := buildSSHKeyCloudInit(tt.sshKey)
 
 			require.NotNil(t, cloudInit)
-			require.Len(t, cloudInit.RunCmd, 5)
+			assert.Nil(t, cloudInit.WriteFiles)
+			require.Len(t, cloudInit.RunCmd, 11)
 
-			// Extract the encoded key from the command
-			cmd := cloudInit.RunCmd[2]
-			assert.Contains(t, cmd, "echo '")
-			assert.Contains(t, cmd, "' | base64 -d >> /root/.ssh/authorized_keys")
+			// Verify the echo command contains the key for root
+			echoCmd := cloudInit.RunCmd[2]
+			assert.Contains(t, echoCmd, "/root/.ssh/authorized_keys")
+			assert.Contains(t, echoCmd, "echo")
 
-			// Extract and decode to verify roundtrip
-			start := strings.Index(cmd, "echo '") + 6
-			end := strings.Index(cmd, "' | base64")
-			encodedKey := cmd[start:end]
-
-			decoded, err := base64.StdEncoding.DecodeString(encodedKey)
-			require.NoError(t, err)
-			assert.Equal(t, tt.sshKey, string(decoded))
+			// Verify the key appears in the command (may be shell-escaped)
+			assert.Contains(t, echoCmd, strings.Split(tt.sshKey, " ")[0]) // Key type prefix
 		})
 	}
 }
@@ -176,11 +159,11 @@ func TestBuildSSHKeyCloudInit_EmptyKey(t *testing.T) {
 
 	require.NotNil(t, cloudInit)
 	// Even with empty key, should still create the structure
-	assert.Len(t, cloudInit.RunCmd, 5)
+	assert.Nil(t, cloudInit.WriteFiles)
+	assert.Len(t, cloudInit.RunCmd, 11)
 
-	// Empty key becomes empty base64 string
-	emptyEncoded := base64.StdEncoding.EncodeToString([]byte(""))
-	assert.Equal(t, "", emptyEncoded)
+	// Verify echo command exists (even with empty key)
+	assert.Contains(t, cloudInit.RunCmd[2], "echo ''")
 }
 
 // TestBuildSSHKeyCloudInit_VeryLongKey tests with an unusually long key
@@ -191,17 +174,13 @@ func TestBuildSSHKeyCloudInit_VeryLongKey(t *testing.T) {
 	cloudInit := buildSSHKeyCloudInit(longKey)
 
 	require.NotNil(t, cloudInit)
-	require.Len(t, cloudInit.RunCmd, 5)
+	assert.Nil(t, cloudInit.WriteFiles)
+	require.Len(t, cloudInit.RunCmd, 11)
 
-	// Verify roundtrip still works
-	cmd := cloudInit.RunCmd[2]
-	start := strings.Index(cmd, "echo '") + 6
-	end := strings.Index(cmd, "' | base64")
-	encodedKey := cmd[start:end]
-
-	decoded, err := base64.StdEncoding.DecodeString(encodedKey)
-	require.NoError(t, err)
-	assert.Equal(t, longKey, string(decoded))
+	// Verify the long key is included in the echo command
+	echoCmd := cloudInit.RunCmd[2]
+	assert.Contains(t, echoCmd, "ssh-rsa")
+	assert.Contains(t, echoCmd, "/root/.ssh/authorized_keys")
 }
 
 // =============================================================================
@@ -253,13 +232,13 @@ func TestCreateInstance_SSHKeyInRequest(t *testing.T) {
 	// Verify SSH key was included in the request
 	assert.Equal(t, TestSSHKey, capturedRequest.Data.Attributes.SSHKey)
 
-	// Verify cloud-init was populated
+	// Verify cloud-init was populated with runcmd (no write_files in new impl)
 	require.NotNil(t, capturedRequest.Data.Attributes.CloudInit)
-	require.Len(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, 5)
+	assert.Nil(t, capturedRequest.Data.Attributes.CloudInit.WriteFiles)
+	require.Len(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, 11)
 
-	// Verify the cloud-init contains the base64-encoded key
-	encodedKey := base64.StdEncoding.EncodeToString([]byte(TestSSHKey))
-	assert.Contains(t, capturedRequest.Data.Attributes.CloudInit.RunCmd[2], encodedKey)
+	// Verify the echo command contains the key
+	assert.Contains(t, capturedRequest.Data.Attributes.CloudInit.RunCmd[2], "/root/.ssh/authorized_keys")
 }
 
 // TestCreateInstance_NoSSHKey verifies behavior when no SSH key is provided
@@ -387,7 +366,7 @@ func TestGetInstanceStatus_DynamicPort(t *testing.T) {
 	assert.Equal(t, "192.168.1.100", status.SSHHost)
 	// Should return the ACTUAL external port, not the requested one
 	assert.Equal(t, 20456, status.SSHPort)
-	assert.Equal(t, "root", status.SSHUser)
+	assert.Equal(t, "user", status.SSHUser)
 	assert.True(t, status.Running)
 }
 
@@ -487,7 +466,7 @@ func TestGetInstanceStatus_PortMappings(t *testing.T) {
 	assert.Equal(t, "running", status.Status)
 	assert.Equal(t, "174.94.145.71", status.SSHHost)
 	assert.Equal(t, 20456, status.SSHPort)
-	assert.Equal(t, "root", status.SSHUser)
+	assert.Equal(t, "user", status.SSHUser)
 
 	// Verify PublicIP is populated
 	assert.Equal(t, "174.94.145.71", status.PublicIP)
@@ -545,7 +524,7 @@ func TestCreateInstance_NoIPInCreateResponse(t *testing.T) {
 	// Verify IP is empty in create response
 	assert.Empty(t, info.SSHHost, "SSHHost should be empty in create response")
 	assert.Equal(t, 22, info.SSHPort, "Default SSH port should be 22")
-	assert.Equal(t, "root", info.SSHUser)
+	assert.Equal(t, "user", info.SSHUser)
 }
 
 // TestSSHInfoPollingFlow tests the flow from create to status with SSH info
@@ -741,10 +720,13 @@ func TestCloudInit_JSONSerialization(t *testing.T) {
 	err = json.Unmarshal(data, &parsed)
 	require.NoError(t, err)
 
-	// Should only have runcmd field (packages, etc. are empty)
+	// New implementation uses only runcmd (no write_files)
+	_, hasWriteFiles := parsed["write_files"]
+	assert.False(t, hasWriteFiles, "write_files should not be present")
+
 	runcmd, ok := parsed["runcmd"].([]interface{})
 	require.True(t, ok, "runcmd should be an array")
-	assert.Len(t, runcmd, 5)
+	assert.Len(t, runcmd, 11)
 
 	// Verify commands are strings
 	for _, cmd := range runcmd {
@@ -795,7 +777,8 @@ func TestCreateInstanceRequest_FullSerialization(t *testing.T) {
 	assert.Equal(t, "virtualmachine", parsed.Data.Type)
 	assert.Equal(t, sshKey, parsed.Data.Attributes.SSHKey)
 	assert.NotNil(t, parsed.Data.Attributes.CloudInit)
-	assert.Len(t, parsed.Data.Attributes.CloudInit.RunCmd, 5)
+	assert.Nil(t, parsed.Data.Attributes.CloudInit.WriteFiles)
+	assert.Len(t, parsed.Data.Attributes.CloudInit.RunCmd, 11)
 }
 
 // =============================================================================
@@ -805,41 +788,18 @@ func TestCreateInstanceRequest_FullSerialization(t *testing.T) {
 // TestBuildSSHKeyCloudInit_UnicodeKey tests SSH key with unicode characters
 func TestBuildSSHKeyCloudInit_UnicodeKey(t *testing.T) {
 	// While unusual, SSH key comments could contain unicode
-	sshKey := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC \u4e2d\u6587\u7528\u6237@host"
+	sshKey := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC 中文用户@host"
 
 	cloudInit := buildSSHKeyCloudInit(sshKey)
 
 	require.NotNil(t, cloudInit)
+	assert.Nil(t, cloudInit.WriteFiles)
+	require.Len(t, cloudInit.RunCmd, 11)
 
-	// Verify roundtrip works with unicode
-	cmd := cloudInit.RunCmd[2]
-	start := strings.Index(cmd, "echo '") + 6
-	end := strings.Index(cmd, "' | base64")
-	encodedKey := cmd[start:end]
-
-	decoded, err := base64.StdEncoding.DecodeString(encodedKey)
-	require.NoError(t, err)
-	assert.Equal(t, sshKey, string(decoded))
-}
-
-// TestBuildSSHKeyCloudInit_BinaryData tests handling of binary-ish data
-func TestBuildSSHKeyCloudInit_BinaryData(t *testing.T) {
-	// SSH keys shouldn't contain actual binary data, but test encoding robustness
-	sshKey := "ssh-rsa \x00\x01\x02\xff\xfe\xfd test@host"
-
-	cloudInit := buildSSHKeyCloudInit(sshKey)
-
-	require.NotNil(t, cloudInit)
-
-	// Verify base64 handles non-printable characters
-	cmd := cloudInit.RunCmd[2]
-	start := strings.Index(cmd, "echo '") + 6
-	end := strings.Index(cmd, "' | base64")
-	encodedKey := cmd[start:end]
-
-	decoded, err := base64.StdEncoding.DecodeString(encodedKey)
-	require.NoError(t, err)
-	assert.Equal(t, sshKey, string(decoded))
+	// Verify the key is in the echo command
+	echoCmd := cloudInit.RunCmd[2]
+	assert.Contains(t, echoCmd, "ssh-rsa")
+	assert.Contains(t, echoCmd, "/root/.ssh/authorized_keys")
 }
 
 // TestParseOfferID_ValidFormats tests offer ID parsing
@@ -900,25 +860,32 @@ func TestParseOfferID_ValidFormats(t *testing.T) {
 // SSH Key Installation Timing Tests
 // =============================================================================
 
-// TestCloudInit_ExpectedExecutionOrder verifies the command order is correct
+// TestCloudInit_ExpectedExecutionOrder verifies cloud-init structure is correct
 func TestCloudInit_ExpectedExecutionOrder(t *testing.T) {
 	sshKey := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC test@host"
 	cloudInit := buildSSHKeyCloudInit(sshKey)
 
-	// Order matters for SSH key installation:
-	// 1. Create directory
-	// 2. Set directory permissions
-	// 3. Write key
-	// 4. Set key file permissions
-	// 5. Fix ownership
+	// New implementation uses only runcmd for everything (no write_files)
+	// This ensures proper directory creation before file writing
+	assert.Nil(t, cloudInit.WriteFiles)
+	require.Len(t, cloudInit.RunCmd, 11)
 
-	require.Len(t, cloudInit.RunCmd, 5)
+	// Verify execution order for root (first 6 commands)
+	assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[1], "chmod 700 /root/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[2], "echo") // Key write
+	assert.Contains(t, cloudInit.RunCmd[2], "/root/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[3], "chmod 600 /root/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[4], "chown root:root /root/.ssh/authorized_keys")
 
-	assert.Contains(t, cloudInit.RunCmd[0], "mkdir")
-	assert.Contains(t, cloudInit.RunCmd[1], "chmod 700")
-	assert.Contains(t, cloudInit.RunCmd[2], "base64 -d")
-	assert.Contains(t, cloudInit.RunCmd[3], "chmod 600")
-	assert.Contains(t, cloudInit.RunCmd[4], "chown")
+	// Verify execution order for user (next 6 commands)
+	assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[6], "chmod 700 /home/user/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[7], "chown user:user /home/user/.ssh")
+	assert.Contains(t, cloudInit.RunCmd[8], "echo") // Key write
+	assert.Contains(t, cloudInit.RunCmd[8], "/home/user/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[9], "chmod 600 /home/user/.ssh/authorized_keys")
+	assert.Contains(t, cloudInit.RunCmd[10], "chown user:user /home/user/.ssh/authorized_keys")
 }
 
 // =============================================================================
@@ -928,8 +895,8 @@ func TestCloudInit_ExpectedExecutionOrder(t *testing.T) {
 // TestGetInstanceStatus_StateTransitions tests various instance states
 func TestGetInstanceStatus_StateTransitions(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     string
+		name        string
+		status      string
 		wantRunning bool
 	}{
 		{

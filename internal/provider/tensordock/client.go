@@ -30,8 +30,8 @@
 //
 //   - SSH Key Installation: The ssh_key API field is required but doesn't
 //     actually install the key. The ssh_authorized_keys cloud-init field
-//     also doesn't work reliably. Use cloud-init runcmd with base64 encoding:
-//     echo '<base64-key>' | base64 -d >> /root/.ssh/authorized_keys
+//     also doesn't work reliably. Use cloud-init runcmd to echo the key
+//     directly to the authorized_keys file for both root and 'user' accounts.
 //
 //   - Stale Inventory: TensorDock's /locations endpoint often shows GPUs
 //     as available when they're not, leading to "No available nodes found"
@@ -43,7 +43,6 @@ package tensordock
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -965,7 +964,7 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		ProviderInstanceID: result.Data.ID,
 		SSHHost:            "", // Will be populated by GetInstanceStatus
 		SSHPort:            22, // Default, but may change - check GetInstanceStatus
-		SSHUser:            "root",
+		SSHUser:            "user", // TensorDock creates a 'user' account with sudo access
 		Status:             result.Data.Status,
 	}, nil
 }
@@ -1141,7 +1140,7 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 		Running: result.Status == "running",
 		SSHHost: result.IPAddress,
 		SSHPort: sshPort,
-		SSHUser: "root",
+		SSHUser: "user", // TensorDock creates a 'user' account with sudo access
 		// Port mappings for HTTP API access (entrypoint mode workloads)
 		PublicIP: result.IPAddress,
 		Ports:    portMappings,
@@ -1409,30 +1408,60 @@ func ValidateSSHPublicKey(publicKey string) error {
 // buildSSHKeyCloudInit creates cloud-init configuration for SSH key installation.
 //
 // TensorDock's ssh_key API field doesn't actually install the key, and the
-// ssh_authorized_keys cloud-init field is unreliable. The only reliable method
-// is using runcmd with base64 encoding to avoid issues with special characters.
+// ssh_authorized_keys cloud-init field is unreliable. The most reliable method
+// is using write_files with base64 encoding.
+//
+// We install keys for BOTH root and user accounts because:
+// - TensorDock's default cloud-init creates a "user" account
+// - Some images may use root directly
+// - This ensures SSH access regardless of the default user
 //
 // IMPORTANT: The caller should validate the SSH key using ValidateSSHPublicKey
 // before calling this function.
 func buildSSHKeyCloudInit(publicKey string) *CloudInit {
-	encodedKey := base64.StdEncoding.EncodeToString([]byte(publicKey))
+	// TensorDock's cloud-init write_files may not support encoding field,
+	// and runs before runcmd (which creates directories).
+	// Use runcmd only for reliable SSH key installation with proper ordering.
+	//
+	// We install keys for both root and the default 'user' account that
+	// TensorDock creates, since the SSH user may vary.
+	//
+	// Shell-escape the key to handle any special characters.
+	escapedKey := shellEscapeSingleQuote(publicKey)
+
 	return &CloudInit{
 		RunCmd: []string{
+			// Create directories with proper permissions first
 			"mkdir -p /root/.ssh",
 			"chmod 700 /root/.ssh",
-			fmt.Sprintf("echo '%s' | base64 -d >> /root/.ssh/authorized_keys", encodedKey),
+			// Write SSH key for root
+			fmt.Sprintf("echo '%s' > /root/.ssh/authorized_keys", escapedKey),
 			"chmod 600 /root/.ssh/authorized_keys",
-			"chown -R root:root /root/.ssh",
+			"chown root:root /root/.ssh/authorized_keys",
+			// Create user's .ssh directory
+			"mkdir -p /home/user/.ssh",
+			"chmod 700 /home/user/.ssh",
+			"chown user:user /home/user/.ssh",
+			// Write SSH key for user
+			fmt.Sprintf("echo '%s' > /home/user/.ssh/authorized_keys", escapedKey),
+			"chmod 600 /home/user/.ssh/authorized_keys",
+			"chown user:user /home/user/.ssh/authorized_keys",
 		},
 	}
+}
+
+// shellEscapeSingleQuote escapes a string for use inside single quotes in shell.
+// Single quotes are replaced with: '\” (end quote, escaped quote, start quote)
+func shellEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
 // parseCreateError extracts error information from a failed create response
 func (c *Client) parseCreateError(body []byte, statusCode int) error {
 	// Try to parse as JSON array of errors (TensorDock validation errors)
 	var validationErrors []struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code    string   `json:"code"`
+		Message string   `json:"message"`
 		Path    []string `json:"path"`
 	}
 	if err := json.Unmarshal(body, &validationErrors); err == nil && len(validationErrors) > 0 {
@@ -1519,8 +1548,8 @@ func isStaleInventoryErrorMessage(msg string) bool {
 		"gpu unavailable",
 		"gpu not available",
 		"no gpus available",
-		"requested gpu",       // "requested GPU not available"
-		"gpu capacity",        // "GPU capacity exceeded"
+		"requested gpu", // "requested GPU not available"
+		"gpu capacity",  // "GPU capacity exceeded"
 		"no matching gpu",
 		"gpu is not available",
 
@@ -1546,7 +1575,7 @@ func isStaleInventoryErrorMessage(msg string) bool {
 		"resource limit",
 		"quota exceeded",
 		"limit reached",
-		"maximum",  // covers "maximum reached", "maximum instances reached"
+		"maximum", // covers "maximum reached", "maximum instances reached"
 	}
 	msgLower := strings.ToLower(msg)
 	for _, indicator := range staleIndicators {

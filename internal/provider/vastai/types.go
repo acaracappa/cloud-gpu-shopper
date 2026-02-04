@@ -10,6 +10,8 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
+// Note: models import is used for both GPUOffer and VastTemplate conversions
+
 // Predefined Docker images for different launch modes
 const (
 	// ImageSSHBase is the default SSH-enabled base image for interactive access
@@ -106,6 +108,31 @@ type Bundle struct {
 // with real-time availability tracking.
 const VastAIAvailabilityConfidence = 0.9
 
+// ToHostProperties converts a Bundle to a map of properties for template filter matching.
+// Property names match those used in template extra_filters JSON.
+func (b Bundle) ToHostProperties() map[string]interface{} {
+	return map[string]interface{}{
+		"cuda_max_good":      b.CudaMaxGood,
+		"compute_cap":        b.ComputeCap,
+		"gpu_total_ram":      b.GPUTotalRam, // MB
+		"gpu_ram":            b.GPURam,      // MB (effective available)
+		"cpu_arch":           b.CPUArch,
+		"num_gpus":           strconv.Itoa(b.NumGPUs),
+		"gpu_name":           b.GPUName,
+		"disk_space":         b.DiskSpace,
+		"reliability2":       b.Reliability,
+		"verified":           b.Verified,
+		"rentable":           b.Rentable,
+		"static_ip":          b.StaticIP,
+		"driver_version":     b.DriverVersion,
+		"inet_down":          b.InetDown,
+		"inet_up":            b.InetUp,
+		"dph_total":          b.DphTotal,
+		"geolocation":        b.Geolocation,
+		"cpu_cores_effective": b.CPUCoresEffective,
+	}
+}
+
 // ToGPUOffer converts a Vast.ai Bundle to a unified GPUOffer
 func (b Bundle) ToGPUOffer() models.GPUOffer {
 	return models.GPUOffer{
@@ -186,7 +213,7 @@ type Instance struct {
 // CreateInstanceRequest is the request body for creating an instance
 type CreateInstanceRequest struct {
 	ClientID  string            `json:"client_id"`
-	Image     string            `json:"image"`
+	Image     string            `json:"image,omitempty"`
 	DiskSpace int               `json:"disk"`
 	Label     string            `json:"label"`
 	OnStart   string            `json:"onstart,omitempty"`
@@ -197,6 +224,11 @@ type CreateInstanceRequest struct {
 	// Entrypoint mode fields
 	Args  string `json:"args,omitempty"`  // Container arguments (for runtype=args)
 	Ports string `json:"ports,omitempty"` // Port mappings (e.g., "8000/http")
+
+	// Template-based provisioning
+	// If TemplateHashID is set, use the template instead of building config from Image/Env
+	// Request params override template defaults. Env vars are merged (request wins conflicts).
+	TemplateHashID string `json:"template_hash_id,omitempty"`
 }
 
 // CreateInstanceResponse is the response from creating an instance
@@ -204,6 +236,59 @@ type CreateInstanceResponse struct {
 	Success     bool   `json:"success"`
 	NewContract int    `json:"new_contract"`
 	Error       string `json:"error,omitempty"`
+}
+
+// TemplatesResponse is the response from GET /template/
+type TemplatesResponse struct {
+	Templates []Template `json:"templates"`
+}
+
+// Template represents a Vast.ai template from the API
+type Template struct {
+	ID                   int     `json:"id"`
+	HashID               string  `json:"hash_id"`
+	Name                 string  `json:"name"`
+	Image                string  `json:"image"`
+	Tag                  string  `json:"tag,omitempty"`
+	Env                  string  `json:"env,omitempty"`
+	OnStart              string  `json:"onstart,omitempty"`
+	RunType              string  `json:"runtype,omitempty"`
+	ArgsStr              string  `json:"args_str,omitempty"`
+	UseSSH               bool    `json:"use_ssh"`
+	SSHDirect            bool    `json:"ssh_direct"`
+	Recommended          bool    `json:"recommended"`
+	RecommendedDiskSpace float64 `json:"recommended_disk_space,omitempty"`
+	ExtraFilters         string  `json:"extra_filters,omitempty"`
+	CreatorID            int     `json:"creator_id,omitempty"`
+	CreatedAt            float64 `json:"created_at,omitempty"` // Unix timestamp
+	CountCreated         int     `json:"count_created,omitempty"`
+}
+
+// ToModel converts the API Template to a models.VastTemplate
+func (t Template) ToModel() models.VastTemplate {
+	var createdAt time.Time
+	if t.CreatedAt > 0 {
+		createdAt = time.Unix(int64(t.CreatedAt), 0)
+	}
+	return models.VastTemplate{
+		ID:                   t.ID,
+		HashID:               t.HashID,
+		Name:                 t.Name,
+		Image:                t.Image,
+		Tag:                  t.Tag,
+		Env:                  t.Env,
+		OnStart:              t.OnStart,
+		RunType:              t.RunType,
+		ArgsStr:              t.ArgsStr,
+		UseSSH:               t.UseSSH,
+		SSHDirect:            t.SSHDirect,
+		Recommended:          t.Recommended,
+		RecommendedDiskSpace: int(t.RecommendedDiskSpace),
+		ExtraFilters:         t.ExtraFilters,
+		CreatorID:            t.CreatorID,
+		CreatedAt:            createdAt,
+		CountCreated:         t.CountCreated,
+	}
 }
 
 // normalizeGPUName converts Vast.ai GPU names to standardized names

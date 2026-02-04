@@ -654,3 +654,319 @@ func TestClient_GetInstanceStatus_WithPortMappings(t *testing.T) {
 	assert.Equal(t, 33526, status.Ports[8000])
 	assert.Equal(t, 44100, status.Ports[8080])
 }
+
+// Template-related tests
+
+func TestClient_ListTemplates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/template/", r.URL.Path)
+		assert.Contains(t, r.Header.Get("Authorization"), "Bearer")
+
+		// Only fetch recommended templates from API
+		assert.Equal(t, `{"recommended":{"eq":true}}`, r.URL.Query().Get("select_filters"), "should filter for recommended templates")
+
+		resp := TemplatesResponse{
+			Templates: []Template{
+				{
+					ID:          1,
+					HashID:      "abc123def456",
+					Name:        "vLLM Template",
+					Image:       "vllm/vllm-openai",
+					Tag:         "latest",
+					RunType:     "ssh_proxy",
+					UseSSH:      true,
+					Recommended: true,
+					CountCreated: 150,
+				},
+				{
+					ID:          2,
+					HashID:      "xyz789abc012",
+					Name:        "Ollama Template",
+					Image:       "ollama/ollama",
+					Tag:         "latest",
+					RunType:     "ssh",
+					UseSSH:      true,
+					Recommended: true,
+					CountCreated: 200,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	templates, err := client.ListTemplates(context.Background(), models.TemplateFilter{})
+
+	require.NoError(t, err)
+	assert.Len(t, templates, 2)
+
+	// Check first template
+	assert.Equal(t, "abc123def456", templates[0].HashID)
+	assert.Equal(t, "vLLM Template", templates[0].Name)
+	assert.Equal(t, "vllm/vllm-openai", templates[0].Image)
+	assert.True(t, templates[0].UseSSH)
+	assert.True(t, templates[0].Recommended)
+}
+
+func TestClient_ListTemplates_WithNameFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := TemplatesResponse{
+			Templates: []Template{
+				{
+					ID:          1,
+					HashID:      "abc123def456",
+					Name:        "vLLM Template",
+					Image:       "vllm/vllm-openai",
+					UseSSH:      true,
+					Recommended: true,
+				},
+				{
+					ID:          2,
+					HashID:      "xyz789abc012",
+					Name:        "Ollama Template",
+					Image:       "ollama/ollama",
+					UseSSH:      true,
+					Recommended: true,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	// Filter by name
+	templates, err := client.ListTemplates(context.Background(), models.TemplateFilter{Name: "vllm"})
+
+	require.NoError(t, err)
+	assert.Len(t, templates, 1)
+	assert.Equal(t, "vLLM Template", templates[0].Name)
+}
+
+func TestClient_ListTemplates_CachesResults(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		resp := TemplatesResponse{
+			Templates: []Template{
+				{
+					ID:          1,
+					HashID:      "abc123def456",
+					Name:        "vLLM Template",
+					UseSSH:      true,
+					Recommended: true,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	// First call - should hit API
+	_, err := client.ListTemplates(context.Background(), models.TemplateFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, callCount)
+
+	// Second call - should use cache
+	_, err = client.ListTemplates(context.Background(), models.TemplateFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, callCount, "should use cached templates")
+}
+
+func TestClient_GetTemplate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := TemplatesResponse{
+			Templates: []Template{
+				{
+					ID:          1,
+					HashID:      "abc123def456",
+					Name:        "vLLM Template",
+					Image:       "vllm/vllm-openai",
+					UseSSH:      true,
+					Recommended: true,
+				},
+				{
+					ID:          2,
+					HashID:      "xyz789abc012",
+					Name:        "Ollama Template",
+					Image:       "ollama/ollama",
+					UseSSH:      true,
+					Recommended: true,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	template, err := client.GetTemplate(context.Background(), "abc123def456")
+
+	require.NoError(t, err)
+	assert.Equal(t, "vLLM Template", template.Name)
+	assert.Equal(t, "abc123def456", template.HashID)
+}
+
+func TestClient_GetTemplate_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := TemplatesResponse{
+			Templates: []Template{
+				{
+					ID:          1,
+					HashID:      "abc123def456",
+					Name:        "vLLM Template",
+					UseSSH:      true,
+					Recommended: true,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	_, err := client.GetTemplate(context.Background(), "nonexistent-hash")
+
+	require.Error(t, err)
+	// Verify typed error is returned
+	assert.ErrorIs(t, err, provider.ErrTemplateNotFound)
+	assert.Contains(t, err.Error(), "nonexistent-hash")
+}
+
+// TestClient_GetTemplate_OnlyRecommendedAvailable verifies that only recommended
+// templates are available. The inventory only maintains recommended templates.
+func TestClient_GetTemplate_OnlyRecommendedAvailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Vast.ai API filters by recommended=true, so only recommended templates are returned
+		resp := TemplatesResponse{
+			Templates: []Template{
+				{
+					ID:          1,
+					HashID:      "recommended-hash",
+					Name:        "Recommended Template",
+					UseSSH:      true,
+					Recommended: true,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	// Should be able to find recommended template
+	template, err := client.GetTemplate(context.Background(), "recommended-hash")
+	require.NoError(t, err)
+	assert.Equal(t, "Recommended Template", template.Name)
+	assert.True(t, template.Recommended)
+
+	// Non-recommended templates are not available
+	_, err = client.GetTemplate(context.Background(), "non-recommended-hash")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, provider.ErrTemplateNotFound)
+}
+
+func TestClient_CreateInstance_WithTemplateHashID(t *testing.T) {
+	var capturedRequest CreateInstanceRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/asks/") {
+			// Parse the request body
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			err = json.Unmarshal(body, &capturedRequest)
+			require.NoError(t, err)
+
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(CreateInstanceResponse{
+				Success:     true,
+				NewContract: 67890,
+			})
+			return
+		}
+
+		if r.Method == "POST" && strings.Contains(r.URL.Path, "/ssh/") {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+			return
+		}
+
+		t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL))
+
+	req := provider.CreateInstanceRequest{
+		OfferID:        "12345",
+		SessionID:      "sess-001",
+		SSHPublicKey:   "ssh-rsa AAAAB3NzaC1yc2E... test@host",
+		TemplateHashID: "4e17788f74f075dd9aab7d0d4427968f",
+	}
+
+	info, err := client.CreateInstance(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.Equal(t, "67890", info.ProviderInstanceID)
+
+	// Verify template_hash_id was sent in the request
+	assert.Equal(t, "4e17788f74f075dd9aab7d0d4427968f", capturedRequest.TemplateHashID)
+	// Verify SSH key was still sent
+	assert.Equal(t, "ssh-rsa AAAAB3NzaC1yc2E... test@host", capturedRequest.SSHKey)
+	// CRITICAL: Verify RunType is set to ssh_proxy to ensure SSH access
+	// This overrides any template runtype (which may be "jupyter" or "args")
+	assert.Equal(t, "ssh_proxy", capturedRequest.RunType)
+	// Image should not be set when using template
+	assert.Empty(t, capturedRequest.Image)
+}
+
+func TestTemplate_ToModel(t *testing.T) {
+	apiTemplate := Template{
+		ID:                   123,
+		HashID:               "abc123def456",
+		Name:                 "Test Template",
+		Image:                "test/image",
+		Tag:                  "latest",
+		Env:                  "-e KEY=value",
+		OnStart:              "echo hello",
+		RunType:              "ssh_proxy",
+		ArgsStr:              "--arg1 --arg2",
+		UseSSH:               true,
+		SSHDirect:            false,
+		Recommended:          true,
+		RecommendedDiskSpace: 50,
+		ExtraFilters:         `{"gpu_ram":{"gte":24000}}`,
+		CreatorID:            456,
+		CreatedAt:            1706745600.0,
+		CountCreated:         100,
+	}
+
+	model := apiTemplate.ToModel()
+
+	assert.Equal(t, 123, model.ID)
+	assert.Equal(t, "abc123def456", model.HashID)
+	assert.Equal(t, "Test Template", model.Name)
+	assert.Equal(t, "test/image", model.Image)
+	assert.Equal(t, "latest", model.Tag)
+	assert.Equal(t, "-e KEY=value", model.Env)
+	assert.Equal(t, "echo hello", model.OnStart)
+	assert.Equal(t, "ssh_proxy", model.RunType)
+	assert.Equal(t, "--arg1 --arg2", model.ArgsStr)
+	assert.True(t, model.UseSSH)
+	assert.False(t, model.SSHDirect)
+	assert.True(t, model.Recommended)
+	assert.Equal(t, 50, model.RecommendedDiskSpace)
+	assert.Equal(t, `{"gpu_ram":{"gte":24000}}`, model.ExtraFilters)
+	assert.Equal(t, 456, model.CreatorID)
+	assert.Equal(t, 100, model.CountCreated)
+	// CreatedAt should be converted from Unix timestamp
+	assert.False(t, model.CreatedAt.IsZero())
+}

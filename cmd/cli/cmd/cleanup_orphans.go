@@ -130,10 +130,10 @@ func runCleanupOrphans(cmd *cobra.Command, args []string) error {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(map[string]interface{}{
-			"instances":   orphans,
-			"count":       len(orphans),
-			"total_cost":  totalCost,
-			"dry_run":     !cleanupExecute,
+			"instances":  orphans,
+			"count":      len(orphans),
+			"total_cost": totalCost,
+			"dry_run":    !cleanupExecute,
 		})
 	}
 

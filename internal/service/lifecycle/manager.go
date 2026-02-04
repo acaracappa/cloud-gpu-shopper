@@ -94,14 +94,14 @@ type Manager struct {
 
 // Metrics tracks lifecycle manager statistics
 type Metrics struct {
-	mu                   sync.RWMutex
-	ChecksRun            int64
-	SessionsExpired      int64
-	HardMaxEnforced      int64
-	OrphansDetected      int64
-	DestroySuccesses     int64
-	DestroyFailures      int64
-	SSHHealthChecksRun   int64
+	mu                    sync.RWMutex
+	ChecksRun             int64
+	SessionsExpired       int64
+	HardMaxEnforced       int64
+	OrphansDetected       int64
+	DestroySuccesses      int64
+	DestroyFailures       int64
+	SSHHealthChecksRun    int64
 	SSHHealthChecksFailed int64
 }
 

@@ -94,9 +94,9 @@ func TestProviderInterfaceMethodSignatures(t *testing.T) {
 				ShopperExpiresAt:    time.Now().Add(12 * time.Hour),
 				ShopperConsumerID:   "consumer-123",
 			},
-			LaunchMode:     provider.LaunchModeSSH,
-			Entrypoint:     []string{"/bin/bash"},
-			ExposedPorts:   []int{8000, 8080},
+			LaunchMode:   provider.LaunchModeSSH,
+			Entrypoint:   []string{"/bin/bash"},
+			ExposedPorts: []int{8000, 8080},
 			WorkloadConfig: &provider.WorkloadConfig{
 				Type:    provider.WorkloadTypeVLLM,
 				ModelID: "meta-llama/Llama-2-7b",
@@ -214,7 +214,7 @@ func TestSessionLifecycleFlow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, instanceID, instance.ProviderInstanceID)
-		assert.Equal(t, "root", instance.SSHUser)
+		assert.Equal(t, "user", instance.SSHUser)
 	})
 
 	// Step 3: Poll for status (SSH verification phase)
@@ -224,7 +224,7 @@ func TestSessionLifecycleFlow(t *testing.T) {
 		assert.True(t, status.Running)
 		assert.Equal(t, "10.0.0.1", status.SSHHost)
 		assert.Equal(t, 20456, status.SSHPort) // Dynamic port assignment
-		assert.Equal(t, "root", status.SSHUser)
+		assert.Equal(t, "user", status.SSHUser)
 	})
 
 	// Step 4: Destroy instance (cleanup phase)
@@ -296,10 +296,10 @@ func TestListAllInstancesFiltering(t *testing.T) {
 			Data: InstancesData{
 				Instances: []Instance{
 					{ID: "inst-1", Name: "shopper-session1", Status: "running"},
-					{ID: "inst-2", Name: "other-vm", Status: "running"},         // Not ours
+					{ID: "inst-2", Name: "other-vm", Status: "running"}, // Not ours
 					{ID: "inst-3", Name: "shopper-session2", Status: "running"},
-					{ID: "inst-4", Name: "my-test-vm", Status: "running"},       // Not ours
-					{ID: "inst-5", Name: "shopper-", Status: "running"},         // Edge case - empty session ID
+					{ID: "inst-4", Name: "my-test-vm", Status: "running"}, // Not ours
+					{ID: "inst-5", Name: "shopper-", Status: "running"},   // Edge case - empty session ID
 				},
 			},
 		})
@@ -450,10 +450,10 @@ func TestOfferFilterIntegration(t *testing.T) {
 // TestErrorPropagation verifies errors are correctly typed for system handling
 func TestErrorPropagation(t *testing.T) {
 	testCases := []struct {
-		name           string
-		statusCode     int
-		responseBody   string
-		checkError     func(t *testing.T, err error)
+		name         string
+		statusCode   int
+		responseBody string
+		checkError   func(t *testing.T, err error)
 	}{
 		{
 			name:       "rate limit error",
@@ -525,9 +525,9 @@ func TestErrorPropagation(t *testing.T) {
 // TestStaleInventoryErrorHandling tests the stale inventory error detection
 func TestStaleInventoryErrorHandling(t *testing.T) {
 	testCases := []struct {
-		name        string
-		response    string
-		isStale     bool
+		name     string
+		response string
+		isStale  bool
 	}{
 		{
 			name:     "no available nodes",
@@ -712,19 +712,19 @@ func TestSSHKeyCloudInitConfiguration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify cloud-init is configured
+	// Verify cloud-init is configured with runcmd for SSH key installation
 	require.NotNil(t, capturedRequest.Data.Attributes.CloudInit, "CloudInit should be set")
 	require.NotEmpty(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, "CloudInit RunCmd should not be empty")
 
-	// Verify SSH key is in the commands (base64 encoded)
+	// Verify SSH key is in runcmd (via echo command)
 	foundSSHCmd := false
 	for _, cmd := range capturedRequest.Data.Attributes.CloudInit.RunCmd {
-		if strings.Contains(cmd, "base64") && strings.Contains(cmd, "authorized_keys") {
+		if strings.Contains(cmd, "authorized_keys") && strings.Contains(cmd, "echo") {
 			foundSSHCmd = true
 			break
 		}
 	}
-	assert.True(t, foundSSHCmd, "Should have cloud-init command for SSH key installation")
+	assert.True(t, foundSSHCmd, "Should have runcmd entry for SSH key installation")
 
 	// Verify the ssh_key field is also set (required by TensorDock even though it doesn't work)
 	assert.Equal(t, TestSSHKey, capturedRequest.Data.Attributes.SSHKey)
@@ -771,9 +771,9 @@ func TestMultiplePortForwards(t *testing.T) {
 			Status:    "running",
 			IPAddress: "10.0.0.1",
 			PortForwards: []PortForward{
-				{Protocol: "tcp", InternalPort: 8000, ExternalPort: 30000},  // API port
-				{Protocol: "tcp", InternalPort: 22, ExternalPort: 30022},    // SSH port
-				{Protocol: "tcp", InternalPort: 8080, ExternalPort: 30080},  // Additional port
+				{Protocol: "tcp", InternalPort: 8000, ExternalPort: 30000}, // API port
+				{Protocol: "tcp", InternalPort: 22, ExternalPort: 30022},   // SSH port
+				{Protocol: "tcp", InternalPort: 8080, ExternalPort: 30080}, // Additional port
 			},
 		})
 	}))

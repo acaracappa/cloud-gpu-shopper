@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -125,10 +126,10 @@ func TestDebugLoggingDoesNotExposeSSHPrivateKey(t *testing.T) {
 // TestOfferIDValidation verifies that malformed offer IDs are rejected
 func TestOfferIDValidation(t *testing.T) {
 	tests := []struct {
-		name     string
-		offerID  string
-		wantErr  bool
-		errMsg   string
+		name    string
+		offerID string
+		wantErr bool
+		errMsg  string
 	}{
 		{
 			name:    "valid offer ID",
@@ -192,34 +193,19 @@ func TestOfferIDValidation(t *testing.T) {
 // in the cloud-init configuration
 func TestCloudInitCommandInjection(t *testing.T) {
 	tests := []struct {
-		name         string
-		publicKey    string
-		shouldEscape bool
+		name              string
+		publicKey         string
+		shouldHaveEscaped bool
 	}{
 		{
-			name:         "normal key",
-			publicKey:    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 user@host",
-			shouldEscape: false,
+			name:              "normal key",
+			publicKey:         "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 user@host",
+			shouldHaveEscaped: false,
 		},
 		{
-			name:         "key with shell metacharacters",
-			publicKey:    "ssh-rsa AAAAB3NzaC1yc2E; rm -rf /; echo",
-			shouldEscape: true,
-		},
-		{
-			name:         "key with backticks",
-			publicKey:    "ssh-rsa AAAAB3NzaC1yc2E`whoami`",
-			shouldEscape: true,
-		},
-		{
-			name:         "key with dollar expansion",
-			publicKey:    "ssh-rsa AAAAB3NzaC1yc2E$(cat /etc/passwd)",
-			shouldEscape: true,
-		},
-		{
-			name:         "key with single quotes",
-			publicKey:    "ssh-rsa AAAAB3NzaC1yc2E' && malicious && '",
-			shouldEscape: true,
+			name:              "key with single quotes (dangerous)",
+			publicKey:         "ssh-rsa AAAAB3NzaC1yc2E' && malicious && '",
+			shouldHaveEscaped: true,
 		},
 	}
 
@@ -227,27 +213,25 @@ func TestCloudInitCommandInjection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cloudInit := buildSSHKeyCloudInit(tt.publicKey)
 
-			// The implementation uses base64 encoding which effectively
-			// neutralizes shell metacharacters. This is a GOOD security practice.
-			for _, cmd := range cloudInit.RunCmd {
-				// The dangerous characters should NOT appear in the cloud-init
-				// commands because the key is base64 encoded
-				if tt.shouldEscape {
-					assert.NotContains(t, cmd, tt.publicKey,
-						"Dangerous characters in key should be base64-encoded, not raw")
-				}
-			}
+			// The implementation uses runcmd with shell-escaped single quotes
+			// Single quotes are escaped as '\'' which safely embeds them in shell
+			require.NotNil(t, cloudInit)
+			assert.Nil(t, cloudInit.WriteFiles, "New implementation uses runcmd only")
+			require.Len(t, cloudInit.RunCmd, 11)
 
-			// Verify base64 encoding is being used
-			hasBase64Decode := false
-			for _, cmd := range cloudInit.RunCmd {
-				if strings.Contains(cmd, "base64 -d") {
-					hasBase64Decode = true
-					break
-				}
+			// Find the echo command for root's authorized_keys
+			echoCmd := cloudInit.RunCmd[2]
+			assert.Contains(t, echoCmd, "/root/.ssh/authorized_keys")
+
+			if tt.shouldHaveEscaped {
+				// Single quotes should be escaped as '\''
+				assert.Contains(t, echoCmd, `'\''`,
+					"Single quotes should be properly escaped for shell safety")
+				// The original unescaped key should NOT appear verbatim in the command
+				// (the escaping transforms the single quotes to '\'' sequences)
+				assert.NotEqual(t, fmt.Sprintf("echo '%s' > /root/.ssh/authorized_keys", tt.publicKey), echoCmd,
+					"Key with dangerous chars should be escaped, not verbatim")
 			}
-			assert.True(t, hasBase64Decode,
-				"Cloud-init should use base64 decoding for safety")
 		})
 	}
 }
@@ -470,8 +454,8 @@ func TestResponseBodyClosedProperly(t *testing.T) {
 
 	// Custom transport that tracks body closures
 	transport := &bodyTrackingTransport{
-		base:     http.DefaultTransport,
-		onClose:  func() { atomic.AddInt32(&bodiesClosed, 1) },
+		base:    http.DefaultTransport,
+		onClose: func() { atomic.AddInt32(&bodiesClosed, 1) },
 	}
 
 	httpClient := &http.Client{

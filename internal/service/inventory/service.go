@@ -42,16 +42,17 @@ type Service struct {
 	providers []provider.Provider
 	logger    *slog.Logger
 
-	mu              sync.RWMutex
-	cache           map[string]*providerCache
-	cacheTTL        time.Duration
-	backoffTTL      time.Duration
-	providerTimeout time.Duration
+	mu               sync.RWMutex
+	cache            map[string]*providerCache
+	cacheTTL         time.Duration
+	providerCacheTTL map[string]time.Duration // Provider-specific TTLs (overrides cacheTTL)
+	backoffTTL       time.Duration
+	providerTimeout  time.Duration
 
 	// Bug #19 fix: Track background refresh goroutines for graceful shutdown
-	refreshWg     sync.WaitGroup
-	shutdownCh    chan struct{}
-	shutdownOnce  sync.Once
+	refreshWg    sync.WaitGroup
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 }
 
 // providerCache holds cached offers for a single provider
@@ -93,6 +94,17 @@ func WithLogger(logger *slog.Logger) Option {
 func WithProviderTimeout(d time.Duration) Option {
 	return func(s *Service) {
 		s.providerTimeout = d
+	}
+}
+
+// WithProviderCacheTTL sets a custom cache TTL for a specific provider
+// This overrides the default cache TTL for providers with volatile inventory
+func WithProviderCacheTTL(providerName string, d time.Duration) Option {
+	return func(s *Service) {
+		if s.providerCacheTTL == nil {
+			s.providerCacheTTL = make(map[string]time.Duration)
+		}
+		s.providerCacheTTL[providerName] = d
 	}
 }
 
@@ -307,11 +319,12 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 			return
 		}
 
-		softExpiry := now.Add(s.cacheTTL * 3 / 4) // Soft expiry at 75% of TTL
+		ttl := s.getCacheTTL(providerName)
+		softExpiry := now.Add(ttl * 3 / 4) // Soft expiry at 75% of TTL
 		s.cache[providerName] = &providerCache{
 			offers:     offers,
 			fetchedAt:  now,
-			expiresAt:  now.Add(s.cacheTTL),
+			expiresAt:  now.Add(ttl),
 			softExpiry: softExpiry,
 			err:        nil,
 			inBackoff:  false,
@@ -320,7 +333,8 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 
 		s.logger.Debug("background refresh completed",
 			slog.String("provider", providerName),
-			slog.Int("count", len(offers)))
+			slog.Int("count", len(offers)),
+			slog.Duration("ttl", ttl))
 	}()
 }
 
@@ -357,11 +371,12 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 		return nil, err
 	}
 
-	softExpiry := now.Add(s.cacheTTL * 3 / 4) // Soft expiry at 75% of TTL
+	ttl := s.getCacheTTL(providerName)
+	softExpiry := now.Add(ttl * 3 / 4) // Soft expiry at 75% of TTL
 	s.cache[providerName] = &providerCache{
 		offers:     offers,
 		fetchedAt:  now,
-		expiresAt:  now.Add(s.cacheTTL),
+		expiresAt:  now.Add(ttl),
 		softExpiry: softExpiry,
 		err:        nil,
 		inBackoff:  false,
@@ -370,7 +385,8 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 
 	s.logger.Debug("cached offers from provider",
 		slog.String("provider", providerName),
-		slog.Int("count", len(offers)))
+		slog.Int("count", len(offers)),
+		slog.Duration("ttl", ttl))
 
 	return offers, nil
 }
@@ -522,6 +538,17 @@ func (s *Service) ProviderNames() []string {
 	return names
 }
 
+// getCacheTTL returns the cache TTL for a specific provider
+// Uses provider-specific TTL if configured, otherwise falls back to default
+func (s *Service) getCacheTTL(providerName string) time.Duration {
+	if s.providerCacheTTL != nil {
+		if ttl, ok := s.providerCacheTTL[providerName]; ok {
+			return ttl
+		}
+	}
+	return s.cacheTTL
+}
+
 // Shutdown gracefully shuts down the inventory service
 // Bug #19 fix: Signals background refresh goroutines to stop and waits for completion
 func (s *Service) Shutdown() {
@@ -531,4 +558,19 @@ func (s *Service) Shutdown() {
 		s.refreshWg.Wait()
 		s.logger.Info("inventory service shutdown complete")
 	})
+}
+
+// GetTemplateProvider returns the template provider for a given provider name.
+// Only providers that support templates (e.g., Vast.ai) can be returned.
+func (s *Service) GetTemplateProvider(providerName string) (provider.TemplateProvider, error) {
+	for _, p := range s.providers {
+		if p.Name() == providerName {
+			templateProvider, ok := p.(provider.TemplateProvider)
+			if !ok {
+				return nil, &ProviderNotFoundError{Name: providerName + " (does not support templates)"}
+			}
+			return templateProvider, nil
+		}
+	}
+	return nil, &ProviderNotFoundError{Name: providerName}
 }

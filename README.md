@@ -603,7 +603,10 @@ watch -n 60 './bin/gpu-shopper costs -c my-app'
 | `/metrics` | GET | Prometheus metrics |
 | `/api/v1/inventory` | GET | List available GPUs |
 | `/api/v1/inventory/:id` | GET | Get specific offer |
-| `/api/v1/sessions` | POST | Create session |
+| `/api/v1/inventory/:id/compatible-templates` | GET | Get compatible templates for offer |
+| `/api/v1/templates` | GET | List available templates (Vast.ai) |
+| `/api/v1/templates/:hash_id` | GET | Get specific template |
+| `/api/v1/sessions` | POST | Create session (supports `template_hash_id` and `disk_gb`) |
 | `/api/v1/sessions` | GET | List sessions |
 | `/api/v1/sessions/:id` | GET | Get session |
 | `/api/v1/sessions/:id` | DELETE | Force destroy session |

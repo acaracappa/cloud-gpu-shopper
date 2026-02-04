@@ -344,14 +344,15 @@ func TestAPIContract_CreateInstance_RequestFormat_CloudInit(t *testing.T) {
 
 	// Verify cloud-init is configured for SSH key installation
 	require.NotNil(t, receivedRequest.Data.Attributes.CloudInit)
-	require.NotEmpty(t, receivedRequest.Data.Attributes.CloudInit.RunCmd)
 
-	// Should contain base64 decode command for SSH key
+	// New implementation uses only runcmd (no write_files)
+	assert.Nil(t, receivedRequest.Data.Attributes.CloudInit.WriteFiles)
+
+	// Should have runcmd for all operations: directory creation, key writing, permissions
+	require.Len(t, receivedRequest.Data.Attributes.CloudInit.RunCmd, 11)
 	runcmdStr := strings.Join(receivedRequest.Data.Attributes.CloudInit.RunCmd, " ")
-	assert.Contains(t, runcmdStr, "base64")
-	assert.Contains(t, runcmdStr, "authorized_keys")
 	assert.Contains(t, runcmdStr, "mkdir -p /root/.ssh")
-	assert.Contains(t, runcmdStr, "chmod 700 /root/.ssh")
+	assert.Contains(t, runcmdStr, "authorized_keys")
 }
 
 func TestAPIContract_CreateInstance_RequestFormat_Resources(t *testing.T) {
@@ -534,7 +535,7 @@ func TestAPIContract_GetInstanceStatus_ResponseFormat(t *testing.T) {
 	assert.True(t, status.Running)
 	assert.Equal(t, "174.94.145.71", status.SSHHost)
 	assert.Equal(t, 20456, status.SSHPort) // External port from port forwards
-	assert.Equal(t, "root", status.SSHUser)
+	assert.Equal(t, "user", status.SSHUser)
 }
 
 func TestAPIContract_GetInstanceStatus_DynamicPort(t *testing.T) {
@@ -603,7 +604,7 @@ func TestAPIContract_CreateInstance_ResponseFormat(t *testing.T) {
 	assert.Equal(t, "new-vm-uuid", info.ProviderInstanceID)
 	assert.Equal(t, "creating", info.Status)
 	assert.Empty(t, info.SSHHost, "Create response does not include IP address")
-	assert.Equal(t, "root", info.SSHUser)
+	assert.Equal(t, "user", info.SSHUser)
 }
 
 // =============================================================================

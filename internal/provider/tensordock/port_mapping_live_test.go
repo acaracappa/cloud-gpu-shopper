@@ -171,7 +171,7 @@ func TestLive_PortMappings(t *testing.T) {
 	// Verify SSH info is present
 	assert.NotEmpty(t, status.SSHHost, "SSH host should be set")
 	assert.Greater(t, status.SSHPort, 0, "SSH port should be > 0")
-	assert.Equal(t, "root", status.SSHUser)
+	assert.Equal(t, "user", status.SSHUser)
 
 	// Verify public IP is present
 	assert.NotEmpty(t, status.PublicIP, "Public IP should be set")

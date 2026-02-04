@@ -172,6 +172,24 @@ func (cb *circuitBreaker) State() CircuitBreakerState {
 // ErrCircuitOpen is returned when the circuit breaker is open
 var ErrCircuitOpen = errors.New("circuit breaker is open")
 
+// templateCacheTTL is how long templates are cached before refetching.
+// Templates change infrequently, so use a longer TTL than inventory.
+const templateCacheTTL = 1 * time.Hour
+
+// templateCache holds cached templates
+type templateCache struct {
+	templates []models.VastTemplate
+	fetchedAt time.Time
+	mu        sync.RWMutex
+}
+
+// bundleCache holds cached bundles for template compatibility matching
+type bundleCache struct {
+	bundles   map[int]Bundle // keyed by bundle ID
+	fetchedAt time.Time
+	mu        sync.RWMutex
+}
+
 // Client implements the provider.Provider interface for Vast.ai
 type Client struct {
 	apiKey     string
@@ -185,6 +203,12 @@ type Client struct {
 
 	// Bug #48: Circuit breaker for API calls
 	circuitBreaker *circuitBreaker
+
+	// Template cache
+	templates *templateCache
+
+	// Bundle cache for template compatibility matching
+	bundles *bundleCache
 }
 
 // ClientOption configures the Vast.ai client
@@ -224,8 +248,10 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 		apiKey:         apiKey,
 		baseURL:        defaultBaseURL,
 		httpClient:     &http.Client{Timeout: defaultTimeout},
-		minInterval:    time.Second, // Default 1 request per second
+		minInterval:    time.Second,                                      // Default 1 request per second
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()), // Bug #48
+		templates:      &templateCache{},
+		bundles:        &bundleCache{bundles: make(map[int]Bundle)},
 	}
 
 	for _, opt := range opts {
@@ -319,6 +345,15 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
+
+	// Cache bundles for template compatibility matching
+	c.bundles.mu.Lock()
+	c.bundles.bundles = make(map[int]Bundle)
+	for _, bundle := range result.Offers {
+		c.bundles.bundles[bundle.ID] = bundle
+	}
+	c.bundles.fetchedAt = time.Now()
+	c.bundles.mu.Unlock()
 
 	offers = make([]models.GPUOffer, 0, len(result.Offers))
 	for _, bundle := range result.Offers {
@@ -507,12 +542,40 @@ func (c *Client) buildCreateRequest(req provider.CreateInstanceRequest) CreateIn
 		launchMode = provider.LaunchModeSSH
 	}
 
+	// Default disk space to 50GB if not specified
+	diskSpace := 50
+	if req.DiskGB > 0 {
+		diskSpace = req.DiskGB
+	}
+
 	createReq := CreateInstanceRequest{
 		ClientID:  "me",
-		DiskSpace: 50, // Default disk space in GB
+		DiskSpace: diskSpace,
 		Label:     req.Tags.ToLabel(),
 	}
 
+	// Template-based provisioning: if template_hash_id is provided, use it
+	// Request params override template defaults. Env vars are merged (request wins conflicts).
+	if req.TemplateHashID != "" {
+		createReq.TemplateHashID = req.TemplateHashID
+		// CRITICAL: Override runtype to ensure SSH access regardless of template settings
+		// Templates may have RunType="jupyter" or "args" which don't provide SSH access
+		createReq.RunType = "ssh_proxy"
+		createReq.SSHKey = req.SSHPublicKey
+		log.Printf("[Vast.ai] Creating instance with template %s, disk: %d GB, runtype: ssh_proxy", req.TemplateHashID, createReq.DiskSpace)
+		// Add any additional env vars from the request (they'll be merged with template)
+		if len(req.EnvVars) > 0 {
+			createReq.Env = req.EnvVars
+		}
+		// Add on-start command if specified (overrides template)
+		if req.OnStartCmd != "" {
+			createReq.OnStart = req.OnStartCmd
+		}
+		log.Printf("[Vast.ai] Using template hash_id: %s", req.TemplateHashID)
+		return createReq
+	}
+
+	// No template - build config manually based on launch mode
 	switch launchMode {
 	case provider.LaunchModeEntrypoint:
 		createReq = c.buildEntrypointRequest(createReq, req)
@@ -768,6 +831,131 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 	}, nil
 }
 
+// ListTemplates returns available templates from Vast.ai
+// Templates are cached for 15 minutes to reduce API calls.
+// All templates are cached, and filtering is applied locally to ensure
+// GetTemplate can find any template by hash_id.
+func (c *Client) ListTemplates(ctx context.Context, filter models.TemplateFilter) (templates []models.VastTemplate, err error) {
+	startTime := time.Now()
+
+	// Bug #48: Check circuit breaker before making request
+	if err := c.checkCircuitBreaker(); err != nil {
+		c.recordAPIMetrics("ListTemplates", startTime, err)
+		return nil, err
+	}
+
+	// Record result to circuit breaker and metrics when function returns
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListTemplates", startTime, err)
+	}()
+
+	// Check cache first
+	c.templates.mu.RLock()
+	cachedTemplates := c.templates.templates
+	cachedAt := c.templates.fetchedAt
+	c.templates.mu.RUnlock()
+
+	if len(cachedTemplates) > 0 && time.Since(cachedAt) < templateCacheTTL {
+		// Return filtered cached templates
+		return c.filterTemplates(cachedTemplates, filter), nil
+	}
+
+	// Fetch from API - only fetch recommended templates
+	c.rateLimit()
+
+	// Only fetch recommended templates from Vast.ai using select_filters
+	// These are the curated templates shown in the Vast.ai console
+	// Non-recommended templates (2000+) are user-created and not maintained
+	selectFilters := url.QueryEscape(`{"recommended":{"eq":true}}`)
+	reqURL := fmt.Sprintf("%s/template/?select_filters=%s", c.baseURL, selectFilters)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleError(resp, "ListTemplates")
+	}
+
+	var result TemplatesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Convert to models
+	allTemplates := make([]models.VastTemplate, 0, len(result.Templates))
+	for _, t := range result.Templates {
+		allTemplates = append(allTemplates, t.ToModel())
+	}
+
+	// Update cache with ALL templates
+	c.templates.mu.Lock()
+	c.templates.templates = allTemplates
+	c.templates.fetchedAt = time.Now()
+	c.templates.mu.Unlock()
+
+	// Apply filter and return
+	return c.filterTemplates(allTemplates, filter), nil
+}
+
+// filterTemplates applies the filter to a list of templates
+func (c *Client) filterTemplates(templates []models.VastTemplate, filter models.TemplateFilter) []models.VastTemplate {
+	if filter.Name == "" && filter.Image == "" && !filter.Recommended && !filter.UseSSH {
+		return templates
+	}
+
+	result := make([]models.VastTemplate, 0)
+	for _, t := range templates {
+		if t.MatchesFilter(filter) {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// GetTemplate returns a specific template by hash_id.
+// Only recommended templates are available; non-recommended templates will return ErrTemplateNotFound.
+func (c *Client) GetTemplate(ctx context.Context, hashID string) (*models.VastTemplate, error) {
+	// First try to get from cache
+	c.templates.mu.RLock()
+	cachedTemplates := c.templates.templates
+	cachedAt := c.templates.fetchedAt
+	c.templates.mu.RUnlock()
+
+	if len(cachedTemplates) > 0 && time.Since(cachedAt) < templateCacheTTL {
+		for _, t := range cachedTemplates {
+			if t.HashID == hashID {
+				return &t, nil
+			}
+		}
+	}
+
+	// Refresh cache and search again
+	templates, err := c.ListTemplates(ctx, models.TemplateFilter{})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, t := range templates {
+		if t.HashID == hashID {
+			return &t, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w: %s", provider.ErrTemplateNotFound, hashID)
+}
+
 // rateLimit enforces minimum interval between requests
 func (c *Client) rateLimit() {
 	c.mu.Lock()
@@ -861,4 +1049,77 @@ func (c *Client) recordAPIMetrics(operation string, startTime time.Time, err err
 
 	// Update circuit breaker state metric
 	metrics.UpdateProviderCircuitBreakerState("vastai", int(c.circuitBreaker.State()))
+}
+
+// GetCompatibleTemplates returns templates compatible with the given offer ID.
+// Compatibility is determined by matching template extra_filters against host properties.
+func (c *Client) GetCompatibleTemplates(ctx context.Context, offerID string) ([]models.CompatibleTemplate, error) {
+	// Parse the offer ID to get the bundle ID
+	bundleID, err := c.parseOfferID(offerID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid offer ID %q: %w", offerID, err)
+	}
+
+	// Get the bundle from cache
+	c.bundles.mu.RLock()
+	bundle, exists := c.bundles.bundles[bundleID]
+	c.bundles.mu.RUnlock()
+
+	if !exists {
+		// Bundle not in cache, need to fetch offers to populate cache
+		_, err := c.ListOffers(ctx, models.OfferFilter{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch offers: %w", err)
+		}
+
+		// Try again
+		c.bundles.mu.RLock()
+		bundle, exists = c.bundles.bundles[bundleID]
+		c.bundles.mu.RUnlock()
+
+		if !exists {
+			return nil, fmt.Errorf("offer not found: %s", offerID)
+		}
+	}
+
+	// Get all recommended templates
+	templates, err := c.ListTemplates(ctx, models.TemplateFilter{Recommended: true})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch templates: %w", err)
+	}
+
+	// Get host properties for matching
+	hostProps := bundle.ToHostProperties()
+
+	// Find compatible templates
+	var compatible []models.CompatibleTemplate
+	for _, t := range templates {
+		filters, err := t.ParseExtraFilters()
+		if err != nil {
+			// Skip templates with malformed filters
+			log.Printf("[Vast.ai] WARNING: template %q has malformed extra_filters: %v", t.Name, err)
+			continue
+		}
+
+		// nil or empty filters = compatible with all hosts
+		if filters == nil || filters.MatchesHost(hostProps) {
+			compatible = append(compatible, models.CompatibleTemplate{
+				HashID: t.HashID,
+				Name:   t.Name,
+				Image:  t.Image,
+			})
+		}
+	}
+
+	return compatible, nil
+}
+
+// parseOfferID extracts the bundle ID from an offer ID string
+// Offer IDs are in format "vastai-{id}" or just "{id}"
+func (c *Client) parseOfferID(offerID string) (int, error) {
+	offerID = strings.TrimSpace(offerID)
+	if strings.HasPrefix(strings.ToLower(offerID), "vastai-") {
+		offerID = offerID[7:] // Remove "vastai-" prefix (7 chars)
+	}
+	return strconv.Atoi(offerID)
 }

@@ -687,10 +687,11 @@ After calling AttachSSHKey, the key takes approximately 10-15 seconds to propaga
 
 ### Instance Creation Best Practices
 
-1. Disk size is permanent - choose carefully
+1. Disk size is permanent - choose carefully (Cloud GPU Shopper defaults to 50GB if not specified via `disk_gb`)
 2. Use SSH key attachment endpoint rather than create request parameter
 3. Poll for "running" status before connecting
 4. Image pulls can take 10-60 minutes for large images
+5. For large models (e.g., DeepSeek-V2.5 236B at ~132GB), allocate sufficient disk space upfront
 
 ---
 

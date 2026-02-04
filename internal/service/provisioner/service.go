@@ -58,8 +58,13 @@ const (
 	// DefaultSSHKeyBits is the RSA key size
 	DefaultSSHKeyBits = 4096
 
-	// TensorDockCloudInitDelay is the time to wait for TensorDock cloud-init before SSH polling
-	TensorDockCloudInitDelay = 45 * time.Second
+	// TensorDockCloudInitDelay is the time to wait for TensorDock cloud-init before SSH polling.
+	// This needs to be long enough for:
+	// 1. TensorDock's cloud-init SSH key setup (which writes 0 bytes to root)
+	// 2. Our runcmd to run and install the actual SSH key
+	// 3. TensorDock's scripts to restart the SSH service
+	// Based on live testing, 90 seconds is sufficient.
+	TensorDockCloudInitDelay = 90 * time.Second
 )
 
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
@@ -409,6 +414,21 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		SessionID:    session.ID,
 		SSHPublicKey: publicKey,
 		Tags:         tags,
+	}
+
+	// Template-based provisioning (Vast.ai)
+	if req.TemplateHashID != "" {
+		instanceReq.TemplateHashID = req.TemplateHashID
+		session.TemplateHashID = req.TemplateHashID
+		// Note: TemplateName would be looked up from template provider if needed
+	}
+
+	// Storage configuration
+	s.logger.Info("storage configuration", slog.Int("request_disk_gb", req.DiskGB))
+	if req.DiskGB > 0 {
+		instanceReq.DiskGB = req.DiskGB
+		session.DiskGB = req.DiskGB
+		s.logger.Info("disk configured", slog.Int("disk_gb", req.DiskGB))
 	}
 
 	// Configure for entrypoint mode if specified

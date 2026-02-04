@@ -82,8 +82,19 @@ func main() {
 		logger.Warn("no providers configured, running in demo mode")
 	}
 
-	// Initialize services
-	invService := inventory.New(providers, inventory.WithLogger(logger))
+	// Initialize services with provider-specific cache TTLs
+	invOpts := []inventory.Option{
+		inventory.WithLogger(logger),
+		inventory.WithCacheTTL(cfg.Inventory.DefaultCacheTTL),
+		inventory.WithBackoffTTL(cfg.Inventory.BackoffCacheTTL),
+	}
+	// TensorDock has volatile inventory, use shorter cache TTL
+	if cfg.Inventory.TensorDockCacheTTL > 0 {
+		invOpts = append(invOpts, inventory.WithProviderCacheTTL("tensordock", cfg.Inventory.TensorDockCacheTTL))
+		logger.Info("using shorter cache TTL for TensorDock",
+			slog.Duration("ttl", cfg.Inventory.TensorDockCacheTTL))
+	}
+	invService := inventory.New(providers, invOpts...)
 
 	registry := provisioner.NewSimpleProviderRegistry(providers)
 	provOpts := []provisioner.Option{

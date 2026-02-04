@@ -35,9 +35,9 @@ func TestProgressiveBackoff(t *testing.T) {
 
 	t.Run("caps at maximum", func(t *testing.T) {
 		pb := NewProgressiveBackoff(1*time.Second, 5*time.Second, 2.0)
-		pb.Next() // 1s
-		pb.Next() // 2s
-		pb.Next() // 4s
+		pb.Next()                                 // 1s
+		pb.Next()                                 // 2s
+		pb.Next()                                 // 4s
 		assert.Equal(t, 5*time.Second, pb.Next()) // capped at 5s
 		assert.Equal(t, 5*time.Second, pb.Next()) // stays at 5s
 	})
