@@ -150,6 +150,7 @@ func (b Bundle) ToGPUOffer() models.GPUOffer {
 		FetchedAt:    time.Now(),
 		// Vast.ai inventory is generally reliable
 		AvailabilityConfidence: VastAIAvailabilityConfidence,
+		CUDAVersion:            b.CudaMaxGood,
 	}
 }
 

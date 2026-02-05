@@ -12,6 +12,10 @@
 |----|----------|-------------|--------|
 | BUG-001 | HIGH | TensorDock provider not initializing - docker-compose.yml passes `TENSORDOCK_API_KEY` but server expects `TENSORDOCK_API_TOKEN` | ✅ FIXED |
 | BUG-002 | HIGH | TensorDock SSH key injection failing - instances created but SSH auth fails with "unable to authenticate, attempted methods [none publickey]" | ✅ FIXED (manual SSH verified; API timeout blocking e2e) |
+| BUG-003 | MEDIUM | `.env` file values not reaching provider config - `LoadFromEnv()` reads `.env` as Viper config file but `BindEnv` only reads from OS env vars, not config file values. Fixed by adding `mapEnvFileKeys()` to bridge flat .env keys to nested config paths. | ✅ FIXED |
+| BUG-004 | HIGH | Vast.ai CUDA version mismatch - host `vastai-25994264` (RTX 5090, Texas) advertises CUDA 12.9+ but actually has CUDA 12.8 (driver 570.124.04). vLLM template (requires CUDA 12.9) crashes on first inference with `cudaErrorUnsupportedPtxVersion`. Vast.ai inventory data is inaccurate. | 🔴 OPEN (provider-side) |
+| BUG-005 | HIGH | SSH verify timeout (5min) too short for vLLM template - image pull + model download causes 4/4 provisions to fail. Hosts in Spain, Quebec, and BC Canada all timed out. Only TX RTX 5090 succeeded (likely had cached image). Need configurable per-template timeout or pre-flight image check. | 🔴 OPEN |
+| BUG-006 | MEDIUM | vLLM 0.15.0 pip package (CUDA 12.x) incompatible with CUDA 13.0 hosts - engine core init fails. The vLLM Docker template uses its own bundled CUDA, but pip-installing vLLM on a bare CUDA 13.0 host fails. | 🔴 OPEN (informational) |
 
 ---
 
@@ -58,6 +62,69 @@ Changed from `write_files` to `runcmd`-only approach:
 - ✅ Orphan detection triggered
 - ✅ Instance auto-destroyed on TensorDock
 - ✅ AUDIT logs captured all events
+
+---
+
+## BUG-003 Details: `.env` File Not Loading Provider Credentials
+
+**Discovered:** 2026-02-04 17:44 EST
+
+**Symptoms:**
+- Running `go run cmd/server/main.go` logs "no providers configured, running in demo mode"
+- Both Vast.ai and TensorDock providers fail to initialize
+- All API endpoints work but inventory returns 0 offers from providers
+- Health check shows "ok" (misleading - server runs without providers)
+
+**Root Cause:**
+`config.LoadFromEnv()` in `internal/config/config.go` reads `.env` as a Viper config file (`v.SetConfigType("env")`). When Viper parses `.env`, it stores flat keys (e.g., `vastai_api_key`). However, the Config struct expects nested paths (e.g., `providers.vastai.api_key`). The `BindEnv("providers.vastai.api_key", "VASTAI_API_KEY")` calls only check `os.Getenv()`, not Viper's internal config map from the file.
+
+**Reproduction:**
+1. `go run cmd/server/main.go` -> Logs "no providers configured"
+2. `export $(cat .env | grep -v '^#' | grep -v '^$' | xargs) && go run cmd/server/main.go` -> Providers initialize correctly
+
+**Impact:**
+- Anyone running the server directly with `go run` will get no providers unless they manually export env vars
+- Docker-compose is unaffected (it passes env vars to the container as OS env vars)
+- Confusing for developers - server starts "successfully" but in a degraded demo mode
+
+**Potential Fixes:**
+1. Use `godotenv` to load `.env` into actual OS environment before Viper reads config
+2. After reading `.env` file, manually map flat keys to nested config paths
+3. Change `.env` key names to match nested paths (e.g., `PROVIDERS_VASTAI_API_KEY`) - breaking change
+
+---
+
+## BUG-004 Details: Vast.ai CUDA Version Mismatch on RTX 5090
+
+**Discovered:** 2026-02-04 18:10 EST
+
+**Symptoms:**
+- vLLM model loads and `/v1/models` endpoint responds normally
+- First inference request returns HTTP 500: `EngineCore encountered an issue`
+- vLLM EngineCore crashes with: `torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain`
+- GPU shows no running processes after crash (158MB/32607MB used)
+
+**Root Cause:**
+- vLLM template `a4d2a0b85ae6719c0906ff66e7b3b434` requires CUDA >= 12.9 (per `extra_filters`)
+- Host `vastai-25994264` (RTX 5090, Texas, $0.18/hr) was returned as compatible
+- Actual host has CUDA 12.8 (driver 570.124.04) — confirmed via `nvidia-smi`
+- Flash attention kernels compiled for CUDA 12.9 cannot run on CUDA 12.8
+
+**Impact:**
+- Session provisions and SSH verifies successfully (appears healthy)
+- Model loads into memory (wastes time + bandwidth downloading model)
+- Fails silently on first actual inference — no proactive health signal
+- User pays for a non-functional instance until they discover the issue
+
+**Mitigation Options:**
+1. Add post-provision CUDA version validation via SSH (check `nvidia-smi` output)
+2. Add a vLLM health check after SSH verification (hit `/v1/models` AND send a test prompt)
+3. Report inaccurate host to Vast.ai
+
+**Session Details:**
+- Session ID: `07fff237-5df6-4621-a17f-45fec4f8a4f3`
+- Offer: vastai-25994264, RTX 5090, Texas, $0.18/hr
+- SSH: ssh2.vast.ai:37640
 
 ---
 
@@ -121,6 +188,19 @@ Changed from `write_files` to `runcmd`-only approach:
 | 17:03 | Vast.ai Manual SSH | Confirmed working - GPU access verified |
 | 17:04 | Vast.ai Cleanup | Session destroyed |
 | 17:00-17:06 | TensorDock Attempts | Multiple API timeouts (context deadline exceeded) |
+| 17:44 (Feb 4) | Server Started | Without exported env vars - BUG-003 discovered |
+| 17:59 (Feb 4) | Server Restarted | With exported env vars - both providers initialized |
+| 18:00 (Feb 4) | API Testing | All endpoints tested: health, inventory, templates, sessions, costs, metrics |
+| 18:00 (Feb 4) | Inventory OK | 90 offers returned (65 Vast.ai + 25 TensorDock) |
+| 18:00 (Feb 4) | Templates OK | 37 templates loaded, vLLM template found (hash: a4d2a0b85ae6719c0906ff66e7b3b434) |
+| 18:00 (Feb 4) | Compatible Templates OK | 33 templates compatible with RTX 3090 offer |
+| 18:00 (Feb 4) | Error Handling OK | Invalid params return proper 400 errors, missing sessions return 404 |
+| 18:00 (Feb 4) | Metrics OK | Prometheus metrics endpoint serving |
+| 18:00 (Feb 4) | No Runtime Errors | 0 ERROR log entries during entire test session |
+| 23:15 (Feb 4) | Code Fixes Deployed | Bundle cache merge, CUDA version exposed, template-aware inventory |
+| 23:31 (Feb 4) | vLLM Provision ✅ | RTX 4090 California (vastai-30434039) CUDA 13.0 $0.188/hr, SSH verified in ~3.5min |
+| 23:35 (Feb 4) | vLLM Inference ✅ | DeepSeek-R1-Distill-Llama-8B responded successfully to test prompt |
+| 23:36 (Feb 4) | vLLM Cleanup ✅ | Session destroyed cleanly |
 
 ---
 
@@ -143,6 +223,7 @@ Changed from `write_files` to `runcmd`-only approach:
 ## Notes
 
 - ✅ Vast.ai: Full end-to-end provisioning and SSH verification working correctly
+- ✅ **vLLM end-to-end test PASSED** (Feb 4 23:35): Template-aware provisioning → SSH → model inference
 - ✅ TensorDock SSH fix: Manual verification confirmed keys are installed correctly
 - ⚠️ TensorDock API: Experiencing persistent timeout issues (provider-side)
 - ✅ Safety systems (orphan detection, stuck session timeout) working as designed

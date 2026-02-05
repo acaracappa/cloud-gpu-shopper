@@ -315,6 +315,9 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	if filter.MinReliability > 0 {
 		query["reliability2"] = map[string]float64{"gte": filter.MinReliability}
 	}
+	if filter.MinCUDAVersion > 0 {
+		query["cuda_max_good"] = map[string]float64{"gte": filter.MinCUDAVersion}
+	}
 
 	queryJSON, err := json.Marshal(query)
 	if err != nil {
@@ -346,9 +349,11 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// Cache bundles for template compatibility matching
+	// Cache bundles for template compatibility matching (merge, don't replace)
 	c.bundles.mu.Lock()
-	c.bundles.bundles = make(map[int]Bundle)
+	if c.bundles.bundles == nil {
+		c.bundles.bundles = make(map[int]Bundle)
+	}
 	for _, bundle := range result.Offers {
 		c.bundles.bundles[bundle.ID] = bundle
 	}

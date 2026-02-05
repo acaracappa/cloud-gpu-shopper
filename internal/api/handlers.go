@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -292,6 +294,78 @@ func (s *Server) handleListInventory(c *gin.Context) {
 			return
 		}
 		filter.MinAvailabilityConfidence = v
+	}
+
+	if minCUDA := c.Query("min_cuda"); minCUDA != "" {
+		v, err := strconv.ParseFloat(minCUDA, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_cuda: must be a valid number, got %q", minCUDA),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_cuda: must be non-negative, got %v", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinCUDAVersion = v
+	}
+
+	// Template-aware filtering: apply template's extra_filters as offer constraints
+	if templateHashID := c.Query("template_hash_id"); templateHashID != "" {
+		templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "template filtering requires Vast.ai provider: " + err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
+		tmpl, err := templateProvider.GetTemplate(ctx, templateHashID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:     "template not found: " + templateHashID,
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
+		// Parse template extra_filters and apply as offer constraints
+		extraFilters, err := tmpl.ParseExtraFilters()
+		if err != nil {
+			log.Printf("[API] WARNING: template %q has malformed extra_filters: %v", tmpl.Name, err)
+		} else if extraFilters != nil {
+			if cudaFilter, ok := extraFilters["cuda_max_good"]; ok {
+				if cudaFilter.Gte != nil && filter.MinCUDAVersion < *cudaFilter.Gte {
+					filter.MinCUDAVersion = *cudaFilter.Gte
+				}
+				if cudaFilter.Gt != nil && filter.MinCUDAVersion < *cudaFilter.Gt+0.1 {
+					filter.MinCUDAVersion = *cudaFilter.Gt + 0.1
+				}
+			}
+			if vramFilter, ok := extraFilters["gpu_total_ram"]; ok {
+				vramGB := 0
+				if vramFilter.Gte != nil {
+					vramGB = int(math.Ceil(*vramFilter.Gte / 1024))
+				}
+				if vramFilter.Gt != nil {
+					vramGB = int(math.Ceil(*vramFilter.Gt/1024)) + 1
+				}
+				if vramGB > filter.MinVRAM {
+					filter.MinVRAM = vramGB
+				}
+			}
+		}
+
+		// Template filtering implies Vast.ai provider
+		if filter.Provider == "" {
+			filter.Provider = "vastai"
+		}
 	}
 
 	// Bug #11, #72: Parse and validate pagination params
