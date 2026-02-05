@@ -16,6 +16,7 @@
 | BUG-004 | HIGH | Vast.ai CUDA version mismatch - host `vastai-25994264` (RTX 5090, Texas) advertises CUDA 12.9+ but actually has CUDA 12.8 (driver 570.124.04). vLLM template (requires CUDA 12.9) crashes on first inference with `cudaErrorUnsupportedPtxVersion`. Vast.ai inventory data is inaccurate. | 🔴 OPEN (provider-side) |
 | BUG-005 | HIGH | SSH verify timeout (5min) too short for vLLM template - image pull + model download causes 4/4 provisions to fail. Hosts in Spain, Quebec, and BC Canada all timed out. Only TX RTX 5090 succeeded (likely had cached image). Need configurable per-template timeout or pre-flight image check. | 🔴 OPEN |
 | BUG-006 | MEDIUM | vLLM 0.15.0 pip package (CUDA 12.x) incompatible with CUDA 13.0 hosts - engine core init fails. The vLLM Docker template uses its own bundled CUDA, but pip-installing vLLM on a bare CUDA 13.0 host fails. | 🔴 OPEN (informational) |
+| BUG-007 | HIGH | SSH private key not persisted - returned only once in POST creation response. If client loses the response (network error, crash, parse failure), the key is unrecoverable. Session becomes inaccessible but keeps running and billing. No re-key or key retrieval endpoint exists. | 🔴 OPEN |
 
 ---
 
@@ -128,6 +129,41 @@ Changed from `write_files` to `runcmd`-only approach:
 
 ---
 
+## BUG-007 Details: SSH Private Key Not Persisted / No Recovery Path
+
+**Discovered:** 2026-02-05 00:19 EST
+
+**Symptoms:**
+- POST `/api/v1/sessions` returns `ssh_private_key` in the creation response (HTTP 201)
+- GET `/api/v1/sessions/{id}` returns SSH connection info (host, port, user) but NOT the private key
+- Private key is never stored in the database (by design — `sessions` table has no `ssh_private_key` column)
+- If the creation response is lost, the key is gone forever
+
+**Reproduction:**
+1. POST to create session — response includes `ssh_private_key` (3247 chars)
+2. Simulate lost response (network timeout, client crash, parse error)
+3. GET session — returns host/port/user but no key
+4. No endpoint exists to regenerate or retrieve the key
+5. Session continues running and billing with no way to access it
+
+**Observed During Testing:**
+- First provision attempt lost the creation response due to a script error
+- Session `9a9f6dcb` was created and running but inaccessible
+- Had to DELETE and re-provision to get a new key
+
+**Impact:**
+- Running instance keeps billing with no way to access or use it
+- Only remediation is to destroy and re-provision (wastes time + money)
+- Particularly problematic for automated consumers where transient failures are common
+
+**Potential Fixes:**
+1. Store encrypted private key in DB, return on GET with auth token
+2. Add a `POST /api/v1/sessions/{id}/rekey` endpoint that generates a new keypair and injects it via SSH
+3. Store key server-side temporarily (e.g., 5 min TTL) to allow retry of the creation response
+4. Return a one-time download token that can be used to retrieve the key within a window
+
+---
+
 ## Warnings Observed
 
 | Time | Warning | Details |
@@ -201,6 +237,12 @@ Changed from `write_files` to `runcmd`-only approach:
 | 23:31 (Feb 4) | vLLM Provision ✅ | RTX 4090 California (vastai-30434039) CUDA 13.0 $0.188/hr, SSH verified in ~3.5min |
 | 23:35 (Feb 4) | vLLM Inference ✅ | DeepSeek-R1-Distill-Llama-8B responded successfully to test prompt |
 | 23:36 (Feb 4) | vLLM Cleanup ✅ | Session destroyed cleanly |
+| 00:19 (Feb 5) | Ollama Provision ✅ | RTX 3090 Spain (vastai-28003026) $0.076/hr, SSH verified ~3.5min |
+| 00:19 (Feb 5) | BUG-007 Discovered | Lost SSH key from first provision attempt due to script error - no recovery path |
+| 00:24 (Feb 5) | Ollama SSH Handoff ✅ | API-provided key connects, qwen3:14b inference works |
+| 00:24 (Feb 5) | vLLM Provision ✅ | RTX 3090 Pennsylvania (vastai-30775857) $0.062/hr, SSH verified ~1min |
+| 00:30 (Feb 5) | vLLM Model Loaded ✅ | DeepSeek-R1-Distill-Llama-8B ready on port 18000 |
+| 00:31 (Feb 5) | Both Nodes Destroyed | Ollama + vLLM sessions cleaned up |
 
 ---
 

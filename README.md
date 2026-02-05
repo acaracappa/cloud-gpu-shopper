@@ -62,11 +62,21 @@ Managing GPU compute across multiple cloud providers is complex and risky:
 
 ### Environment Variables
 
+Create a `.env` file in the project root (automatically loaded by the server):
+
+```bash
+VASTAI_API_KEY=your-vastai-key
+TENSORDOCK_API_TOKEN=your-tensordock-token
+TENSORDOCK_AUTH_ID=your-tensordock-auth-id
+DATABASE_PATH=./data/gpu-shopper.db
+```
+
+Or export them directly:
+
 ```bash
 export VASTAI_API_KEY=your-vastai-key
-export TENSORDOCK_API_KEY=your-tensordock-key
+export TENSORDOCK_API_TOKEN=your-tensordock-token
 export TENSORDOCK_AUTH_ID=your-tensordock-auth-id
-export DATABASE_PATH=./data/gpu-shopper.db
 ```
 
 ### Run the Server
@@ -601,7 +611,7 @@ watch -n 60 './bin/gpu-shopper costs -c my-app'
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/metrics` | GET | Prometheus metrics |
-| `/api/v1/inventory` | GET | List available GPUs |
+| `/api/v1/inventory` | GET | List available GPUs (supports `min_cuda`, `template_hash_id` filters) |
 | `/api/v1/inventory/:id` | GET | Get specific offer |
 | `/api/v1/inventory/:id/compatible-templates` | GET | Get compatible templates for offer |
 | `/api/v1/templates` | GET | List available templates (Vast.ai) |
@@ -624,7 +634,7 @@ See [docs/API.md](docs/API.md) for full API documentation with request/response 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `VASTAI_API_KEY` | Yes* | API key for Vast.ai provider |
-| `TENSORDOCK_API_KEY` | Yes* | API token for TensorDock provider |
+| `TENSORDOCK_API_TOKEN` | Yes* | API token for TensorDock provider |
 | `TENSORDOCK_AUTH_ID` | Yes* | Auth ID for TensorDock provider |
 | `DATABASE_PATH` | No | SQLite database path (default: `./data/gpu-shopper.db`) |
 | `SERVER_HOST` | No | Server bind address (default: `0.0.0.0`) |

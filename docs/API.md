@@ -108,6 +108,8 @@ List available GPU offers from all providers.
 | gpu_count | int | Alias for min_gpu_count |
 | min_reliability | float | Minimum reliability score (0-1) |
 | min_availability_confidence | float | Minimum availability confidence (0-1) |
+| min_cuda | float | Minimum CUDA version (e.g., 12.9). Vast.ai only. |
+| template_hash_id | string | Filter to offers compatible with this Vast.ai template. Auto-applies the template's extra_filters (CUDA version, VRAM, etc). |
 | limit | int | Maximum number of results (must be positive) |
 | offset | int | Number of results to skip (for pagination) |
 
@@ -127,7 +129,8 @@ List available GPU offers from all providers.
       "reliability": 0.98,
       "available": true,
       "max_duration_hours": 0,
-      "fetched_at": "2026-01-29T12:00:00Z"
+      "fetched_at": "2026-01-29T12:00:00Z",
+      "cuda_version": 13.0
     }
   ],
   "count": 1,

@@ -34,9 +34,10 @@ A Go service that provides unified inventory and orchestration over commodity GP
 ## API Endpoints
 
 ```
-GET  /api/v1/inventory          # List available GPUs
-POST /api/v1/sessions           # Provision a session
-GET  /api/v1/sessions/{id}      # Get session details
+GET  /api/v1/inventory          # List available GPUs (?min_cuda=12.9&template_hash_id=...)
+GET  /api/v1/templates          # List templates (?use_ssh=true&name=vllm)
+POST /api/v1/sessions           # Provision a session (supports template_hash_id, disk_gb)
+GET  /api/v1/sessions/{id}      # Get session details (no private key - returned only at creation)
 POST /api/v1/sessions/{id}/done # Signal completion
 DELETE /api/v1/sessions/{id}    # Force shutdown
 GET  /api/v1/costs              # Cost summary
@@ -80,7 +81,9 @@ go build ./cmd/...
 ## Environment Variables
 
 ```bash
+# Set in .env file (auto-loaded) or export to environment
 VASTAI_API_KEY=xxx
-TENSORDOCK_API_KEY=xxx
+TENSORDOCK_API_TOKEN=xxx
+TENSORDOCK_AUTH_ID=xxx
 DATABASE_PATH=./data/gpu-shopper.db
 ```
