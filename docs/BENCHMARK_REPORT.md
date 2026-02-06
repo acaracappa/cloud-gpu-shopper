@@ -78,68 +78,29 @@ This benchmark suite evaluated LLM inference performance across consumer and dat
 
 ## GPU Analysis
 
-### NVIDIA H200 NVL (144GB HBM3e)
-- **Best for**: Extra-large models (70B+)
-- **Strength**: 10x faster than A100 on 70B due to memory bandwidth
-- **VRAM**: 143,771 MiB (no memory pressure on any model)
-- **Cost**: $2.00/hr - expensive but necessary for 70B+ models
-
-### NVIDIA GeForce RTX 5090 (32GB)
-- **Best overall consumer GPU** across all model sizes
-- Handles 32B models at 72.5 TPS (7x faster than RTX 4090)
-- 32GB VRAM provides headroom for larger models
-- Excellent price/performance at $0.21/hr
-
-### NVIDIA A100 80GB PCIe
-- **Best for**: Large models requiring >24GB VRAM
-- Consistent performance across model sizes
-- Higher base cost ($0.33/hr) but critical for 70B+ models
-- Datacenter reliability and ECC memory
-
-### NVIDIA GeForce RTX 4090 (24GB)
-- Strong performance on small/medium models
-- **Struggles with 32B models** due to VRAM limits (13 TPS)
-- Significant provider variance (Vast.ai vs TensorDock)
-- Good choice for production inference under 24GB
-
-### NVIDIA GeForce RTX 5070 Ti (16GB)
-- **Best value for small models** at $0.094/hr
-- 284.7 TPS on phi3:mini (3.8B) with exceptional consistency
-- 16GB VRAM handles small-medium models comfortably
-- Blackwell architecture delivers 10.9M tokens per dollar
-
-### NVIDIA GeForce RTX 5070 (12GB)
-- Entry Blackwell architecture
-- 173 TPS on 1.5B model - solid small model performance
-- Limited by 12GB VRAM for larger models
-- Competitive at $0.18/hr
-
-### NVIDIA GeForce RTX 5060 Ti (16GB)
-- Mid-range Blackwell
-- 214 TPS on 1.5B model
-- 16GB VRAM handles small-medium models
-- Best value for small models at $0.15/hr
-
-### NVIDIA GeForce RTX 3090 (24GB)
-- **Best cost efficiency** for small/medium models
-- Vast.ai at $0.08/hr delivers 7.5M tokens/dollar on qwen2:7b
-- Older architecture shows in larger model performance
-- Significant provider variance (Vast.ai 2x faster than TensorDock)
+| GPU | VRAM | $/hr | Best For | Key Strength | Key Limitation |
+|-----|------|------|----------|--------------|----------------|
+| **H200 NVL** | 144GB HBM3e | $2.00 | 70B+ models | 10x faster than A100 on 70B; no memory pressure on any model | Expensive; only worth it for 70B+ |
+| **RTX 5090** | 32GB | $0.21 | Best consumer GPU overall | 72.5 TPS on 32B (7x faster than RTX 4090); excellent price/perf | Still consumer-grade reliability |
+| **A100 80GB** | 80GB HBM2e | $0.33 | Large models (>24GB VRAM) | Consistent performance; datacenter reliability; ECC memory | Higher base cost than consumer GPUs |
+| **RTX 4090** | 24GB | $0.16-0.44 | Production inference <24GB | Strong small/medium model performance | Struggles with 32B (13 TPS); significant provider variance |
+| **RTX 5070 Ti** | 16GB | $0.094 | Best value for small models | 285 TPS on phi3:mini; 10.9M tokens/dollar; exceptional consistency | 16GB limits model size |
+| **RTX 5070** | 12GB | $0.18 | Entry Blackwell | 173 TPS on 1.5B; competitive pricing | 12GB VRAM limits to small models |
+| **RTX 5060 Ti** | 16GB | $0.15 | Mid-range small models | 214 TPS on 1.5B; good value | Limited benchmark coverage |
+| **RTX 3090** | 24GB | $0.08-0.20 | Best cost efficiency | 7.5M tokens/dollar on qwen2:7b at $0.08/hr (Vast.ai) | Older arch hurts on large models; Vast.ai 2x faster than TensorDock |
 
 ## Provider Comparison
 
-### Vast.ai
-- Generally faster instance provisioning
-- More consistent performance
-- Better GPU availability
-- Lower prices on comparable hardware
-- **RTX 3090 at $0.08/hr is exceptional value**
-
-### TensorDock
-- More datacenter GPU options
-- Can have stale inventory (80%+ offers may fail)
-- Higher variance in performance
-- Competitive on specific configurations
+| Dimension | Vast.ai | TensorDock |
+|-----------|---------|------------|
+| **Pricing** | Significantly cheaper (RTX 3090 $0.08 vs $0.20, RTX 4090 $0.16 vs $0.44) | 2-3x more expensive for same GPU |
+| **Performance** | Higher and more consistent TPS | Lower TPS with higher variance |
+| **Consistency** | Tight TPS ranges (e.g. RTX 3090 qwen2:7b: 167.2-168.4) | Wide TPS ranges (e.g. RTX 3090 qwen2:7b: 88.6-169.5) |
+| **Provisioning** | Generally faster, more reliable | 80%+ stale inventory; frequent provisioning failures |
+| **GPU Selection** | Consumer + datacenter (H200, 50-series, A100) | Mostly consumer GPUs |
+| **RTX 3090 qwen2:7b** | 167.4 TPS @ $0.08/hr = **7.5M tok/$** | 126.7 TPS @ $0.20/hr = 2.3M tok/$ |
+| **RTX 4090 deepseek-r1:14b** | 96.7 TPS @ $0.16/hr = **2.2M tok/$** | 93.7 TPS @ $0.44/hr = 767K tok/$ |
+| **Best Feature** | RTX 3090 at $0.08/hr is exceptional value | Competitive on specific niche configurations |
 
 ## Recommendations
 
@@ -155,20 +116,13 @@ This benchmark suite evaluated LLM inference performance across consumer and dat
 
 ### By Use Case
 
-**Development/Testing (low volume, small models)**
-- RTX 5070 Ti on Vast.ai ($0.094/hr) - best tokens per dollar (10.9M/dollar)
-
-**Development/Testing (low volume, medium models)**
-- RTX 3090 on Vast.ai ($0.08/hr) - best value for 7B+ models
-
-**Production (medium volume, <24GB models)**
-- RTX 5090 on Vast.ai ($0.21/hr) - best performance/price balance
-
-**Production (large models, 32B-70B)**
-- A100 80GB on Vast.ai ($0.33/hr) - required VRAM headroom
-
-**High-throughput (70B+ models)**
-- H200 NVL on Vast.ai ($2.00/hr) - 10x faster than A100
+| Use Case | GPU | Provider | $/hr | Why |
+|----------|-----|----------|------|-----|
+| Dev/Test (small models) | RTX 5070 Ti | Vast.ai | $0.094 | Best tokens per dollar (10.9M/dollar) |
+| Dev/Test (medium models) | RTX 3090 | Vast.ai | $0.08 | Best value for 7B+ models |
+| Production (<24GB models) | RTX 5090 | Vast.ai | $0.21 | Best performance/price balance |
+| Production (32B-70B) | A100 80GB | Vast.ai | $0.33 | Required VRAM headroom |
+| High-throughput (70B+) | H200 NVL | Vast.ai | $2.00 | 10x faster than A100 |
 
 ## Methodology
 
