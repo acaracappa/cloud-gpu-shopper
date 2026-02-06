@@ -29,13 +29,17 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 			ssh_host, ssh_port, ssh_user, ssh_public_key,
 			workload_type, reservation_hours, hard_max_override,
 			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, stopped_at
+			price_per_hour, created_at, expires_at, stopped_at,
+			auto_retry, max_retries, retry_scope,
+			retry_count, retry_parent_id, retry_child_id, failed_offers
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
 			?, ?,
+			?, ?, ?, ?,
+			?, ?, ?,
 			?, ?, ?, ?
 		)
 	`
@@ -47,6 +51,8 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 		session.WorkloadType, session.ReservationHrs, session.HardMaxOverride,
 		session.IdleThreshold, session.StoragePolicy,
 		session.PricePerHour, session.CreatedAt, session.ExpiresAt, nullTime(session.StoppedAt),
+		session.AutoRetry, session.MaxRetries, session.RetryScope,
+		session.RetryCount, session.RetryParentID, session.RetryChildID, session.FailedOffers,
 	)
 
 	if err != nil {
@@ -62,50 +68,69 @@ func (s *SessionStore) Create(ctx context.Context, session *models.Session) erro
 	return nil
 }
 
-// Get retrieves a session by ID
-func (s *SessionStore) Get(ctx context.Context, id string) (*models.Session, error) {
-	query := `
-		SELECT
-			id, consumer_id, provider, provider_instance_id, offer_id,
-			gpu_type, gpu_count, status, error,
-			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			workload_type, reservation_hours, hard_max_override,
-			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, stopped_at
-		FROM sessions
-		WHERE id = ?
-	`
+// sessionColumns is the list of columns for session queries
+const sessionColumns = `
+	id, consumer_id, provider, provider_instance_id, offer_id,
+	gpu_type, gpu_count, status, error,
+	ssh_host, ssh_port, ssh_user, ssh_public_key,
+	workload_type, reservation_hours, hard_max_override,
+	idle_threshold_minutes, storage_policy,
+	price_per_hour, created_at, expires_at, stopped_at,
+	auto_retry, max_retries, retry_scope,
+	retry_count, retry_parent_id, retry_child_id, failed_offers
+`
 
+// scanSession scans a row into a Session model, handling nullable fields
+func scanSession(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*models.Session, error) {
 	session := &models.Session{}
 	var stoppedAt sql.NullTime
 	var providerID, sshHost, sshUser, sshPublicKey, errorStr sql.NullString
 	var sshPort sql.NullInt64
+	var retryScope, retryParentID, retryChildID, failedOffers sql.NullString
 
-	err := s.db.QueryRowContext(ctx, query, id).Scan(
+	err := scanner.Scan(
 		&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
 		&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
 		&sshHost, &sshPort, &sshUser, &sshPublicKey,
 		&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
 		&session.IdleThreshold, &session.StoragePolicy,
 		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &stoppedAt,
+		&session.AutoRetry, &session.MaxRetries, &retryScope,
+		&session.RetryCount, &retryParentID, &retryChildID, &failedOffers,
 	)
-
-	if err == sql.ErrNoRows {
-		return nil, ErrNotFound
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session: %w", err)
+		return nil, err
 	}
 
-	// Handle nullable fields
 	session.ProviderID = providerID.String
 	session.SSHHost = sshHost.String
 	session.SSHPort = int(sshPort.Int64)
 	session.SSHUser = sshUser.String
 	session.SSHPublicKey = sshPublicKey.String
 	session.Error = errorStr.String
+	session.RetryScope = retryScope.String
+	session.RetryParentID = retryParentID.String
+	session.RetryChildID = retryChildID.String
+	session.FailedOffers = failedOffers.String
 	if stoppedAt.Valid {
 		session.StoppedAt = stoppedAt.Time
+	}
+
+	return session, nil
+}
+
+// Get retrieves a session by ID
+func (s *SessionStore) Get(ctx context.Context, id string) (*models.Session, error) {
+	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE id = ?`
+
+	session, err := scanSession(s.db.QueryRowContext(ctx, query, id))
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
 	return session, nil
@@ -124,7 +149,10 @@ func (s *SessionStore) Update(ctx context.Context, session *models.Session) erro
 			hard_max_override = ?,
 			reservation_hours = ?,
 			expires_at = ?,
-			stopped_at = ?
+			stopped_at = ?,
+			retry_count = ?,
+			retry_child_id = ?,
+			failed_offers = ?
 		WHERE id = ?
 	`
 
@@ -139,6 +167,9 @@ func (s *SessionStore) Update(ctx context.Context, session *models.Session) erro
 		session.ReservationHrs,
 		session.ExpiresAt,
 		nullTime(session.StoppedAt),
+		session.RetryCount,
+		session.RetryChildID,
+		session.FailedOffers,
 		session.ID,
 	)
 
@@ -159,17 +190,7 @@ func (s *SessionStore) Update(ctx context.Context, session *models.Session) erro
 
 // ListInternal returns sessions matching the internal filter (used by lifecycle and other internal services)
 func (s *SessionStore) ListInternal(ctx context.Context, filter SessionFilter) ([]*models.Session, error) {
-	query := `
-		SELECT
-			id, consumer_id, provider, provider_instance_id, offer_id,
-			gpu_type, gpu_count, status, error,
-			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			workload_type, reservation_hours, hard_max_override,
-			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, stopped_at
-		FROM sessions
-		WHERE 1=1
-	`
+	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE 1=1`
 
 	var args []interface{}
 
@@ -216,34 +237,10 @@ func (s *SessionStore) ListInternal(ctx context.Context, filter SessionFilter) (
 
 	var sessions []*models.Session
 	for rows.Next() {
-		session := &models.Session{}
-		var stoppedAt sql.NullTime
-		var providerID, sshHost, sshUser, sshPublicKey, errorStr sql.NullString
-		var sshPort sql.NullInt64
-
-		err := rows.Scan(
-			&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
-			&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
-			&sshHost, &sshPort, &sshUser, &sshPublicKey,
-			&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
-			&session.IdleThreshold, &session.StoragePolicy,
-			&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &stoppedAt,
-		)
+		session, err := scanSession(rows)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
 		}
-
-		// Handle nullable fields
-		session.ProviderID = providerID.String
-		session.SSHHost = sshHost.String
-		session.SSHPort = int(sshPort.Int64)
-		session.SSHUser = sshUser.String
-		session.SSHPublicKey = sshPublicKey.String
-		session.Error = errorStr.String
-		if stoppedAt.Valid {
-			session.StoppedAt = stoppedAt.Time
-		}
-
 		sessions = append(sessions, session)
 	}
 	if err := rows.Err(); err != nil {
@@ -358,14 +355,7 @@ func (s *SessionStore) CountSessionsByProviderAndStatus(ctx context.Context) ([]
 // Active sessions are those with status pending, provisioning, or running.
 // Returns ErrNotFound if no active session exists.
 func (s *SessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, consumerID, offerID string) (*models.Session, error) {
-	query := `
-		SELECT
-			id, consumer_id, provider, provider_instance_id, offer_id,
-			gpu_type, gpu_count, status, error,
-			ssh_host, ssh_port, ssh_user, ssh_public_key,
-			workload_type, reservation_hours, hard_max_override,
-			idle_threshold_minutes, storage_policy,
-			price_per_hour, created_at, expires_at, stopped_at
+	query := `SELECT ` + sessionColumns + `
 		FROM sessions
 		WHERE consumer_id = ? AND offer_id = ?
 		  AND status IN ('pending', 'provisioning', 'running')
@@ -373,36 +363,12 @@ func (s *SessionStore) GetActiveSessionByConsumerAndOffer(ctx context.Context, c
 		LIMIT 1
 	`
 
-	session := &models.Session{}
-	var stoppedAt sql.NullTime
-	var providerID, sshHost, sshUser, sshPublicKey, errorStr sql.NullString
-	var sshPort sql.NullInt64
-
-	err := s.db.QueryRowContext(ctx, query, consumerID, offerID).Scan(
-		&session.ID, &session.ConsumerID, &session.Provider, &providerID, &session.OfferID,
-		&session.GPUType, &session.GPUCount, &session.Status, &errorStr,
-		&sshHost, &sshPort, &sshUser, &sshPublicKey,
-		&session.WorkloadType, &session.ReservationHrs, &session.HardMaxOverride,
-		&session.IdleThreshold, &session.StoragePolicy,
-		&session.PricePerHour, &session.CreatedAt, &session.ExpiresAt, &stoppedAt,
-	)
-
+	session, err := scanSession(s.db.QueryRowContext(ctx, query, consumerID, offerID))
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get active session: %w", err)
-	}
-
-	// Handle nullable fields
-	session.ProviderID = providerID.String
-	session.SSHHost = sshHost.String
-	session.SSHPort = int(sshPort.Int64)
-	session.SSHUser = sshUser.String
-	session.SSHPublicKey = sshPublicKey.String
-	session.Error = errorStr.String
-	if stoppedAt.Valid {
-		session.StoppedAt = stoppedAt.Time
 	}
 
 	return session, nil

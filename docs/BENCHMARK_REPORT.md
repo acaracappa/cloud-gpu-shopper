@@ -1,9 +1,9 @@
 # GPU Benchmark Report
 
 **Generated**: February 6, 2026
-**Total Benchmarks**: 22
-**GPUs Tested**: 8 (RTX 3090, RTX 4090, RTX 5060 Ti, RTX 5070, RTX 5090, A100 80GB, H200 NVL)
-**Models Tested**: 5 (qwen2:1.5b, qwen2:7b, deepseek-r1:14b, deepseek-r1:32b, deepseek-r1:70b)
+**Total Benchmarks**: 23
+**GPUs Tested**: 9 (RTX 3090, RTX 4090, RTX 5060 Ti, RTX 5070, RTX 5070 Ti, RTX 5090, A100 80GB, H200 NVL)
+**Models Tested**: 6 (qwen2:1.5b, qwen2:7b, phi3:mini, deepseek-r1:14b, deepseek-r1:32b, deepseek-r1:70b)
 **Providers**: Vast.ai, TensorDock
 
 ## Executive Summary
@@ -12,11 +12,20 @@ This benchmark suite evaluated LLM inference performance across consumer and dat
 
 1. **H200 NVL dominates large models** - 36.27 TPS on deepseek-r1:70b (10x faster than A100)
 2. **RTX 5090 leads consumer GPUs** - 305 TPS on qwen2:7b, handles 32b models effectively
-3. **RTX 3090 best value for small models** - $0.08/hr on Vast.ai delivers 7.5M tokens/dollar
-4. **Provider variance is significant** - Same GPU can differ 20-80% between providers
-5. **New Blackwell GPUs (50-series)** show strong small-model performance at competitive prices
+3. **RTX 5070 Ti best value overall** - 285 TPS on phi3:mini at $0.094/hr delivers 10.9M tokens/dollar
+4. **RTX 3090 best value for medium models** - $0.08/hr on Vast.ai delivers 7.5M tokens/dollar
+5. **Provider variance is significant** - Same GPU can differ 20-80% between providers
+6. **New Blackwell GPUs (50-series)** show strong small-model performance at competitive prices
 
 ## Performance Results by Model
+
+### phi3:mini (3.8B Small Model)
+
+| GPU | Provider | TPS | $/hr | Tokens/$ |
+|-----|----------|-----|------|----------|
+| **RTX 5070 Ti** | Vast.ai | **284.7** | $0.094 | **10.9M** |
+
+**Note**: RTX 5070 Ti showed exceptional consistency (282.8-286.7 TPS range across 20 requests).
 
 ### qwen2:1.5b (Small Model)
 
@@ -93,6 +102,12 @@ This benchmark suite evaluated LLM inference performance across consumer and dat
 - Significant provider variance (Vast.ai vs TensorDock)
 - Good choice for production inference under 24GB
 
+### NVIDIA GeForce RTX 5070 Ti (16GB)
+- **Best value for small models** at $0.094/hr
+- 284.7 TPS on phi3:mini (3.8B) with exceptional consistency
+- 16GB VRAM handles small-medium models comfortably
+- Blackwell architecture delivers 10.9M tokens per dollar
+
 ### NVIDIA GeForce RTX 5070 (12GB)
 - Entry Blackwell architecture
 - 173 TPS on 1.5B model - solid small model performance
@@ -132,7 +147,7 @@ This benchmark suite evaluated LLM inference performance across consumer and dat
 
 | Model Size | Budget Pick | Performance Pick |
 |------------|-------------|------------------|
-| 1.5B | RTX 5060 Ti @ $0.15/hr | RTX 3090 TD @ $0.20/hr |
+| 1.5-4B | RTX 5070 Ti @ $0.094/hr | RTX 5070 Ti @ $0.094/hr |
 | 7B | RTX 3090 Vast @ $0.08/hr | RTX 5090 @ $0.21/hr |
 | 14B | RTX 3090 Vast @ $0.08/hr | RTX 5090 @ $0.21/hr |
 | 32B | RTX 5090 @ $0.21/hr | A100 80GB @ $0.33/hr |
@@ -140,8 +155,11 @@ This benchmark suite evaluated LLM inference performance across consumer and dat
 
 ### By Use Case
 
-**Development/Testing (low volume)**
-- RTX 3090 on Vast.ai ($0.08/hr) - best tokens per dollar
+**Development/Testing (low volume, small models)**
+- RTX 5070 Ti on Vast.ai ($0.094/hr) - best tokens per dollar (10.9M/dollar)
+
+**Development/Testing (low volume, medium models)**
+- RTX 3090 on Vast.ai ($0.08/hr) - best value for 7B+ models
 
 **Production (medium volume, <24GB models)**
 - RTX 5090 on Vast.ai ($0.21/hr) - best performance/price balance

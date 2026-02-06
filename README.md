@@ -14,6 +14,7 @@ A unified inventory and orchestration service for commodity GPU providers (Vast.
 - [Supported Providers](#supported-providers)
 - [Quick Start](#quick-start)
 - [Common Use Cases](#common-use-cases)
+- [GPU Benchmarking](#gpu-benchmarking)
 - [CLI Reference](#cli-reference)
 - [API Overview](#api-overview)
 - [Configuration Reference](#configuration-reference)
@@ -50,8 +51,13 @@ Managing GPU compute across multiple cloud providers is complex and risky:
 
 | Provider | Status | Features |
 |----------|--------|----------|
-| Vast.ai | Implemented | Instance tags, spot pricing |
-| TensorDock | Implemented | On-demand pricing |
+| Vast.ai | Implemented | Instance tags, spot pricing, Docker templates |
+| TensorDock | Implemented | On-demand pricing, dedicated IPs |
+
+**TensorDock Note:** The `ubuntu2404` image requires manual NVIDIA driver installation:
+```bash
+ssh user@<ip> "sudo apt-get update && sudo apt-get install -y nvidia-driver-550 && sudo reboot"
+```
 
 ## Quick Start
 
@@ -183,6 +189,164 @@ done
 
 # Sessions auto-terminate after reservation expires, or signal done when complete
 ```
+
+### Real-World Benchmark: DeepSeek-R1:32b on RTX 4090
+
+This benchmark was performed on a TensorDock RTX 4090 provisioned through Cloud GPU Shopper.
+
+**Setup:**
+```bash
+# Provision an RTX 4090 in Joplin, Missouri
+./bin/gpu-shopper provision \
+  --offer-id tensordock-071132ae-8c07-4d6b-9c37-041a55a85047-geforcertx4090-pcie-24gb \
+  --consumer-id benchmark-test \
+  --hours 1 \
+  --save-key ~/.ssh/benchmark_key
+
+# SSH and install Ollama
+ssh -i ~/.ssh/benchmark_key user@<ip> "curl -fsSL https://ollama.com/install.sh | sh"
+
+# Pull the model (19GB)
+ssh -i ~/.ssh/benchmark_key user@<ip> "ollama pull deepseek-r1:32b"
+```
+
+**Benchmark Results: DeepSeek-R1:32b (19GB model)**
+
+| Metric | Value |
+|--------|-------|
+| **Single Request Speed** | ~44 tokens/sec |
+| **Concurrent Throughput** | ~41 tokens/sec |
+| **VRAM Usage** | 20.4 GB / 24 GB (83%) |
+| **GPU Power Draw** | ~360W |
+| **GPU Temperature** | 52°C |
+
+**Performance by Task Type:**
+
+| Task | Output Tokens | Speed | Time |
+|------|---------------|-------|------|
+| Short Q&A | 12 | 48.0 tok/s | 0.29s |
+| Math Problem | 150 | 44.4 tok/s | 10.6s |
+| Code Generation | 256 | 44.2 tok/s | 5.8s |
+| Reasoning | 200 | 44.3 tok/s | 4.5s |
+| Long Generation | 400 | 44.1 tok/s | 9.1s |
+
+**Cost Analysis:**
+- Hourly rate: $0.44/hr (TensorDock RTX 4090)
+- Tokens per hour: ~158,400 (at 44 tok/s)
+- Cost per 1M tokens: ~$0.003
+
+**Key Observations:**
+1. Generation speed stays consistent (~44 tok/s) regardless of output length
+2. The 32B parameter model fits comfortably with 17% VRAM headroom
+3. GPU thermals remain cool (52°C) under sustained load
+4. Ollama serializes concurrent requests (no batching optimization)
+
+**Extended Stress Test (7 min, 67 requests):**
+
+The system maintained stable performance under sustained load:
+- **Requests:** 67 total, 0 errors (100% success rate)
+- **Tokens Generated:** ~17,000 (256 max per request)
+- **Throughput:** Consistent 44.13-44.29 tok/s across all requests
+- **GPU Utilization:** 95-97% average (brief dips during request transitions)
+- **Temperature:** Stabilized at 64°C (never exceeded safe levels)
+- **Power Draw:** Average 371W, peak 377W
+- **Memory:** Stable at 20,368 MiB (83% utilization)
+
+This demonstrates the RTX 4090 handles sustained LLM inference workloads with excellent thermal and performance stability.
+
+## GPU Benchmarking
+
+Cloud GPU Shopper includes comprehensive benchmarking infrastructure for evaluating LLM inference performance across different GPUs and providers. This enables data-driven hardware selection based on your specific model requirements.
+
+### Benchmark Matrix Results
+
+We tested 3 models across 4 GPUs on 2 providers (17 successful benchmarks):
+
+| GPU | Provider | $/hr | qwen2:7b | deepseek-r1:14b | deepseek-r1:32b |
+|-----|----------|------|----------|-----------------|-----------------|
+| RTX 5090 | Vast.ai | $0.21 | **305 TPS** | **149 TPS** | **72.5 TPS** |
+| A100 80GB | Vast.ai | $0.33 | 200 TPS | 86 TPS | 42 TPS |
+| RTX 4090 | Vast.ai | $0.16 | 195 TPS | 97 TPS | N/A* |
+| RTX 4090 | TensorDock | $0.44 | 190 TPS | 94 TPS | 13 TPS |
+| RTX 3090 | Vast.ai | $0.08 | 167 TPS | 81 TPS | 3.6 TPS |
+| RTX 3090 | TensorDock | $0.20 | 127 TPS | 45 TPS | 11 TPS |
+
+*RTX 4090 on Vast.ai had VRAM pressure errors with the 32b model.
+
+**Key Findings:**
+- **RTX 5090** leads all consumer GPUs, handling 32b models 7x faster than RTX 4090
+- **RTX 3090 on Vast.ai** ($0.08/hr) offers best cost efficiency for small/medium models
+- **Provider variance is significant** - same GPU can differ 20-80% between providers
+
+### Cost Efficiency (Tokens per Dollar)
+
+| GPU | Provider | qwen2:7b | deepseek-r1:14b | deepseek-r1:32b |
+|-----|----------|----------|-----------------|-----------------|
+| RTX 3090 | Vast.ai | **7.5M** | **3.7M** | 161K |
+| RTX 5090 | Vast.ai | 5.2M | 2.6M | **1.2M** |
+| RTX 4090 | Vast.ai | 4.4M | 2.2M | N/A |
+| A100 80GB | Vast.ai | 2.2M | 941K | 459K |
+
+### Benchmark API Endpoints
+
+Query benchmark data programmatically:
+
+```bash
+# List all benchmarks
+curl http://localhost:8080/api/v1/benchmarks
+
+# Find best performing hardware for a model
+curl "http://localhost:8080/api/v1/benchmarks/best?model=deepseek-r1:32b"
+
+# Find most cost-effective hardware
+curl "http://localhost:8080/api/v1/benchmarks/cheapest?model=qwen2:7b"
+
+# Compare all hardware for a model
+curl "http://localhost:8080/api/v1/benchmarks/compare?model=deepseek-r1:14b"
+
+# Get hardware recommendations
+curl "http://localhost:8080/api/v1/benchmarks/recommendations?model=qwen2:7b"
+```
+
+### Running Your Own Benchmarks
+
+**1. Provision a GPU and install Ollama:**
+```bash
+./bin/gpu-shopper provision -c benchmark-test -g RTX4090 -t 2 --save-key ~/.ssh/bench_key
+
+ssh -i ~/.ssh/bench_key root@<ip> "curl -fsSL https://ollama.com/install.sh | sh"
+```
+
+**2. Pull models and run benchmark:**
+```bash
+# Pull models
+ssh -i ~/.ssh/bench_key root@<ip> "ollama pull qwen2:7b && ollama pull deepseek-r1:14b"
+
+# Run 5-minute benchmark per model
+ssh -i ~/.ssh/bench_key root@<ip> 'MODEL=qwen2:7b DURATION=300 /tmp/bench.sh'
+```
+
+**3. Collect and store results:**
+```bash
+# Download benchmark results
+scp -i ~/.ssh/bench_key -r root@<ip>:/tmp/benchmark_* ./results/
+
+# Load into database
+go run ./cmd/benchmark-loader -db ./data/gpu-shopper.db \
+  -dir ./results/benchmark_qwen2_7b_* \
+  -provider vastai -price 0.16 -location "US"
+```
+
+### Benchmark Methodology
+
+- **Duration**: 5 minutes per model per GPU
+- **Max Tokens**: 256 per request
+- **Concurrency**: 1 (sequential requests)
+- **Prompts**: 10 diverse prompts (coding, technical, creative, general)
+- **Runtime**: Ollama (latest stable)
+- **Metrics**: TPS, GPU utilization, temperature, power draw, error rates
+
+See [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for the complete benchmark analysis.
 
 ## CLI Reference
 
@@ -624,6 +788,13 @@ watch -n 60 './bin/gpu-shopper costs -c my-app'
 | `/api/v1/sessions/:id/extend` | POST | Extend session |
 | `/api/v1/costs` | GET | Get costs |
 | `/api/v1/costs/summary` | GET | Monthly cost summary |
+| `/api/v1/benchmarks` | GET | List benchmark results |
+| `/api/v1/benchmarks/:id` | GET | Get specific benchmark |
+| `/api/v1/benchmarks` | POST | Submit new benchmark result |
+| `/api/v1/benchmarks/best` | GET | Best performing benchmark for model |
+| `/api/v1/benchmarks/cheapest` | GET | Most cost-effective benchmark for model |
+| `/api/v1/benchmarks/compare` | GET | Compare benchmarks for model across hardware |
+| `/api/v1/benchmarks/recommendations` | GET | Hardware recommendations based on benchmarks |
 
 See [docs/API.md](docs/API.md) for full API documentation with request/response examples.
 

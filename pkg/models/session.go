@@ -81,6 +81,17 @@ type Session struct {
 	// Storage configuration
 	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
 
+	// Auto-retry configuration (set at creation)
+	AutoRetry  bool   `json:"auto_retry,omitempty"`
+	MaxRetries int    `json:"max_retries,omitempty"`
+	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
+
+	// Retry tracking (set by provisioner)
+	RetryCount    int    `json:"retry_count,omitempty"`
+	RetryParentID string `json:"retry_parent_id,omitempty"` // Original session that triggered retry
+	RetryChildID  string `json:"retry_child_id,omitempty"`  // New session created by retry
+	FailedOffers  string `json:"failed_offers,omitempty"`   // Comma-separated list of offer IDs that failed
+
 	// Configuration
 	WorkloadType    WorkloadType  `json:"workload_type"`
 	ReservationHrs  int           `json:"reservation_hours"`
@@ -120,6 +131,11 @@ type CreateSessionRequest struct {
 	// Storage configuration
 	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
 
+	// Auto-retry configuration
+	AutoRetry  bool   `json:"auto_retry,omitempty"`
+	MaxRetries int    `json:"max_retries,omitempty"`
+	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
+
 	// Internal fields (set by handler, not from JSON)
 	TemplateRecommendedDiskGB    int           `json:"-"` // Template's recommended disk, used for estimation floor
 	TemplateRecommendedSSHTimeout time.Duration `json:"-"` // BUG-005: Template's recommended SSH timeout for heavy images
@@ -149,6 +165,13 @@ type SessionResponse struct {
 	PricePerHour   float64       `json:"price_per_hour"`
 	CreatedAt      time.Time     `json:"created_at"`
 	ExpiresAt      time.Time     `json:"expires_at"`
+
+	// Retry tracking
+	AutoRetry     bool   `json:"auto_retry,omitempty"`
+	RetryCount    int    `json:"retry_count,omitempty"`
+	RetryParentID string `json:"retry_parent_id,omitempty"`
+	RetryChildID  string `json:"retry_child_id,omitempty"`
+	FailedOffers  string `json:"failed_offers,omitempty"`
 }
 
 // ToResponse converts a Session to a SessionResponse (without secrets)
@@ -176,6 +199,11 @@ func (s *Session) ToResponse() SessionResponse {
 		PricePerHour:   s.PricePerHour,
 		CreatedAt:      s.CreatedAt,
 		ExpiresAt:      s.ExpiresAt,
+		AutoRetry:      s.AutoRetry,
+		RetryCount:     s.RetryCount,
+		RetryParentID:  s.RetryParentID,
+		RetryChildID:   s.RetryChildID,
+		FailedOffers:   s.FailedOffers,
 	}
 }
 

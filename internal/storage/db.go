@@ -76,6 +76,21 @@ func (db *DB) Migrate(ctx context.Context) error {
 		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
 	}
 
+	// Run auto-retry column migrations (idempotent)
+	retryMigrations := []string{
+		migrationAddAutoRetry,
+		migrationAddMaxRetries,
+		migrationAddRetryScope,
+		migrationAddRetryCount,
+		migrationAddRetryParentID,
+		migrationAddRetryChildID,
+		migrationAddFailedOffers,
+	}
+
+	for _, migration := range retryMigrations {
+		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
+	}
+
 	// Run index migrations that may fail if already exists
 	indexMigrations := []string{
 		migrationDuplicatePrevention,
@@ -207,3 +222,12 @@ const migrationCostDeduplication = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_costs_session_hour_unique
 ON costs(session_id, hour);
 `
+
+// Auto-retry column migrations
+const migrationAddAutoRetry = `ALTER TABLE sessions ADD COLUMN auto_retry INTEGER DEFAULT 0;`
+const migrationAddMaxRetries = `ALTER TABLE sessions ADD COLUMN max_retries INTEGER DEFAULT 0;`
+const migrationAddRetryScope = `ALTER TABLE sessions ADD COLUMN retry_scope TEXT DEFAULT '';`
+const migrationAddRetryCount = `ALTER TABLE sessions ADD COLUMN retry_count INTEGER DEFAULT 0;`
+const migrationAddRetryParentID = `ALTER TABLE sessions ADD COLUMN retry_parent_id TEXT DEFAULT '';`
+const migrationAddRetryChildID = `ALTER TABLE sessions ADD COLUMN retry_child_id TEXT DEFAULT '';`
+const migrationAddFailedOffers = `ALTER TABLE sessions ADD COLUMN failed_offers TEXT DEFAULT '';`

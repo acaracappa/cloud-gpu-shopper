@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -558,6 +559,83 @@ func (s *Service) Shutdown() {
 		s.refreshWg.Wait()
 		s.logger.Info("inventory service shutdown complete")
 	})
+}
+
+// FindComparableOffers returns offers comparable to the original, filtered by scope.
+// It excludes any offers in excludeIDs (previously failed offers).
+// Results are sorted by availability confidence (desc) then price (asc), limited to 5.
+func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string) ([]models.GPUOffer, error) {
+	if original == nil {
+		return nil, fmt.Errorf("original offer is nil")
+	}
+
+	// Build filter based on scope
+	filter := models.OfferFilter{}
+
+	switch scope {
+	case "same_gpu":
+		filter.Provider = original.Provider
+		filter.GPUType = original.GPUType
+		filter.MaxPrice = original.PricePerHour * 1.2
+	case "same_vram":
+		filter.Provider = original.Provider
+		filter.MinVRAM = original.VRAM
+		filter.MaxPrice = original.PricePerHour * 1.5
+	case "any":
+		filter.MinVRAM = original.VRAM
+		filter.MaxPrice = original.PricePerHour * 2.0
+	default:
+		// Default to same_gpu
+		filter.Provider = original.Provider
+		filter.GPUType = original.GPUType
+		filter.MaxPrice = original.PricePerHour * 1.2
+	}
+
+	offers, err := s.ListOffers(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list comparable offers: %w", err)
+	}
+
+	// Build exclusion set
+	excluded := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		excluded[id] = true
+	}
+
+	// Filter out excluded offers and the original
+	var candidates []models.GPUOffer
+	for _, offer := range offers {
+		if excluded[offer.ID] || offer.ID == original.ID {
+			continue
+		}
+		if !offer.Available {
+			continue
+		}
+		candidates = append(candidates, offer)
+	}
+
+	// Sort by availability confidence desc, then price asc
+	sort.Slice(candidates, func(i, j int) bool {
+		ci := candidates[i].GetEffectiveAvailabilityConfidence()
+		cj := candidates[j].GetEffectiveAvailabilityConfidence()
+		if ci != cj {
+			return ci > cj
+		}
+		return candidates[i].PricePerHour < candidates[j].PricePerHour
+	})
+
+	// Limit to top 5
+	if len(candidates) > 5 {
+		candidates = candidates[:5]
+	}
+
+	s.logger.Info("found comparable offers",
+		slog.String("original_offer", original.ID),
+		slog.String("scope", scope),
+		slog.Int("candidates", len(candidates)),
+		slog.Int("excluded", len(excludeIDs)))
+
+	return candidates, nil
 }
 
 // GetTemplateProvider returns the template provider for a given provider name.

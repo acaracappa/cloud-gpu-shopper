@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/api"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/config"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
@@ -58,6 +59,15 @@ func main() {
 	sessionStore := storage.NewSessionStore(db)
 	costStore := storage.NewCostStore(db)
 
+	// Initialize benchmark store
+	benchmarkStore, err := benchmark.NewStore(db.DB)
+	if err != nil {
+		logger.Warn("failed to initialize benchmark store", slog.String("error", err.Error()))
+		// Continue without benchmarks - not critical
+	} else {
+		logger.Info("initialized benchmark store")
+	}
+
 	// Initialize providers
 	var providers []provider.Provider
 
@@ -101,6 +111,7 @@ func main() {
 		provisioner.WithLogger(logger),
 		provisioner.WithSSHVerifyTimeout(cfg.SSH.VerifyTimeout),
 		provisioner.WithSSHCheckInterval(cfg.SSH.CheckInterval),
+		provisioner.WithInventory(invService),
 	}
 	if cfg.Lifecycle.DeploymentID != "" {
 		provOpts = append(provOpts, provisioner.WithDeploymentID(cfg.Lifecycle.DeploymentID))
@@ -140,9 +151,14 @@ func main() {
 		lifecycle.WithShutdownTimeout(cfg.Lifecycle.ShutdownTimeout))
 
 	// Initialize API server (not ready yet)
-	server := api.New(invService, provService, lifecycleManager, costTracker,
+	apiOpts := []api.Option{
 		api.WithLogger(logger),
-		api.WithPort(cfg.Server.Port))
+		api.WithPort(cfg.Server.Port),
+	}
+	if benchmarkStore != nil {
+		apiOpts = append(apiOpts, api.WithBenchmarkStore(benchmarkStore))
+	}
+	server := api.New(invService, provService, lifecycleManager, costTracker, apiOpts...)
 
 	// Initialize metrics from database state BEFORE startup sweep
 	// This ensures gauges reflect reality before any reconciliation runs

@@ -58,6 +58,11 @@ type CreateSessionRequest struct {
 
 	// Storage configuration
 	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
+
+	// Auto-retry configuration
+	AutoRetry  bool   `json:"auto_retry,omitempty"`  // Enable auto-reprovision on failure
+	MaxRetries int    `json:"max_retries,omitempty"`  // Max alternative offers to try (default 3, max 5)
+	RetryScope string `json:"retry_scope,omitempty"`  // "same_gpu", "same_vram", "any"
 }
 
 // ListTemplatesQuery defines query parameters for listing templates
@@ -70,8 +75,9 @@ type ListTemplatesQuery struct {
 
 // CreateSessionResponse is the response after creating a session
 type CreateSessionResponse struct {
-	Session       models.SessionResponse `json:"session"`
-	SSHPrivateKey string                 `json:"ssh_private_key,omitempty"`
+	Session          models.SessionResponse `json:"session"`
+	SSHPrivateKey    string                 `json:"ssh_private_key,omitempty"`
+	RetriesAttempted int                    `json:"retries_attempted,omitempty"` // Number of retries before success
 }
 
 // ExtendSessionRequest is the request to extend a session
@@ -520,6 +526,9 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		Quantization:   req.Quantization,
 		TemplateHashID: req.TemplateHashID,
 		DiskGB:         req.DiskGB,
+		AutoRetry:      req.AutoRetry,
+		MaxRetries:     req.MaxRetries,
+		RetryScope:     req.RetryScope,
 	}
 
 	// Look up template's recommended disk space and SSH timeout (non-fatal if lookup fails)
@@ -584,8 +593,9 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 
 	// Return session with secrets (only shown once)
 	c.JSON(http.StatusCreated, CreateSessionResponse{
-		Session:       session.ToResponse(),
-		SSHPrivateKey: session.SSHPrivateKey,
+		Session:          session.ToResponse(),
+		SSHPrivateKey:    session.SSHPrivateKey,
+		RetriesAttempted: session.RetryCount,
 	})
 }
 
