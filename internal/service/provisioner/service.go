@@ -137,9 +137,11 @@ type ProviderRegistry interface {
 }
 
 // InventoryFinder provides access to comparable offer lookup for auto-retry
+// and global offer failure tracking
 type InventoryFinder interface {
 	FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string) ([]models.GPUOffer, error)
 	GetOffer(ctx context.Context, offerID string) (*models.GPUOffer, error)
+	RecordOfferFailure(offerID, provider, gpuType, failureType, reason string)
 }
 
 // SSHVerifier defines the interface for SSH verification
@@ -519,6 +521,15 @@ func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateS
 	if err != nil {
 		s.failSession(ctx, session, fmt.Sprintf("provider create failed: %s", err.Error()))
 
+		// Record global offer failure for cross-session intelligence
+		if s.inventory != nil {
+			failType := "unknown"
+			if provider.ShouldRetryWithDifferentOffer(err) {
+				failType = "stale_inventory"
+			}
+			s.inventory.RecordOfferFailure(offer.ID, offer.Provider, offer.GPUType, failType, err.Error())
+		}
+
 		// Check if this is a retryable error and auto-retry is enabled
 		if provider.ShouldRetryWithDifferentOffer(err) && req.AutoRetry && retryCount < req.MaxRetries && s.inventory != nil {
 			metrics.RecordRetryAttempt(offer.Provider, req.RetryScope, "stale_inventory")
@@ -818,6 +829,11 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 			metrics.RecordSSHVerifyFailure()
 			// Bug #94 fix: Record session destroyed when SSH verification times out
 			metrics.RecordSessionDestroyed(session.Provider, "ssh_verify_timeout")
+
+			// Record global offer failure for cross-session intelligence
+			if s.inventory != nil {
+				s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "ssh_timeout", "SSH verification timeout")
+			}
 			return
 
 		case <-pollTimer.C:
@@ -875,6 +891,11 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 					failReason := classifyInstanceStopReason(status.Status, status.Error)
 					s.failSession(ctx, session, failReason)
 					metrics.RecordSessionDestroyed(session.Provider, "instance_stopped")
+
+					// Record global offer failure for cross-session intelligence
+					if s.inventory != nil {
+						s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "instance_stopped", failReason)
+					}
 					return
 				}
 

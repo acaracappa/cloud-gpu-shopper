@@ -1031,6 +1031,36 @@ func toSnakeCase(s string) string {
 	return strings.ToLower(re.ReplaceAllString(s, "${1}_${2}"))
 }
 
+// Offer health handler (global failure tracking)
+
+func (s *Server) handleOfferHealth(c *gin.Context) {
+	offers, gpuTypes := s.inventory.GetAllOfferHealth()
+
+	// Optional filtering by provider and gpu_type
+	providerFilter := c.Query("provider")
+	gpuTypeFilter := c.Query("gpu_type")
+
+	if providerFilter != "" || gpuTypeFilter != "" {
+		var filtered []inventory.OfferHealthInfo
+		for _, o := range offers {
+			if providerFilter != "" && o.Provider != providerFilter {
+				continue
+			}
+			if gpuTypeFilter != "" && o.GPUType != gpuTypeFilter {
+				continue
+			}
+			filtered = append(filtered, o)
+		}
+		offers = filtered
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"offers":    offers,
+		"gpu_types": gpuTypes,
+		"count":     len(offers),
+	})
+}
+
 // Template handlers
 
 func (s *Server) handleListTemplates(c *gin.Context) {

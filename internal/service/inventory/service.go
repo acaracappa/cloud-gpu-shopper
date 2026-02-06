@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
@@ -49,6 +50,9 @@ type Service struct {
 	providerCacheTTL map[string]time.Duration // Provider-specific TTLs (overrides cacheTTL)
 	backoffTTL       time.Duration
 	providerTimeout  time.Duration
+
+	// Global offer failure tracking (BUG-010, BUG-011, BUG-012)
+	failureTracker *OfferFailureTracker
 
 	// Bug #19 fix: Track background refresh goroutines for graceful shutdown
 	refreshWg    sync.WaitGroup
@@ -118,6 +122,7 @@ func New(providers []provider.Provider, opts ...Option) *Service {
 		cacheTTL:        DefaultCacheTTL,
 		backoffTTL:      BackoffCacheTTL,
 		providerTimeout: DefaultProviderTimeout,
+		failureTracker:  NewOfferFailureTracker(),
 		shutdownCh:      make(chan struct{}), // Bug #19 fix: Initialize shutdown channel
 	}
 
@@ -399,6 +404,19 @@ func (s *Service) filterAndSort(offers []models.GPUOffer, filter models.OfferFil
 	for _, offer := range offers {
 		// Apply staleness degradation to availability confidence
 		adjustedOffer := s.applyStalenessDegradation(offer)
+
+		// Skip suppressed offers (global failure tracking — BUG-010, BUG-011, BUG-012)
+		if s.failureTracker.IsSuppressed(adjustedOffer.ID) {
+			continue
+		}
+
+		// Apply failure-based confidence degradation
+		multiplier := s.failureTracker.GetConfidenceMultiplier(
+			adjustedOffer.ID, adjustedOffer.GPUType, adjustedOffer.Provider)
+		if multiplier < 1.0 {
+			adjustedOffer.AvailabilityConfidence *= multiplier
+		}
+
 		if adjustedOffer.MatchesFilter(filter) && adjustedOffer.Available {
 			filtered = append(filtered, adjustedOffer)
 		}
@@ -561,6 +579,24 @@ func (s *Service) Shutdown() {
 	})
 }
 
+// RecordOfferFailure records a provisioning failure for global offer health tracking.
+// Called by the provisioner when an offer fails at any stage.
+func (s *Service) RecordOfferFailure(offerID, providerName, gpuType, failureType, reason string) {
+	s.failureTracker.RecordFailure(offerID, providerName, gpuType, FailureType(failureType), reason)
+	s.logger.Warn("offer failure recorded",
+		slog.String("offer_id", offerID),
+		slog.String("provider", providerName),
+		slog.String("gpu_type", gpuType),
+		slog.String("failure_type", failureType),
+		slog.String("reason", reason))
+	metrics.RecordOfferFailure(providerName, gpuType, failureType)
+}
+
+// GetAllOfferHealth returns structured health data for all tracked offers and GPU types
+func (s *Service) GetAllOfferHealth() ([]OfferHealthInfo, []GPUTypeHealthInfo) {
+	return s.failureTracker.GetAllHealth()
+}
+
 // FindComparableOffers returns offers comparable to the original, filtered by scope.
 // It excludes any offers in excludeIDs (previously failed offers).
 // Results are sorted by availability confidence (desc) then price (asc), limited to 5.
@@ -602,13 +638,17 @@ func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPU
 		excluded[id] = true
 	}
 
-	// Filter out excluded offers and the original
+	// Filter out excluded offers, the original, and suppressed offers
 	var candidates []models.GPUOffer
 	for _, offer := range offers {
 		if excluded[offer.ID] || offer.ID == original.ID {
 			continue
 		}
 		if !offer.Available {
+			continue
+		}
+		// Skip suppressed offers (global failure tracking)
+		if s.failureTracker.IsSuppressed(offer.ID) {
 			continue
 		}
 		candidates = append(candidates, offer)

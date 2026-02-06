@@ -155,6 +155,9 @@ func (s *Server) setupRouter() {
 		v1.GET("/costs", s.handleGetCosts)
 		v1.GET("/costs/summary", s.handleGetCostSummary)
 
+		// Offer health (global failure tracking)
+		v1.GET("/offer-health", s.handleOfferHealth)
+
 		// Benchmarks
 		v1.GET("/benchmarks", s.handleListBenchmarks)
 		v1.GET("/benchmarks/:id", s.handleGetBenchmark)

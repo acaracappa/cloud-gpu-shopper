@@ -260,6 +260,15 @@ var (
 		},
 		[]string{"provider"},
 	)
+
+	// OfferFailuresRecorded counts offer provisioning failures by provider, GPU type, and failure type
+	OfferFailuresRecorded = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gpu_offer_failures_total",
+			Help: "Offer provisioning failures by provider, GPU type, and failure type",
+		},
+		[]string{"provider", "gpu_type", "failure_type"},
+	)
 )
 
 // Helper functions for common metric operations
@@ -398,6 +407,11 @@ func RecordRetryExhausted(provider, scope string) {
 // RecordDiskAvailable sets the disk available gauge for a provider
 func RecordDiskAvailable(provider string, gb float64) {
 	SessionDiskAvailableGB.WithLabelValues(provider).Set(gb)
+}
+
+// RecordOfferFailure increments the offer failure counter
+func RecordOfferFailure(provider, gpuType, failureType string) {
+	OfferFailuresRecorded.WithLabelValues(provider, gpuType, failureType).Inc()
 }
 
 // SessionCount holds the count of sessions for a provider/status combination

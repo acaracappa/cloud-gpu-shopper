@@ -346,7 +346,7 @@ go run ./cmd/benchmark-loader -db ./data/gpu-shopper.db \
 - **Runtime**: Ollama (latest stable)
 - **Metrics**: TPS, GPU utilization, temperature, power draw, error rates
 
-See [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for the complete benchmark analysis.
+See [docs/BENCHMARKING.md](docs/BENCHMARKING.md) for the complete benchmarking infrastructure documentation, collected results, and API reference. See [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for the raw benchmark analysis.
 
 ## CLI Reference
 
