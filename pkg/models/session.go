@@ -137,7 +137,7 @@ type CreateSessionRequest struct {
 	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
 
 	// Internal fields (set by handler, not from JSON)
-	TemplateRecommendedDiskGB    int           `json:"-"` // Template's recommended disk, used for estimation floor
+	TemplateRecommendedDiskGB     int           `json:"-"` // Template's recommended disk, used for estimation floor
 	TemplateRecommendedSSHTimeout time.Duration `json:"-"` // BUG-005: Template's recommended SSH timeout for heavy images
 }
 

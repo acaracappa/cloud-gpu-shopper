@@ -13,23 +13,23 @@ import (
 type ManifestStatus string
 
 const (
-	ManifestStatusPending  ManifestStatus = "pending"
-	ManifestStatusRunning  ManifestStatus = "running"
-	ManifestStatusSuccess  ManifestStatus = "success"
-	ManifestStatusFailed   ManifestStatus = "failed"
-	ManifestStatusTimeout  ManifestStatus = "timeout"
-	ManifestStatusSkipped  ManifestStatus = "skipped"
+	ManifestStatusPending ManifestStatus = "pending"
+	ManifestStatusRunning ManifestStatus = "running"
+	ManifestStatusSuccess ManifestStatus = "success"
+	ManifestStatusFailed  ManifestStatus = "failed"
+	ManifestStatusTimeout ManifestStatus = "timeout"
+	ManifestStatusSkipped ManifestStatus = "skipped"
 )
 
 // ManifestEntry represents a single benchmark test in a run
 type ManifestEntry struct {
-	ID        string         `json:"id"`
-	RunID     string         `json:"run_id"`
-	GPUType   string         `json:"gpu_type"`
-	Provider  string         `json:"provider"`
-	Model     string         `json:"model"`
-	Status    ManifestStatus `json:"status"`
-	Priority  int            `json:"priority"` // P0=highest, P2=lowest
+	ID       string         `json:"id"`
+	RunID    string         `json:"run_id"`
+	GPUType  string         `json:"gpu_type"`
+	Provider string         `json:"provider"`
+	Model    string         `json:"model"`
+	Status   ManifestStatus `json:"status"`
+	Priority int            `json:"priority"` // P0=highest, P2=lowest
 
 	// Worker tracking
 	WorkerID   string `json:"worker_id,omitempty"`

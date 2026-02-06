@@ -46,7 +46,7 @@ func TestBytesPerParam(t *testing.T) {
 		{"FP32", 4},
 		{"FP16", 2},
 		{"BF16", 2},
-		{"", 2},         // default to FP16
+		{"", 2}, // default to FP16
 		{"FP8", 1},
 		{"INT8", 1},
 		{"AWQ", 0.5625},

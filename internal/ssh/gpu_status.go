@@ -178,10 +178,10 @@ func ParseMultiGPUNvidiaSMI(output string) ([]*GPUStatus, error) {
 
 // CUDAInfo contains CUDA version information parsed from nvidia-smi
 type CUDAInfo struct {
-	CUDAVersion   string  // Full CUDA version string (e.g., "12.9")
-	CUDAMajor     int     // Major version (e.g., 12)
-	CUDAMinor     int     // Minor version (e.g., 9)
-	DriverVersion string  // Driver version string (e.g., "580.126.09")
+	CUDAVersion   string // Full CUDA version string (e.g., "12.9")
+	CUDAMajor     int    // Major version (e.g., 12)
+	CUDAMinor     int    // Minor version (e.g., 9)
+	DriverVersion string // Driver version string (e.g., "580.126.09")
 }
 
 // CUDAVersionFloat returns the CUDA version as a float (e.g., 12.9)

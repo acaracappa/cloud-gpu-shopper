@@ -38,6 +38,7 @@ logs/
 /cli
 /mockprovider
 /gpu-shopper-*
+/benchmark-loader
 
 # Test artifacts
 *.test

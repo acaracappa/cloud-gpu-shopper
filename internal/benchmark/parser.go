@@ -16,13 +16,13 @@ import (
 
 // RequestResult represents a single request from the benchmark log.
 type RequestResult struct {
-	Timestamp     int64   `json:"t"`
-	RequestNum    int     `json:"n"`
-	Tokens        int     `json:"tok"`
-	TokensPerSec  float64 `json:"tps"`
-	DurationSec   float64 `json:"dur,omitempty"`
-	Error         bool    `json:"err,omitempty"`
-	ErrorMsg      string  `json:"error_msg,omitempty"`
+	Timestamp    int64   `json:"t"`
+	RequestNum   int     `json:"n"`
+	Tokens       int     `json:"tok"`
+	TokensPerSec float64 `json:"tps"`
+	DurationSec  float64 `json:"dur,omitempty"`
+	Error        bool    `json:"err,omitempty"`
+	ErrorMsg     string  `json:"error_msg,omitempty"`
 }
 
 // GPUSample represents a GPU metrics sample.

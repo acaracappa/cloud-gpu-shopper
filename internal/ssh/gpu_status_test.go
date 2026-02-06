@@ -9,14 +9,14 @@ import (
 
 func TestParseCUDAVersion(t *testing.T) {
 	tests := []struct {
-		name          string
-		output        string
-		wantVersion   string
-		wantMajor     int
-		wantMinor     int
-		wantDriver    string
-		wantErr       bool
-		errContains   string
+		name        string
+		output      string
+		wantVersion string
+		wantMajor   int
+		wantMinor   int
+		wantDriver  string
+		wantErr     bool
+		errContains string
 	}{
 		{
 			name: "standard nvidia-smi output",
@@ -38,8 +38,8 @@ func TestParseCUDAVersion(t *testing.T) {
 			wantErr:     false,
 		},
 		{
-			name: "CUDA 13.0 output",
-			output: `| NVIDIA-SMI 600.10.00        Driver Version: 600.10.00     CUDA Version: 13.0      |`,
+			name:        "CUDA 13.0 output",
+			output:      `| NVIDIA-SMI 600.10.00        Driver Version: 600.10.00     CUDA Version: 13.0      |`,
 			wantVersion: "13.0",
 			wantMajor:   13,
 			wantMinor:   0,
@@ -112,12 +112,12 @@ func TestParseCUDAVersion(t *testing.T) {
 
 func TestParseNvidiaSMI(t *testing.T) {
 	tests := []struct {
-		name        string
-		output      string
-		wantName    string
-		wantMemUsed int64
+		name         string
+		output       string
+		wantName     string
+		wantMemUsed  int64
 		wantMemTotal int64
-		wantErr     bool
+		wantErr      bool
 	}{
 		{
 			name:         "standard output",

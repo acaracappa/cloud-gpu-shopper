@@ -53,8 +53,8 @@ type TensorDockConfig struct {
 
 // InventoryConfig holds inventory cache configuration
 type InventoryConfig struct {
-	DefaultCacheTTL   time.Duration `mapstructure:"default_cache_ttl"`
-	BackoffCacheTTL   time.Duration `mapstructure:"backoff_cache_ttl"`
+	DefaultCacheTTL    time.Duration `mapstructure:"default_cache_ttl"`
+	BackoffCacheTTL    time.Duration `mapstructure:"backoff_cache_ttl"`
 	TensorDockCacheTTL time.Duration `mapstructure:"tensordock_cache_ttl"` // Shorter TTL for volatile TensorDock inventory
 }
 
@@ -190,16 +190,16 @@ func setDefaults(v *viper.Viper) {
 // but only if the nested key hasn't already been set (preserving explicit config).
 func mapEnvFileKeys(v *viper.Viper) {
 	mappings := map[string]string{
-		"vastai_api_key":          "providers.vastai.api_key",
-		"tensordock_auth_id":      "providers.tensordock.auth_id",
-		"tensordock_api_token":    "providers.tensordock.api_token",
+		"vastai_api_key":           "providers.vastai.api_key",
+		"tensordock_auth_id":       "providers.tensordock.auth_id",
+		"tensordock_api_token":     "providers.tensordock.api_token",
 		"tensordock_default_image": "providers.tensordock.default_image",
-		"database_path":           "database.path",
-		"server_host":             "server.host",
-		"server_port":             "server.port",
-		"log_level":               "logging.level",
-		"log_format":              "logging.format",
-		"deployment_id":           "lifecycle.deployment_id",
+		"database_path":            "database.path",
+		"server_host":              "server.host",
+		"server_port":              "server.port",
+		"log_level":                "logging.level",
+		"log_format":               "logging.format",
+		"deployment_id":            "lifecycle.deployment_id",
 	}
 
 	for flatKey, nestedKey := range mappings {

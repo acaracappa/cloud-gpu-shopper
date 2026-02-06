@@ -112,23 +112,23 @@ const VastAIAvailabilityConfidence = 0.9
 // Property names match those used in template extra_filters JSON.
 func (b Bundle) ToHostProperties() map[string]interface{} {
 	return map[string]interface{}{
-		"cuda_max_good":      b.CudaMaxGood,
-		"compute_cap":        b.ComputeCap,
-		"gpu_total_ram":      b.GPUTotalRam, // MB
-		"gpu_ram":            b.GPURam,      // MB (effective available)
-		"cpu_arch":           b.CPUArch,
-		"num_gpus":           strconv.Itoa(b.NumGPUs),
-		"gpu_name":           b.GPUName,
-		"disk_space":         b.DiskSpace,
-		"reliability2":       b.Reliability,
-		"verified":           b.Verified,
-		"rentable":           b.Rentable,
-		"static_ip":          b.StaticIP,
-		"driver_version":     b.DriverVersion,
-		"inet_down":          b.InetDown,
-		"inet_up":            b.InetUp,
-		"dph_total":          b.DphTotal,
-		"geolocation":        b.Geolocation,
+		"cuda_max_good":       b.CudaMaxGood,
+		"compute_cap":         b.ComputeCap,
+		"gpu_total_ram":       b.GPUTotalRam, // MB
+		"gpu_ram":             b.GPURam,      // MB (effective available)
+		"cpu_arch":            b.CPUArch,
+		"num_gpus":            strconv.Itoa(b.NumGPUs),
+		"gpu_name":            b.GPUName,
+		"disk_space":          b.DiskSpace,
+		"reliability2":        b.Reliability,
+		"verified":            b.Verified,
+		"rentable":            b.Rentable,
+		"static_ip":           b.StaticIP,
+		"driver_version":      b.DriverVersion,
+		"inet_down":           b.InetDown,
+		"inet_up":             b.InetUp,
+		"dph_total":           b.DphTotal,
+		"geolocation":         b.Geolocation,
 		"cpu_cores_effective": b.CPUCoresEffective,
 	}
 }

@@ -29,8 +29,8 @@ func TestParseOOMOutput(t *testing.T) {
 			wantTime:     "",
 		},
 		{
-			name: "single OOM kill with timestamp",
-			output: `[Thu Feb  6 12:34:56 2026] Out of memory: Killed process 1234 (python3) total-vm:12345678kB, anon-rss:8765432kB`,
+			name:         "single OOM kill with timestamp",
+			output:       `[Thu Feb  6 12:34:56 2026] Out of memory: Killed process 1234 (python3) total-vm:12345678kB, anon-rss:8765432kB`,
 			wantDetected: true,
 			wantProcs:    []string{"python3"},
 			wantTime:     "Thu Feb  6 12:34:56 2026",
@@ -44,8 +44,8 @@ func TestParseOOMOutput(t *testing.T) {
 			wantTime:     "Thu Feb  6 12:34:56 2026",
 		},
 		{
-			name: "oom invoked line",
-			output: `[Thu Feb  6 12:34:56 2026] python3 invoked oom-killer: gfp_mask=0xcc0, order=0`,
+			name:         "oom invoked line",
+			output:       `[Thu Feb  6 12:34:56 2026] python3 invoked oom-killer: gfp_mask=0xcc0, order=0`,
 			wantDetected: true,
 			wantProcs:    nil,
 			wantTime:     "Thu Feb  6 12:34:56 2026",

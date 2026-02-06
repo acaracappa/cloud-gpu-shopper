@@ -31,19 +31,19 @@ const (
 // knownModels maps model IDs (lowercased) to param counts in billions
 // for models whose names don't contain parseable param counts.
 var knownModels = map[string]float64{
-	"deepseek-ai/deepseek-r1":           671,
-	"deepseek-ai/deepseek-v3":           671,
-	"deepseek-ai/deepseek-v2":           236,
-	"deepseek-ai/deepseek-coder-v2":     236,
-	"mistralai/mixtral-8x22b-v0.1":      176,
-	"mistralai/mixtral-8x22b-instruct":  176,
-	"meta-llama/llama-2-70b-hf":         70,
-	"meta-llama/meta-llama-3-70b":       70,
-	"meta-llama/meta-llama-3.1-70b":     70,
-	"meta-llama/meta-llama-3.1-405b":    405,
+	"deepseek-ai/deepseek-r1":            671,
+	"deepseek-ai/deepseek-v3":            671,
+	"deepseek-ai/deepseek-v2":            236,
+	"deepseek-ai/deepseek-coder-v2":      236,
+	"mistralai/mixtral-8x22b-v0.1":       176,
+	"mistralai/mixtral-8x22b-instruct":   176,
+	"meta-llama/llama-2-70b-hf":          70,
+	"meta-llama/meta-llama-3-70b":        70,
+	"meta-llama/meta-llama-3.1-70b":      70,
+	"meta-llama/meta-llama-3.1-405b":     405,
 	"meta-llama/meta-llama-3.1-405b-fp8": 405,
-	"01-ai/yi-34b":                      34,
-	"tiiuae/falcon-180b":                180,
+	"01-ai/yi-34b":                       34,
+	"tiiuae/falcon-180b":                 180,
 }
 
 // paramRegex matches parameter counts like "70B", "8x7B", "1.1B", "0.5B"
@@ -192,10 +192,10 @@ func ValidateDiskSpace(requestedDiskGB int, estimation *DiskEstimation) error {
 
 	if requestedDiskGB < estimation.MinimumGB {
 		return &InsufficientDiskError{
-			RequestedGB: requestedDiskGB,
-			MinimumGB:   estimation.MinimumGB,
+			RequestedGB:   requestedDiskGB,
+			MinimumGB:     estimation.MinimumGB,
 			RecommendedGB: estimation.RecommendedGB,
-			Estimation:  estimation,
+			Estimation:    estimation,
 		}
 	}
 

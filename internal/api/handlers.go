@@ -61,8 +61,8 @@ type CreateSessionRequest struct {
 
 	// Auto-retry configuration
 	AutoRetry  bool   `json:"auto_retry,omitempty"`  // Enable auto-reprovision on failure
-	MaxRetries int    `json:"max_retries,omitempty"`  // Max alternative offers to try (default 3, max 5)
-	RetryScope string `json:"retry_scope,omitempty"`  // "same_gpu", "same_vram", "any"
+	MaxRetries int    `json:"max_retries,omitempty"` // Max alternative offers to try (default 3, max 5)
+	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
 }
 
 // ListTemplatesQuery defines query parameters for listing templates

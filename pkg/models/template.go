@@ -292,14 +292,14 @@ const DefaultSSHTimeout = 10 * time.Minute
 // heavyImageTimeouts maps image patterns to their recommended SSH timeouts.
 // Heavy images (like vLLM, TGI) take longer to pull and start.
 var heavyImageTimeouts = map[string]time.Duration{
-	"vllm":       15 * time.Minute, // vLLM images are large (~20GB)
-	"tgi":        12 * time.Minute, // Text Generation Inference
-	"tensorrt":   12 * time.Minute, // TensorRT optimized images
-	"deepspeed":  12 * time.Minute, // DeepSpeed framework
-	"triton":     12 * time.Minute, // Triton Inference Server
-	"nemo":       15 * time.Minute, // NVIDIA NeMo
-	"megatron":   15 * time.Minute, // Megatron-LM
-	"ollama":     12 * time.Minute, // Ollama models
+	"vllm":      15 * time.Minute, // vLLM images are large (~20GB)
+	"tgi":       12 * time.Minute, // Text Generation Inference
+	"tensorrt":  12 * time.Minute, // TensorRT optimized images
+	"deepspeed": 12 * time.Minute, // DeepSpeed framework
+	"triton":    12 * time.Minute, // Triton Inference Server
+	"nemo":      15 * time.Minute, // NVIDIA NeMo
+	"megatron":  15 * time.Minute, // Megatron-LM
+	"ollama":    12 * time.Minute, // Ollama models
 }
 
 // GetRecommendedSSHTimeout returns the recommended SSH timeout for this template.

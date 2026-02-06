@@ -50,18 +50,18 @@ type WorkerState struct {
 
 // ManifestEntry for API response
 type ManifestEntryResp struct {
-	ID              string   `json:"id"`
-	RunID           string   `json:"run_id"`
-	GPUType         string   `json:"gpu_type"`
-	Provider        string   `json:"provider"`
-	Model           string   `json:"model"`
-	Status          string   `json:"status"`
-	TokensPerSecond float64  `json:"tokens_per_second,omitempty"`
-	TotalCost       float64  `json:"total_cost,omitempty"`
-	FailureReason   string   `json:"failure_reason,omitempty"`
-	FailureStage    string   `json:"failure_stage,omitempty"`
-	StartedAt       *string  `json:"started_at,omitempty"`
-	CompletedAt     *string  `json:"completed_at,omitempty"`
+	ID              string  `json:"id"`
+	RunID           string  `json:"run_id"`
+	GPUType         string  `json:"gpu_type"`
+	Provider        string  `json:"provider"`
+	Model           string  `json:"model"`
+	Status          string  `json:"status"`
+	TokensPerSecond float64 `json:"tokens_per_second,omitempty"`
+	TotalCost       float64 `json:"total_cost,omitempty"`
+	FailureReason   string  `json:"failure_reason,omitempty"`
+	FailureStage    string  `json:"failure_stage,omitempty"`
+	StartedAt       *string `json:"started_at,omitempty"`
+	CompletedAt     *string `json:"completed_at,omitempty"`
 }
 
 var orchestratorCmd = &cobra.Command{
@@ -217,10 +217,10 @@ func validateInventory(tests []TestSpec) ([]TestSpec, error) {
 
 		var result struct {
 			Offers []struct {
-				ID       string  `json:"id"`
-				Price    float64 `json:"price_per_hour"`
-				GPUType  string  `json:"gpu_type"`
-				VRAMGiB  int     `json:"vram_gib"`
+				ID      string  `json:"id"`
+				Price   float64 `json:"price_per_hour"`
+				GPUType string  `json:"gpu_type"`
+				VRAMGiB int     `json:"vram_gib"`
 			} `json:"offers"`
 			Count int `json:"count"`
 		}
@@ -273,8 +273,8 @@ func printTestMatrix(tests []TestSpec) {
 
 func runBenchmarkOrchestration(tests []TestSpec) error {
 	var (
-		mu            sync.Mutex
-		activeWorkers = make(map[string]*WorkerState)
+		mu             sync.Mutex
+		activeWorkers  = make(map[string]*WorkerState)
 		completedTests []TestSpec
 		failedTests    []TestSpec
 		totalSpent     float64
@@ -547,7 +547,7 @@ func runWorker(worker *WorkerState, mu *sync.Mutex) {
 	// Mark as completed with simulated results
 	mu.Lock()
 	worker.Status = "completed"
-	worker.TPS = 0 // No actual benchmark
+	worker.TPS = 0                           // No actual benchmark
 	worker.Cost = selectedOffer.Price * 0.05 // ~3 minutes
 	mu.Unlock()
 

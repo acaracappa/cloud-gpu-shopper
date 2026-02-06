@@ -42,7 +42,7 @@ type OfferFilter struct {
 	MinReliability            float64 `json:"min_reliability,omitempty"`             // Minimum reliability score
 	MinGPUCount               int     `json:"min_gpu_count,omitempty"`               // Minimum GPU count
 	MinAvailabilityConfidence float64 `json:"min_availability_confidence,omitempty"` // Minimum availability confidence (0-1)
-	MinCUDAVersion            float64 `json:"min_cuda_version,omitempty"`             // Minimum CUDA version (e.g., 12.9)
+	MinCUDAVersion            float64 `json:"min_cuda_version,omitempty"`            // Minimum CUDA version (e.g., 12.9)
 }
 
 // MatchesFilter checks if the offer matches the given filter

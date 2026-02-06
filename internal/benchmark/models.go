@@ -59,19 +59,19 @@ type ModelInfo struct {
 // TestConfig describes the benchmark test configuration.
 type TestConfig struct {
 	DurationMinutes int      `json:"duration_minutes"`
-	MaxTokens       int      `json:"max_tokens"`       // Max tokens per request
-	PromptTypes     []string `json:"prompt_types"`     // Types of prompts used
-	ConcurrentReqs  int      `json:"concurrent_reqs"`  // Number of concurrent requests
-	WarmupRequests  int      `json:"warmup_requests"`  // Requests before measuring
+	MaxTokens       int      `json:"max_tokens"`      // Max tokens per request
+	PromptTypes     []string `json:"prompt_types"`    // Types of prompts used
+	ConcurrentReqs  int      `json:"concurrent_reqs"` // Number of concurrent requests
+	WarmupRequests  int      `json:"warmup_requests"` // Requests before measuring
 }
 
 // PerformanceResults contains the measured performance metrics.
 type PerformanceResults struct {
-	TotalRequests      int     `json:"total_requests"`
-	TotalTokens        int     `json:"total_tokens"`
-	TotalPromptTokens  int     `json:"total_prompt_tokens"`
-	TotalErrors        int     `json:"total_errors"`
-	DurationSeconds    float64 `json:"duration_seconds"`
+	TotalRequests     int     `json:"total_requests"`
+	TotalTokens       int     `json:"total_tokens"`
+	TotalPromptTokens int     `json:"total_prompt_tokens"`
+	TotalErrors       int     `json:"total_errors"`
+	DurationSeconds   float64 `json:"duration_seconds"`
 
 	// Throughput metrics
 	AvgTokensPerSecond float64 `json:"avg_tokens_per_second"`
@@ -90,9 +90,9 @@ type PerformanceResults struct {
 	P99LatencyMs float64 `json:"p99_latency_ms"`
 
 	// Request metrics
-	RequestsPerMinute     float64 `json:"requests_per_minute"`
-	AvgTokensPerRequest   float64 `json:"avg_tokens_per_request"`
-	ErrorRate             float64 `json:"error_rate"`
+	RequestsPerMinute   float64 `json:"requests_per_minute"`
+	AvgTokensPerRequest float64 `json:"avg_tokens_per_request"`
+	ErrorRate           float64 `json:"error_rate"`
 
 	// Time to First Token (TTFT) - important for interactive use
 	AvgTTFTMs float64 `json:"avg_ttft_ms"`
@@ -102,27 +102,27 @@ type PerformanceResults struct {
 
 // GPUStats contains GPU utilization statistics during the benchmark.
 type GPUStats struct {
-	AvgUtilizationPct  float64 `json:"avg_utilization_pct"`
-	MaxUtilizationPct  float64 `json:"max_utilization_pct"`
-	AvgMemoryUsedMiB   int     `json:"avg_memory_used_mib"`
-	MaxMemoryUsedMiB   int     `json:"max_memory_used_mib"`
-	AvgTemperatureC    float64 `json:"avg_temperature_c"`
-	MaxTemperatureC    float64 `json:"max_temperature_c"`
-	AvgPowerDrawW      float64 `json:"avg_power_draw_w"`
-	MaxPowerDrawW      float64 `json:"max_power_draw_w"`
+	AvgUtilizationPct float64 `json:"avg_utilization_pct"`
+	MaxUtilizationPct float64 `json:"max_utilization_pct"`
+	AvgMemoryUsedMiB  int     `json:"avg_memory_used_mib"`
+	MaxMemoryUsedMiB  int     `json:"max_memory_used_mib"`
+	AvgTemperatureC   float64 `json:"avg_temperature_c"`
+	MaxTemperatureC   float64 `json:"max_temperature_c"`
+	AvgPowerDrawW     float64 `json:"avg_power_draw_w"`
+	MaxPowerDrawW     float64 `json:"max_power_draw_w"`
 }
 
 // CostAnalysis provides cost-efficiency metrics.
 type CostAnalysis struct {
-	TokensPerDollar     float64 `json:"tokens_per_dollar"`
+	TokensPerDollar      float64 `json:"tokens_per_dollar"`
 	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
-	CostPerHour         float64 `json:"cost_per_hour"`
-	EstimatedMonthly    float64 `json:"estimated_monthly_24x7"`
+	CostPerHour          float64 `json:"cost_per_hour"`
+	EstimatedMonthly     float64 `json:"estimated_monthly_24x7"`
 }
 
 // BenchmarkComparison compares benchmark results across configurations.
 type BenchmarkComparison struct {
-	Baseline   *BenchmarkResult   `json:"baseline"`
+	Baseline    *BenchmarkResult   `json:"baseline"`
 	Comparisons []*ComparisonEntry `json:"comparisons"`
 }
 
@@ -136,10 +136,10 @@ type ComparisonEntry struct {
 
 // HardwareRecommendation suggests hardware for a workload.
 type HardwareRecommendation struct {
-	Model           string  `json:"model"`
-	MinVRAMGiB      int     `json:"min_vram_gib"`
+	Model           string   `json:"model"`
+	MinVRAMGiB      int      `json:"min_vram_gib"`
 	RecommendedGPUs []string `json:"recommended_gpus"`
-	ExpectedTPS     float64 `json:"expected_tps"`
-	EstimatedCost   float64 `json:"estimated_cost_per_hour"`
-	Notes           string  `json:"notes"`
+	ExpectedTPS     float64  `json:"expected_tps"`
+	EstimatedCost   float64  `json:"estimated_cost_per_hour"`
+	Notes           string   `json:"notes"`
 }

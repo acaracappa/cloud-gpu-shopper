@@ -13,23 +13,23 @@ import (
 )
 
 var (
-	benchModel   string
-	benchGPU     string
-	benchLimit   int
-	benchMinTPS  float64
+	benchModel  string
+	benchGPU    string
+	benchLimit  int
+	benchMinTPS float64
 )
 
 // BenchmarkResult represents a benchmark from the API
 type BenchmarkResult struct {
-	ID        string          `json:"id"`
-	Timestamp string          `json:"timestamp"`
-	Hardware  HardwareInfo    `json:"hardware"`
-	Model     ModelInfo       `json:"model"`
-	Results   PerfResults     `json:"results"`
-	GPUStats  GPUStats        `json:"gpu_stats"`
-	Provider  string          `json:"provider"`
-	Location  string          `json:"location"`
-	Price     float64         `json:"price_per_hour"`
+	ID        string       `json:"id"`
+	Timestamp string       `json:"timestamp"`
+	Hardware  HardwareInfo `json:"hardware"`
+	Model     ModelInfo    `json:"model"`
+	Results   PerfResults  `json:"results"`
+	GPUStats  GPUStats     `json:"gpu_stats"`
+	Provider  string       `json:"provider"`
+	Location  string       `json:"location"`
+	Price     float64      `json:"price_per_hour"`
 }
 
 type HardwareInfo struct {
@@ -40,11 +40,11 @@ type HardwareInfo struct {
 }
 
 type ModelInfo struct {
-	Name     string  `json:"name"`
-	Family   string  `json:"family"`
-	Quant    string  `json:"quantization"`
-	SizeGB   float64 `json:"size_gb"`
-	Runtime  string  `json:"runtime"`
+	Name    string  `json:"name"`
+	Family  string  `json:"family"`
+	Quant   string  `json:"quantization"`
+	SizeGB  float64 `json:"size_gb"`
+	Runtime string  `json:"runtime"`
 }
 
 type PerfResults struct {
@@ -63,12 +63,12 @@ type PerfResults struct {
 }
 
 type GPUStats struct {
-	AvgUtil    float64 `json:"avg_utilization_pct"`
-	MaxUtil    float64 `json:"max_utilization_pct"`
-	AvgTemp    float64 `json:"avg_temperature_c"`
-	MaxTemp    float64 `json:"max_temperature_c"`
-	AvgPower   float64 `json:"avg_power_draw_w"`
-	MaxMemMiB  int     `json:"max_memory_used_mib"`
+	AvgUtil   float64 `json:"avg_utilization_pct"`
+	MaxUtil   float64 `json:"max_utilization_pct"`
+	AvgTemp   float64 `json:"avg_temperature_c"`
+	MaxTemp   float64 `json:"max_temperature_c"`
+	AvgPower  float64 `json:"avg_power_draw_w"`
+	MaxMemMiB int     `json:"max_memory_used_mib"`
 }
 
 type CostAnalysis struct {

@@ -271,11 +271,11 @@ var ErrCircuitOpen = errors.New("circuit breaker is open")
 // locationStats tracks provisioning success/failure rates per location.
 // This enables dynamic availability confidence based on real-world success rates.
 type locationStats struct {
-	mu           sync.RWMutex
-	attempts     map[string]int // locationID -> total attempts
-	successes    map[string]int // locationID -> successful provisions
-	lastAttempt  map[string]time.Time
-	decayAfter   time.Duration // Reset stats after this duration of inactivity
+	mu          sync.RWMutex
+	attempts    map[string]int // locationID -> total attempts
+	successes   map[string]int // locationID -> successful provisions
+	lastAttempt map[string]time.Time
+	decayAfter  time.Duration // Reset stats after this duration of inactivity
 }
 
 // newLocationStats creates a new location stats tracker
@@ -1060,8 +1060,8 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	// Caller must poll GetInstanceStatus to get SSH connection details
 	return &provider.InstanceInfo{
 		ProviderInstanceID: result.Data.ID,
-		SSHHost:            "", // Will be populated by GetInstanceStatus
-		SSHPort:            22, // Default, but may change - check GetInstanceStatus
+		SSHHost:            "",     // Will be populated by GetInstanceStatus
+		SSHPort:            22,     // Default, but may change - check GetInstanceStatus
 		SSHUser:            "user", // TensorDock creates a 'user' account with sudo access
 		Status:             result.Data.Status,
 	}, nil
