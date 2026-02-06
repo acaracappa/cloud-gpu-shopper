@@ -71,6 +71,23 @@ func (e *StaleInventoryError) Unwrap() error {
 	return e.OriginalErr
 }
 
+// InsufficientDiskError indicates the requested disk space is too small for the model
+type InsufficientDiskError struct {
+	RequestedGB   int
+	MinimumGB     int
+	RecommendedGB int
+	Estimation    *DiskEstimation
+}
+
+func (e *InsufficientDiskError) Error() string {
+	msg := fmt.Sprintf("insufficient disk space: %d GB requested, minimum %d GB required (recommended: %d GB)",
+		e.RequestedGB, e.MinimumGB, e.RecommendedGB)
+	if e.Estimation != nil {
+		msg += " — breakdown: " + e.Estimation.FormatBreakdown()
+	}
+	return msg
+}
+
 // IsRetryableWithDifferentOffer returns true if the error indicates we should
 // automatically try a different offer (e.g., stale inventory errors)
 func IsRetryableWithDifferentOffer(err error) bool {

@@ -522,6 +522,17 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		DiskGB:         req.DiskGB,
 	}
 
+	// Look up template's recommended disk space and SSH timeout (non-fatal if lookup fails)
+	if req.TemplateHashID != "" {
+		if templateProvider, err := s.inventory.GetTemplateProvider("vastai"); err == nil {
+			if tmpl, err := templateProvider.GetTemplate(ctx, req.TemplateHashID); err == nil && tmpl != nil {
+				createReq.TemplateRecommendedDiskGB = tmpl.RecommendedDiskSpace
+				// BUG-005: Use template's recommended SSH timeout for heavy images
+				createReq.TemplateRecommendedSSHTimeout = tmpl.GetRecommendedSSHTimeout()
+			}
+		}
+	}
+
 	session, err := s.provisioner.CreateSession(ctx, createReq, offer)
 	if err != nil {
 		var dupErr *provisioner.DuplicateSessionError
@@ -529,6 +540,21 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 			c.JSON(http.StatusConflict, ErrorResponse{
 				Error:     err.Error(),
 				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
+		// Check for insufficient disk space error
+		var diskErr *provisioner.InsufficientDiskError
+		if errors.As(err, &diskErr) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":          err.Error(),
+				"error_type":     "insufficient_disk",
+				"requested_gb":   diskErr.RequestedGB,
+				"minimum_gb":     diskErr.MinimumGB,
+				"recommended_gb": diskErr.RecommendedGB,
+				"breakdown":      diskErr.Estimation,
+				"request_id":     c.GetString("request_id"),
 			})
 			return
 		}

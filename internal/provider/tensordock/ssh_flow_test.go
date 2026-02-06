@@ -32,9 +32,9 @@ func TestBuildSSHKeyCloudInit_BasicEncoding(t *testing.T) {
 	// New implementation uses runcmd only (no write_files) for reliability
 	assert.Nil(t, cloudInit.WriteFiles)
 
-	// Verify runcmd contains all commands for both root and user
-	// 6 commands for root + 6 commands for user = 12 total
-	require.Len(t, cloudInit.RunCmd, 11)
+	// Verify runcmd contains all commands for both root and user + driver install
+	// 5 commands for root + 6 commands for user + 1 NVIDIA driver = 12 total
+	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 	// Verify root directory and key setup (first 6 commands)
 	assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
@@ -92,7 +92,7 @@ func TestBuildSSHKeyCloudInit_SpecialCharacters(t *testing.T) {
 
 			require.NotNil(t, cloudInit)
 			assert.Nil(t, cloudInit.WriteFiles)
-			require.Len(t, cloudInit.RunCmd, 11)
+			require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 			// Find the echo command for root's authorized_keys
 			echoCmd := cloudInit.RunCmd[2]
@@ -140,7 +140,7 @@ func TestBuildSSHKeyCloudInit_RealKeyFormats(t *testing.T) {
 
 			require.NotNil(t, cloudInit)
 			assert.Nil(t, cloudInit.WriteFiles)
-			require.Len(t, cloudInit.RunCmd, 11)
+			require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 			// Verify the echo command contains the key for root
 			echoCmd := cloudInit.RunCmd[2]
@@ -160,7 +160,7 @@ func TestBuildSSHKeyCloudInit_EmptyKey(t *testing.T) {
 	require.NotNil(t, cloudInit)
 	// Even with empty key, should still create the structure
 	assert.Nil(t, cloudInit.WriteFiles)
-	assert.Len(t, cloudInit.RunCmd, 11)
+	assert.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 	// Verify echo command exists (even with empty key)
 	assert.Contains(t, cloudInit.RunCmd[2], "echo ''")
@@ -175,7 +175,7 @@ func TestBuildSSHKeyCloudInit_VeryLongKey(t *testing.T) {
 
 	require.NotNil(t, cloudInit)
 	assert.Nil(t, cloudInit.WriteFiles)
-	require.Len(t, cloudInit.RunCmd, 11)
+	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 	// Verify the long key is included in the echo command
 	echoCmd := cloudInit.RunCmd[2]
@@ -235,7 +235,7 @@ func TestCreateInstance_SSHKeyInRequest(t *testing.T) {
 	// Verify cloud-init was populated with runcmd (no write_files in new impl)
 	require.NotNil(t, capturedRequest.Data.Attributes.CloudInit)
 	assert.Nil(t, capturedRequest.Data.Attributes.CloudInit.WriteFiles)
-	require.Len(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, 11)
+	require.Len(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
 
 	// Verify the echo command contains the key
 	assert.Contains(t, capturedRequest.Data.Attributes.CloudInit.RunCmd[2], "/root/.ssh/authorized_keys")
@@ -286,11 +286,11 @@ func TestCreateInstance_NoSSHKey(t *testing.T) {
 }
 
 // =============================================================================
-// Port Forwarding Tests
+// Dedicated IP Tests (replaces port forwarding)
 // =============================================================================
 
-// TestCreateInstance_PortForwarding verifies SSH port forwarding is configured
-func TestCreateInstance_PortForwarding(t *testing.T) {
+// TestCreateInstance_DedicatedIP verifies dedicated IP is requested for SSH access
+func TestCreateInstance_DedicatedIP(t *testing.T) {
 	var capturedRequest CreateInstanceRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -328,11 +328,9 @@ func TestCreateInstance_PortForwarding(t *testing.T) {
 	_, err := client.CreateInstance(ctx, req)
 	require.NoError(t, err)
 
-	// Verify port forwarding is configured for SSH
-	require.Len(t, capturedRequest.Data.Attributes.PortForwards, 1)
-	assert.Equal(t, "tcp", capturedRequest.Data.Attributes.PortForwards[0].Protocol)
-	assert.Equal(t, 22, capturedRequest.Data.Attributes.PortForwards[0].InternalPort)
-	assert.Equal(t, 22, capturedRequest.Data.Attributes.PortForwards[0].ExternalPort)
+	// Verify dedicated IP is requested for direct SSH access on port 22
+	// This replaced port_forwards which was being ignored by TensorDock API (BUG-008)
+	assert.True(t, capturedRequest.Data.Attributes.UseDedicatedIP, "useDedicatedIp should be true")
 }
 
 // TestGetInstanceStatus_DynamicPort verifies dynamic port assignment handling
@@ -726,7 +724,7 @@ func TestCloudInit_JSONSerialization(t *testing.T) {
 
 	runcmd, ok := parsed["runcmd"].([]interface{})
 	require.True(t, ok, "runcmd should be an array")
-	assert.Len(t, runcmd, 11)
+	assert.Len(t, runcmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 	// Verify commands are strings
 	for _, cmd := range runcmd {
@@ -778,7 +776,7 @@ func TestCreateInstanceRequest_FullSerialization(t *testing.T) {
 	assert.Equal(t, sshKey, parsed.Data.Attributes.SSHKey)
 	assert.NotNil(t, parsed.Data.Attributes.CloudInit)
 	assert.Nil(t, parsed.Data.Attributes.CloudInit.WriteFiles)
-	assert.Len(t, parsed.Data.Attributes.CloudInit.RunCmd, 11)
+	assert.Len(t, parsed.Data.Attributes.CloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
 }
 
 // =============================================================================
@@ -794,7 +792,7 @@ func TestBuildSSHKeyCloudInit_UnicodeKey(t *testing.T) {
 
 	require.NotNil(t, cloudInit)
 	assert.Nil(t, cloudInit.WriteFiles)
-	require.Len(t, cloudInit.RunCmd, 11)
+	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 	// Verify the key is in the echo command
 	echoCmd := cloudInit.RunCmd[2]
@@ -868,7 +866,7 @@ func TestCloudInit_ExpectedExecutionOrder(t *testing.T) {
 	// New implementation uses only runcmd for everything (no write_files)
 	// This ensures proper directory creation before file writing
 	assert.Nil(t, cloudInit.WriteFiles)
-	require.Len(t, cloudInit.RunCmd, 11)
+	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
 
 	// Verify execution order for root (first 6 commands)
 	assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")

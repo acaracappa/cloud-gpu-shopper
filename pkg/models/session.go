@@ -119,6 +119,10 @@ type CreateSessionRequest struct {
 
 	// Storage configuration
 	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
+
+	// Internal fields (set by handler, not from JSON)
+	TemplateRecommendedDiskGB    int           `json:"-"` // Template's recommended disk, used for estimation floor
+	TemplateRecommendedSSHTimeout time.Duration `json:"-"` // BUG-005: Template's recommended SSH timeout for heavy images
 }
 
 // SessionResponse is the API response for a session (hides sensitive fields after creation)

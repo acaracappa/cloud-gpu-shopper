@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -283,4 +284,41 @@ func toString(v interface{}) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// DefaultSSHTimeout is the default SSH verification timeout for templates
+const DefaultSSHTimeout = 10 * time.Minute
+
+// heavyImageTimeouts maps image patterns to their recommended SSH timeouts.
+// Heavy images (like vLLM, TGI) take longer to pull and start.
+var heavyImageTimeouts = map[string]time.Duration{
+	"vllm":       15 * time.Minute, // vLLM images are large (~20GB)
+	"tgi":        12 * time.Minute, // Text Generation Inference
+	"tensorrt":   12 * time.Minute, // TensorRT optimized images
+	"deepspeed":  12 * time.Minute, // DeepSpeed framework
+	"triton":     12 * time.Minute, // Triton Inference Server
+	"nemo":       15 * time.Minute, // NVIDIA NeMo
+	"megatron":   15 * time.Minute, // Megatron-LM
+	"ollama":     12 * time.Minute, // Ollama models
+}
+
+// GetRecommendedSSHTimeout returns the recommended SSH timeout for this template.
+// Heavy images like vLLM need longer timeouts due to image pull time.
+// BUG-005: Templates with large images need longer SSH verification timeouts.
+func (t *VastTemplate) GetRecommendedSSHTimeout() time.Duration {
+	imageLower := strings.ToLower(t.Image)
+
+	for pattern, timeout := range heavyImageTimeouts {
+		if strings.Contains(imageLower, pattern) {
+			return timeout
+		}
+	}
+
+	return DefaultSSHTimeout
+}
+
+// IsHeavyImage returns true if the template uses a heavy (large) image
+// that may take longer to pull and start.
+func (t *VastTemplate) IsHeavyImage() bool {
+	return t.GetRecommendedSSHTimeout() > DefaultSSHTimeout
 }

@@ -161,14 +161,15 @@ type CreateInstanceData struct {
 //   - CloudInit: Use runcmd with base64-encoded SSH key for reliable
 //     key installation. The ssh_authorized_keys field doesn't work.
 type CreateInstanceAttributes struct {
-	Name         string          `json:"name"`                 // Instance name (use shopper label format)
-	Type         string          `json:"type"`                 // Always "virtualmachine"
-	Image        string          `json:"image"`                // OS image: ubuntu2404, ubuntu2204, debian12, etc.
-	LocationID   string          `json:"location_id"`          // Location UUID from /locations
-	Resources    ResourcesConfig `json:"resources"`            // CPU, RAM, storage, GPUs
-	PortForwards []PortForward   `json:"port_forwards"`        // REQUIRED for Ubuntu VMs
-	SSHKey       string          `json:"ssh_key,omitempty"`    // Required but doesn't work - use CloudInit
-	CloudInit    *CloudInit      `json:"cloud_init,omitempty"` // For SSH key installation
+	Name           string          `json:"name"`                     // Instance name (use shopper label format)
+	Type           string          `json:"type"`                     // Always "virtualmachine"
+	Image          string          `json:"image"`                    // OS image: ubuntu2404, ubuntu2204, debian12, etc.
+	LocationID     string          `json:"location_id"`              // Location UUID from /locations
+	Resources      ResourcesConfig `json:"resources"`                // CPU, RAM, storage, GPUs
+	PortForwards   []PortForward   `json:"port_forwards,omitempty"`  // Port forwarding rules (if not using dedicated IP)
+	UseDedicatedIP bool            `json:"useDedicatedIp,omitempty"` // Request a dedicated public IP for direct port access
+	SSHKey         string          `json:"ssh_key,omitempty"`        // Required but doesn't work - use CloudInit
+	CloudInit      *CloudInit      `json:"cloud_init,omitempty"`     // For SSH key installation
 }
 
 // PortForward specifies a port forwarding rule.

@@ -423,12 +423,39 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		// Note: TemplateName would be looked up from template provider if needed
 	}
 
-	// Storage configuration
-	s.logger.Info("storage configuration", slog.Int("request_disk_gb", req.DiskGB))
-	if req.DiskGB > 0 {
+	// Storage configuration with disk estimation
+	s.logger.Info("storage configuration",
+		slog.Int("request_disk_gb", req.DiskGB),
+		slog.String("model_id", req.ModelID),
+		slog.String("quantization", req.Quantization))
+
+	diskEstimation := EstimateDiskRequirements(req.ModelID, req.Quantization, req.TemplateHashID, req.TemplateRecommendedDiskGB)
+
+	if diskEstimation != nil {
+		s.logger.Info("disk estimation",
+			slog.Int("minimum_gb", diskEstimation.MinimumGB),
+			slog.Int("recommended_gb", diskEstimation.RecommendedGB),
+			slog.Float64("model_weight_gb", diskEstimation.ModelWeightGB))
+
+		if req.DiskGB > 0 {
+			// User specified disk — validate it's sufficient
+			if err := ValidateDiskSpace(req.DiskGB, diskEstimation); err != nil {
+				return nil, err
+			}
+			instanceReq.DiskGB = req.DiskGB
+			session.DiskGB = req.DiskGB
+			s.logger.Info("disk configured (user-specified)", slog.Int("disk_gb", req.DiskGB))
+		} else {
+			// Auto-calculate from estimation
+			instanceReq.DiskGB = diskEstimation.RecommendedGB
+			session.DiskGB = diskEstimation.RecommendedGB
+			s.logger.Info("disk auto-calculated", slog.Int("disk_gb", diskEstimation.RecommendedGB))
+		}
+	} else if req.DiskGB > 0 {
+		// No estimation possible, use user's value
 		instanceReq.DiskGB = req.DiskGB
 		session.DiskGB = req.DiskGB
-		s.logger.Info("disk configured", slog.Int("disk_gb", req.DiskGB))
+		s.logger.Info("disk configured (no estimation)", slog.Int("disk_gb", req.DiskGB))
 	}
 
 	// Configure for entrypoint mode if specified
@@ -545,23 +572,36 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	} else {
 		// SSH mode: wait for SSH connectivity
 		// Note: We pass the private key directly because it's not stored in the database
+		// BUG-005: Use template-specific SSH timeout for heavy images
+		sshTimeout := s.sshVerifyTimeout
+		if req.TemplateRecommendedSSHTimeout > 0 {
+			sshTimeout = req.TemplateRecommendedSSHTimeout
+			s.logger.Info("using template-recommended SSH timeout",
+				slog.Duration("timeout", sshTimeout))
+		}
 		// Context timeout is slightly longer than verify timeout to ensure internal timer fires first
 		// and has time to complete cleanup before context cancellation
-		verifyCtx, cancel := context.WithTimeout(context.Background(), s.sshVerifyTimeout+5*time.Second)
+		verifyCtx, cancel := context.WithTimeout(context.Background(), sshTimeout+5*time.Second)
 		s.verifyWg.Add(1)
 		go func() {
 			defer s.verifyWg.Done()
 			defer cancel()
-			s.waitForSSHVerifyAsync(verifyCtx, session.ID, privateKey, prov)
+			s.waitForSSHVerifyAsyncWithTimeout(verifyCtx, session.ID, privateKey, prov, sshTimeout)
 		}()
 	}
 
 	return session, nil
 }
 
-// waitForSSHVerifyAsync waits for SSH verification in the background
+// waitForSSHVerifyAsync waits for SSH verification in the background with default timeout.
 // privateKey is passed directly because it's not stored in the database for security
 func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, privateKey string, prov provider.Provider) {
+	s.waitForSSHVerifyAsyncWithTimeout(ctx, sessionID, privateKey, prov, s.sshVerifyTimeout)
+}
+
+// waitForSSHVerifyAsyncWithTimeout waits for SSH verification with a custom timeout.
+// BUG-005: Support template-specific timeouts for heavy images like vLLM.
+func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionID string, privateKey string, prov provider.Provider, sshTimeout time.Duration) {
 	logger := s.logger.With(slog.String("session_id", sessionID))
 	logger.Info("waiting for SSH verification")
 
@@ -594,7 +634,7 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 	pollTimer := time.NewTimer(nextInterval)
 	defer pollTimer.Stop()
 
-	timeout := time.NewTimer(s.sshVerifyTimeout)
+	timeout := time.NewTimer(sshTimeout)
 	defer timeout.Stop()
 
 	attemptCount := 0
@@ -663,6 +703,27 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					pollTimer.Reset(nextInterval)
 					continue
 				}
+
+				// BUG-011 fix: Fail fast if instance stopped unexpectedly
+				// Don't fail for transient states like "creating" or "starting"
+				if !status.Running && status.Status != "" &&
+					status.Status != "creating" && status.Status != "starting" &&
+					status.Status != "provisioning" && status.Status != "booting" {
+					logger.Error("instance stopped unexpectedly",
+						slog.String("status", status.Status),
+						slog.String("provider_id", session.ProviderID))
+
+					// Attempt to destroy the failed instance
+					if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+						logger.Error("failed to destroy stopped instance",
+							slog.String("error", err.Error()))
+					}
+
+					s.failSession(ctx, session, fmt.Sprintf("instance stopped unexpectedly: %s", status.Status))
+					metrics.RecordSessionDestroyed(session.Provider, "instance_stopped")
+					return
+				}
+
 				if status.SSHHost != "" {
 					session.SSHHost = status.SSHHost
 					if status.SSHPort != 0 {
@@ -710,6 +771,11 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					metrics.RecordSSHVerifyAttempts(session.Provider, attemptCount)
 					// Bug #57 fix: Record provisioning duration when session becomes running
 					metrics.RecordProvisioningDuration(session.Provider, duration)
+
+					// BUG-004: Validate CUDA version after SSH success (async, non-blocking)
+					// This is informational - we don't fail the session on mismatch
+					go s.validateCUDAVersionAsync(session, privateKey, logger)
+
 					return
 				}
 
@@ -906,6 +972,46 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (*models.Ses
 // ListSessions returns sessions matching the filter criteria
 func (s *Service) ListSessions(ctx context.Context, filter models.SessionListFilter) ([]*models.Session, error) {
 	return s.store.List(ctx, filter)
+}
+
+// validateCUDAVersionAsync runs CUDA validation asynchronously after SSH verification.
+// BUG-004: This is informational only - we log warnings but don't fail the session.
+// The validation helps identify provider inventory mismatches.
+func (s *Service) validateCUDAVersionAsync(session *models.Session, privateKey string, logger *slog.Logger) {
+	// Use a short timeout for validation - we don't want to hold resources
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create SSH executor for CUDA check
+	executor := sshverify.NewExecutor(
+		sshverify.WithExecutorConnectTimeout(10*time.Second),
+		sshverify.WithExecutorCommandTimeout(15*time.Second),
+	)
+
+	conn, err := executor.Connect(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
+	if err != nil {
+		logger.Debug("CUDA validation: failed to connect for validation",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer conn.Close()
+
+	cudaInfo, err := executor.GetCUDAVersion(ctx, conn)
+	if err != nil {
+		logger.Warn("CUDA validation: failed to get CUDA version",
+			slog.String("error", err.Error()),
+			slog.String("session_id", session.ID))
+		return
+	}
+
+	logger.Info("CUDA validation: version detected",
+		slog.String("cuda_version", cudaInfo.CUDAVersion),
+		slog.String("driver_version", cudaInfo.DriverVersion),
+		slog.String("session_id", session.ID),
+		slog.String("provider", session.Provider))
+
+	// TODO: Compare with expected CUDA version from offer/template if available
+	// For now, we just log the detected version for observability
 }
 
 // failSession marks a session as failed

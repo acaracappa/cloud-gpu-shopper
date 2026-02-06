@@ -2,6 +2,7 @@ package models
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -552,4 +553,78 @@ func TestExtraFilters_MatchesHost_EmptyFilters(t *testing.T) {
 // Helper function to create float64 pointers
 func floatPtr(f float64) *float64 {
 	return &f
+}
+
+// BUG-005: Test GetRecommendedSSHTimeout for various image types
+func TestVastTemplate_GetRecommendedSSHTimeout(t *testing.T) {
+	tests := []struct {
+		name         string
+		image        string
+		expectedTime time.Duration
+		isHeavy      bool
+	}{
+		{
+			name:         "vLLM image gets extended timeout",
+			image:        "vllm/vllm-openai:latest",
+			expectedTime: 15 * time.Minute,
+			isHeavy:      true,
+		},
+		{
+			name:         "vLLM case-insensitive",
+			image:        "vastai/VLLM:v0.15.0",
+			expectedTime: 15 * time.Minute,
+			isHeavy:      true,
+		},
+		{
+			name:         "TGI image gets extended timeout",
+			image:        "ghcr.io/huggingface/tgi:latest",
+			expectedTime: 12 * time.Minute,
+			isHeavy:      true,
+		},
+		{
+			name:         "TensorRT image gets extended timeout",
+			image:        "nvcr.io/nvidia/tensorrt:23.04-py3",
+			expectedTime: 12 * time.Minute,
+			isHeavy:      true,
+		},
+		{
+			name:         "Ollama image gets extended timeout",
+			image:        "ollama/ollama:latest",
+			expectedTime: 12 * time.Minute,
+			isHeavy:      true,
+		},
+		{
+			name:         "Triton image gets extended timeout",
+			image:        "nvcr.io/nvidia/tritonserver:24.01-py3",
+			expectedTime: 12 * time.Minute,
+			isHeavy:      true,
+		},
+		{
+			name:         "Regular image gets default timeout",
+			image:        "pytorch/pytorch:2.0-cuda12.0",
+			expectedTime: 10 * time.Minute,
+			isHeavy:      false,
+		},
+		{
+			name:         "Ubuntu base image gets default timeout",
+			image:        "ubuntu:22.04",
+			expectedTime: 10 * time.Minute,
+			isHeavy:      false,
+		},
+		{
+			name:         "Empty image gets default timeout",
+			image:        "",
+			expectedTime: 10 * time.Minute,
+			isHeavy:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			template := VastTemplate{Image: tt.image}
+			timeout := template.GetRecommendedSSHTimeout()
+			assert.Equal(t, tt.expectedTime, timeout, "timeout should match expected")
+			assert.Equal(t, tt.isHeavy, template.IsHeavyImage(), "isHeavy should match expected")
+		})
+	}
 }

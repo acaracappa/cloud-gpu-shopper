@@ -428,3 +428,100 @@ func TestSSHVerifierInterface(t *testing.T) {
 	var _ SSHVerifier = &AlwaysFailSSHVerifier{}
 	var _ SSHVerifier = NewMockSSHVerifier()
 }
+
+// TestSSHVerification_InstanceStoppedFailsFast tests BUG-011: instance stopped unexpectedly
+// should fail the session immediately instead of waiting for SSH timeout
+func TestSSHVerification_InstanceStoppedFailsFast(t *testing.T) {
+	store := newMockSessionStore()
+	// Use "vastai" provider to avoid the 90-second TensorDock cloud-init delay in tests
+	prov := newMockProvider("vastai")
+
+	// Configure provider to return "stopped" status after a few calls
+	callCount := 0
+	var mu sync.Mutex
+	prov.createInstanceFn = func(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
+		return &provider.InstanceInfo{
+			ProviderInstanceID: "mock-instance-stopped",
+			SSHHost:            "", // Empty initially
+			SSHPort:            0,
+			SSHUser:            "root",
+			Status:             "creating",
+		}, nil
+	}
+	prov.getStatusFn = func(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
+		mu.Lock()
+		callCount++
+		count := callCount
+		mu.Unlock()
+
+		if count < 2 {
+			// Return creating initially
+			return &provider.InstanceStatus{
+				Status:  "creating",
+				Running: false,
+			}, nil
+		}
+		// Return stopped status - simulates BUG-011 scenario
+		return &provider.InstanceStatus{
+			Status:  "stopped",
+			Running: false,
+		}, nil
+	}
+
+	registry := NewSimpleProviderRegistry([]provider.Provider{prov})
+
+	// Use mock SSH verifier that would succeed (but should never be called for stopped instances)
+	mockSSH := NewMockSSHVerifier()
+	mockSSH.SetSucceed(true)
+
+	svc := New(store, registry,
+		WithLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))),
+		WithSSHVerifier(mockSSH),
+		WithSSHVerifyTimeout(30*time.Second), // Long timeout to verify we fail fast
+		WithSSHCheckInterval(100*time.Millisecond))
+
+	// Ensure verification goroutines complete before test ends
+	defer func() {
+		require.True(t, svc.WaitForVerificationComplete(10*time.Second), "verification goroutines should complete")
+	}()
+
+	ctx := context.Background()
+	req := models.CreateSessionRequest{
+		ConsumerID:     "consumer-001",
+		OfferID:        "vastai-12345", // Use vastai offer ID format
+		WorkloadType:   models.WorkloadLLM,
+		ReservationHrs: 1,
+	}
+	offer := &models.GPUOffer{
+		Provider:   "vastai",
+		ProviderID: "12345",
+		GPUType:    "H100",
+	}
+
+	startTime := time.Now()
+	session, err := svc.CreateSession(ctx, req, offer)
+	require.NoError(t, err)
+
+	// Wait for session to fail - should be fast, not waiting for 30 second timeout
+	var finalError string
+	require.Eventually(t, func() bool {
+		s, err := store.Get(ctx, session.ID)
+		if err != nil {
+			return false
+		}
+		finalError = s.Error
+		return s.Status == models.StatusFailed
+	}, 5*time.Second, 50*time.Millisecond, "Session should fail when instance stops")
+
+	elapsed := time.Since(startTime)
+
+	// Verify we failed fast - should be much less than the 30 second timeout
+	assert.Less(t, elapsed, 5*time.Second, "Should fail fast when instance stops, not wait for timeout")
+
+	// Verify the error message indicates instance stopped
+	assert.Contains(t, finalError, "instance stopped", "Error should indicate instance stopped")
+	assert.Contains(t, finalError, "stopped", "Error should contain the status")
+
+	// Verify provider destroy was called
+	assert.Equal(t, 1, prov.destroyCalls, "Instance should be destroyed when it stops unexpectedly")
+}

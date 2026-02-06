@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
@@ -28,10 +29,11 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Services
-	inventory   *inventory.Service
-	provisioner *provisioner.Service
-	lifecycle   *lifecycle.Manager
-	costTracker *cost.Tracker
+	inventory      *inventory.Service
+	provisioner    *provisioner.Service
+	lifecycle      *lifecycle.Manager
+	costTracker    *cost.Tracker
+	benchmarkStore *benchmark.Store
 
 	// Configuration
 	host string
@@ -62,6 +64,13 @@ func WithHost(host string) Option {
 func WithPort(port int) Option {
 	return func(s *Server) {
 		s.port = port
+	}
+}
+
+// WithBenchmarkStore sets the benchmark store
+func WithBenchmarkStore(store *benchmark.Store) Option {
+	return func(s *Server) {
+		s.benchmarkStore = store
 	}
 }
 
@@ -145,6 +154,15 @@ func (s *Server) setupRouter() {
 		// Costs
 		v1.GET("/costs", s.handleGetCosts)
 		v1.GET("/costs/summary", s.handleGetCostSummary)
+
+		// Benchmarks
+		v1.GET("/benchmarks", s.handleListBenchmarks)
+		v1.GET("/benchmarks/:id", s.handleGetBenchmark)
+		v1.POST("/benchmarks", s.handleCreateBenchmark)
+		v1.GET("/benchmarks/best", s.handleGetBestBenchmark)
+		v1.GET("/benchmarks/cheapest", s.handleGetCheapestBenchmark)
+		v1.GET("/benchmarks/compare", s.handleCompareBenchmarks)
+		v1.GET("/benchmarks/recommendations", s.handleGetHardwareRecommendations)
 	}
 
 	s.router = router

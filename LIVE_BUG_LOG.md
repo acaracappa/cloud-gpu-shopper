@@ -17,6 +17,8 @@
 | BUG-005 | HIGH | SSH verify timeout (5min) too short for vLLM template - image pull + model download causes 4/4 provisions to fail. Hosts in Spain, Quebec, and BC Canada all timed out. Only TX RTX 5090 succeeded (likely had cached image). Need configurable per-template timeout or pre-flight image check. | 🔴 OPEN |
 | BUG-006 | MEDIUM | vLLM 0.15.0 pip package (CUDA 12.x) incompatible with CUDA 13.0 hosts - engine core init fails. The vLLM Docker template uses its own bundled CUDA, but pip-installing vLLM on a bare CUDA 13.0 host fails. | 🔴 OPEN (informational) |
 | BUG-007 | HIGH | SSH private key not persisted - returned only once in POST creation response. If client loses the response (network error, crash, parse failure), the key is unrecoverable. Session becomes inaccessible but keeps running and billing. No re-key or key retrieval endpoint exists. | 🔴 OPEN |
+| BUG-008 | HIGH | TensorDock port_forwards field ignored - instances created without port forwarding, making SSH port 22 inaccessible. Fixed by using `useDedicatedIp: true` instead. | ✅ FIXED |
+| BUG-009 | MEDIUM | TensorDock ubuntu2404 image missing NVIDIA drivers - fresh instances have no nvidia-smi. Users must manually install drivers (`apt install nvidia-driver-550`) and reboot. | 🔴 OPEN (provider-side) |
 
 ---
 
@@ -164,6 +166,72 @@ Changed from `write_files` to `runcmd`-only approach:
 
 ---
 
+## BUG-008 Details: TensorDock port_forwards Field Ignored
+
+**Discovered:** 2026-02-05 20:30 EST
+
+**Symptoms:**
+- TensorDock instance creates successfully with IP address
+- Instance status shows `portForwards: []` (empty array)
+- SSH connection to port 22 times out
+- Port 22 is not exposed externally
+
+**Root Cause:**
+The TensorDock API accepts `port_forwards` in the request but doesn't apply them to instances at certain locations. The behavior appears location-dependent (Joplin, Missouri confirmed affected).
+
+**Fix Applied:**
+Changed from port forwarding to dedicated IP approach:
+1. Added `UseDedicatedIP bool` field to `CreateInstanceAttributes`
+2. Set `useDedicatedIp: true` in create request
+3. Dedicated IP exposes all ports directly (no forwarding needed)
+
+**Code Changes:**
+- `internal/provider/tensordock/types.go`: Added `UseDedicatedIP` field
+- `internal/provider/tensordock/client.go`: Set `UseDedicatedIP: true`, removed `PortForwards`
+
+**Testing Status:**
+- ✅ Dedicated IP approach verified working (Joplin RTX 4090)
+- ✅ SSH connects on port 22 directly
+- ✅ GPU verified via nvidia-smi
+
+---
+
+## BUG-009 Details: TensorDock ubuntu2404 Image Missing NVIDIA Drivers
+
+**Discovered:** 2026-02-05 21:10 EST
+
+**Symptoms:**
+- Instance creates and SSH works
+- `nvidia-smi` command not found
+- `lspci` shows GPU hardware (RTX 4090 AD102) correctly
+- No nvidia packages installed (`dpkg -l | grep nvidia` returns nothing)
+
+**Impact:**
+- GPU workloads cannot run until drivers installed
+- Adds 2-3 minutes to instance setup (install + reboot)
+- Unexpected for users selecting GPU instances
+
+**Workaround:**
+```bash
+sudo apt-get update && sudo apt-get install -y nvidia-driver-550
+sudo reboot
+# Wait ~30 seconds, then nvidia-smi works
+```
+
+**Recommendations:**
+1. Use a different TensorDock image that includes drivers
+2. Add driver installation to cloud-init (adds boot time)
+3. Document this limitation for TensorDock provider
+
+**Session Details:**
+- Location: Joplin, Missouri
+- GPU: RTX 4090
+- Image: ubuntu2404
+- Driver installed: 580.126.09
+- CUDA version: 13.0
+
+---
+
 ## Warnings Observed
 
 | Time | Warning | Details |
@@ -243,6 +311,16 @@ Changed from `write_files` to `runcmd`-only approach:
 | 00:24 (Feb 5) | vLLM Provision ✅ | RTX 3090 Pennsylvania (vastai-30775857) $0.062/hr, SSH verified ~1min |
 | 00:30 (Feb 5) | vLLM Model Loaded ✅ | DeepSeek-R1-Distill-Llama-8B ready on port 18000 |
 | 00:31 (Feb 5) | Both Nodes Destroyed | Ollama + vLLM sessions cleaned up |
+| 19:43 (Feb 5) | TensorDock Testing Started | Server restarted for TensorDock provider testing |
+| 19:55 (Feb 5) | Orphans Cleaned | Found 2 orphaned TensorDock instances from previous tests, destroyed |
+| 20:00 (Feb 5) | Stale Inventory | Tried 5+ TensorDock locations, all "No available nodes found" |
+| 20:10 (Feb 5) | Joplin Works | Direct API test confirmed Joplin (RTX 4090) available |
+| 20:30 (Feb 5) | BUG-008 Discovered | port_forwards not being applied, SSH timeout |
+| 20:45 (Feb 5) | BUG-008 Fixed | Changed to useDedicatedIp: true |
+| 21:08 (Feb 5) | TensorDock Provision ✅ | RTX 4090 Joplin $0.44/hr, SSH verified |
+| 21:10 (Feb 5) | BUG-009 Discovered | nvidia-smi not found, drivers not installed |
+| 21:15 (Feb 5) | Driver Installed | nvidia-driver-550 installed, reboot, nvidia-smi works |
+| 21:18 (Feb 5) | GPU Verified ✅ | RTX 4090, Driver 580.126.09, CUDA 13.0, 24GB VRAM |
 
 ---
 
@@ -275,4 +353,10 @@ Changed from `write_files` to `runcmd`-only approach:
 | Provider | Provisioning | SSH Verification | Manual SSH | Status |
 |----------|--------------|------------------|------------|--------|
 | Vast.ai | ✅ Works | ✅ Works | ✅ Works | **FULLY OPERATIONAL** |
-| TensorDock | ⚠️ API Timeouts | ✅ Fix Applied | ✅ Works | **SSH Fix Complete, API Issues** |
+| TensorDock | ✅ Works (useDedicatedIp) | ✅ Works | ✅ Works | **OPERATIONAL** (stale inventory, no drivers) |
+
+### TensorDock Notes (Feb 5)
+- Port forwarding was broken; fixed by using `useDedicatedIp: true`
+- Inventory is extremely stale (5+ locations failed before finding working one)
+- ubuntu2404 image has no NVIDIA drivers (manual install required)
+- Joplin, Missouri is a known working location for RTX 4090

@@ -158,7 +158,7 @@ func setDefaults(v *viper.Viper) {
 	// Provider defaults
 	v.SetDefault("providers.vastai.enabled", true)
 	v.SetDefault("providers.tensordock.enabled", true)
-	v.SetDefault("providers.tensordock.default_image", "ubuntu2404")
+	v.SetDefault("providers.tensordock.default_image", "ubuntu2204") // BUG-009: ubuntu2204 has better NVIDIA driver support
 
 	// Inventory defaults
 	v.SetDefault("inventory.default_cache_ttl", time.Minute)

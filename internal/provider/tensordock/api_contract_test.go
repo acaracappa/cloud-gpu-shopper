@@ -293,8 +293,8 @@ func TestAPIContract_CreateInstance_RequestFormat_JSONAPI(t *testing.T) {
 	assert.Contains(t, receivedRequest.Data.Attributes.Name, "shopper-")
 }
 
-func TestAPIContract_CreateInstance_RequestFormat_PortForwarding(t *testing.T) {
-	// TensorDock REQUIRES SSH port forwarding for Ubuntu VMs
+func TestAPIContract_CreateInstance_RequestFormat_DedicatedIP(t *testing.T) {
+	// TensorDock REQUIRES dedicated IP for reliable SSH access (port_forwards was ignored - BUG-008)
 	var receivedRequest CreateInstanceRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -313,12 +313,8 @@ func TestAPIContract_CreateInstance_RequestFormat_PortForwarding(t *testing.T) {
 
 	require.NoError(t, err)
 
-	// Verify port forwarding is included
-	require.Len(t, receivedRequest.Data.Attributes.PortForwards, 1)
-	pf := receivedRequest.Data.Attributes.PortForwards[0]
-	assert.Equal(t, "tcp", pf.Protocol)
-	assert.Equal(t, 22, pf.InternalPort)
-	assert.Equal(t, 22, pf.ExternalPort)
+	// Verify dedicated IP is requested for direct SSH access
+	assert.True(t, receivedRequest.Data.Attributes.UseDedicatedIP, "useDedicatedIp should be true")
 }
 
 func TestAPIContract_CreateInstance_RequestFormat_CloudInit(t *testing.T) {
@@ -349,7 +345,7 @@ func TestAPIContract_CreateInstance_RequestFormat_CloudInit(t *testing.T) {
 	assert.Nil(t, receivedRequest.Data.Attributes.CloudInit.WriteFiles)
 
 	// Should have runcmd for all operations: directory creation, key writing, permissions
-	require.Len(t, receivedRequest.Data.Attributes.CloudInit.RunCmd, 11)
+	require.Len(t, receivedRequest.Data.Attributes.CloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
 	runcmdStr := strings.Join(receivedRequest.Data.Attributes.CloudInit.RunCmd, " ")
 	assert.Contains(t, runcmdStr, "mkdir -p /root/.ssh")
 	assert.Contains(t, runcmdStr, "authorized_keys")

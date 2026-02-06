@@ -257,3 +257,21 @@ func (e *Executor) RunCommandWithCombinedOutput(ctx context.Context, conn *Conne
 	}
 	return stdout, nil
 }
+
+// GetCUDAVersion retrieves CUDA version information from the remote host.
+// BUG-004: Post-provision CUDA validation to detect version mismatches.
+func (e *Executor) GetCUDAVersion(ctx context.Context, conn *Connection) (*CUDAInfo, error) {
+	// Use nvidia-smi to get CUDA version
+	// The -L flag shows less output but still includes the CUDA version in the header
+	stdout, stderr, err := e.RunCommand(ctx, conn, "nvidia-smi")
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi failed: %w (stderr: %s)", err, stderr)
+	}
+
+	info, err := ParseCUDAVersion(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CUDA version: %w", err)
+	}
+
+	return info, nil
+}

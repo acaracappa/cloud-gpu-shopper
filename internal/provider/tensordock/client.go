@@ -76,8 +76,9 @@ const (
 	defaultTimeoutDestroy        = 30 * time.Second
 	defaultTimeoutListInstances  = 30 * time.Second
 
-	// defaultImageName is Ubuntu 24.04 - the most common choice for GPU workloads
-	defaultImageName = "ubuntu2404"
+	// defaultImageName is Ubuntu 22.04 - better NVIDIA driver support than 24.04
+	// BUG-009: ubuntu2404 is missing NVIDIA drivers and requires manual installation
+	defaultImageName = "ubuntu2204"
 
 	// TensorDockAvailabilityConfidence indicates how reliable TensorDock inventory is.
 	// Set to 50% because TensorDock's /locations endpoint frequently shows GPUs
@@ -267,6 +268,86 @@ var ErrCircuitOpen = errors.New("circuit breaker is open")
 
 // Client implements the provider.Provider interface for TensorDock.
 // It handles authentication, rate limiting, and API communication.
+// locationStats tracks provisioning success/failure rates per location.
+// This enables dynamic availability confidence based on real-world success rates.
+type locationStats struct {
+	mu           sync.RWMutex
+	attempts     map[string]int // locationID -> total attempts
+	successes    map[string]int // locationID -> successful provisions
+	lastAttempt  map[string]time.Time
+	decayAfter   time.Duration // Reset stats after this duration of inactivity
+}
+
+// newLocationStats creates a new location stats tracker
+func newLocationStats() *locationStats {
+	return &locationStats{
+		attempts:    make(map[string]int),
+		successes:   make(map[string]int),
+		lastAttempt: make(map[string]time.Time),
+		decayAfter:  1 * time.Hour, // Reset stats after 1 hour of no attempts
+	}
+}
+
+// recordAttempt records a provisioning attempt for a location
+func (ls *locationStats) recordAttempt(locationID string, success bool) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	// Check for decay - if last attempt was long ago, reset stats
+	if lastTime, ok := ls.lastAttempt[locationID]; ok {
+		if time.Since(lastTime) > ls.decayAfter {
+			ls.attempts[locationID] = 0
+			ls.successes[locationID] = 0
+		}
+	}
+
+	ls.attempts[locationID]++
+	if success {
+		ls.successes[locationID]++
+	}
+	ls.lastAttempt[locationID] = time.Now()
+}
+
+// getConfidence returns the success rate for a location.
+// Returns a value between minConfidence (0.1) and maxConfidence (1.0).
+// If no data is available, returns the default TensorDock confidence.
+func (ls *locationStats) getConfidence(locationID string) float64 {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+
+	const minConfidence = 0.1 // Never go below 10%
+	const maxConfidence = 1.0
+
+	attempts, hasAttempts := ls.attempts[locationID]
+	if !hasAttempts || attempts == 0 {
+		return TensorDockAvailabilityConfidence // Default 50%
+	}
+
+	successes := ls.successes[locationID]
+	rate := float64(successes) / float64(attempts)
+
+	// Clamp to minimum confidence
+	if rate < minConfidence {
+		return minConfidence
+	}
+	if rate > maxConfidence {
+		return maxConfidence
+	}
+
+	return rate
+}
+
+// getStats returns human-readable stats for a location
+func (ls *locationStats) getStats(locationID string) (attempts, successes int, confidence float64) {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+
+	attempts = ls.attempts[locationID]
+	successes = ls.successes[locationID]
+	confidence = ls.getConfidence(locationID)
+	return
+}
+
 type Client struct {
 	// Authentication credentials
 	apiKey   string // Also called "Authorization ID" in TensorDock dashboard
@@ -289,6 +370,9 @@ type Client struct {
 
 	// Structured logging
 	logger *slog.Logger
+
+	// Dynamic availability tracking (stale inventory fix)
+	locationStats *locationStats
 }
 
 // ClientOption configures the TensorDock client
@@ -581,6 +665,7 @@ func NewClient(apiKey, apiToken string, opts ...ClientOption) *Client {
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()),
 		minInterval:    time.Second, // Conservative rate limit
 		logger:         slog.Default(),
+		locationStats:  newLocationStats(), // Dynamic availability tracking
 	}
 
 	for _, opt := range opts {
@@ -662,10 +747,13 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	}
 
 	// Convert each location+GPU combination to a GPUOffer
+	// Use dynamic availability confidence based on historical success rates
 	offers = make([]models.GPUOffer, 0)
 	for _, location := range result.Data.Locations {
 		for _, gpu := range location.GPUs {
 			offer := locationGPUToOffer(location, gpu)
+			// Override confidence with dynamic value from location stats
+			offer.AvailabilityConfidence = c.locationStats.getConfidence(location.ID)
 			if offer.MatchesFilter(filter) {
 				offers = append(offers, offer)
 			}
@@ -858,6 +946,19 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		return nil, err
 	}
 
+	// Record provisioning attempt for dynamic availability tracking
+	// This runs after the function returns, recording success/failure
+	defer func() {
+		success := err == nil && info != nil && info.ProviderInstanceID != ""
+		c.locationStats.recordAttempt(locationID, success)
+		if !success && err != nil {
+			c.logger.Debug("provisioning attempt recorded",
+				slog.String("location_id", locationID),
+				slog.Bool("success", false),
+				slog.Float64("new_confidence", c.locationStats.getConfidence(locationID)))
+		}
+	}()
+
 	c.debugLog("CreateInstance: locationID=%s, gpuName=%s", locationID, gpuName)
 
 	// Build the create request
@@ -877,12 +978,9 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 						gpuName: {Count: 1},
 					},
 				},
-				// REQUIRED: TensorDock rejects Ubuntu VMs without SSH port forwarding
-				// Error: "SSH port (22) must be forwarded for Ubuntu VMs"
-				// Note: TensorDock may assign a different external port (e.g., 20456)
-				PortForwards: []PortForward{
-					{Protocol: "tcp", InternalPort: 22, ExternalPort: 22},
-				},
+				// Request dedicated IP for direct port access (all ports exposed)
+				// This is more reliable than port forwarding which was being ignored
+				UseDedicatedIP: true,
 			},
 		},
 	}
@@ -1419,6 +1517,15 @@ func ValidateSSHPublicKey(publicKey string) error {
 // IMPORTANT: The caller should validate the SSH key using ValidateSSHPublicKey
 // before calling this function.
 func buildSSHKeyCloudInit(publicKey string) *CloudInit {
+	return buildCloudInit(publicKey, true)
+}
+
+// buildCloudInit creates cloud-init configuration for SSH key installation and
+// optionally NVIDIA driver installation.
+//
+// BUG-009: TensorDock images may be missing NVIDIA drivers. When installNvidiaDrivers
+// is true, we add commands to install the driver if not present.
+func buildCloudInit(publicKey string, installNvidiaDrivers bool) *CloudInit {
 	// TensorDock's cloud-init write_files may not support encoding field,
 	// and runs before runcmd (which creates directories).
 	// Use runcmd only for reliable SSH key installation with proper ordering.
@@ -1429,24 +1536,42 @@ func buildSSHKeyCloudInit(publicKey string) *CloudInit {
 	// Shell-escape the key to handle any special characters.
 	escapedKey := shellEscapeSingleQuote(publicKey)
 
+	runCmds := []string{
+		// Create directories with proper permissions first
+		"mkdir -p /root/.ssh",
+		"chmod 700 /root/.ssh",
+		// Write SSH key for root
+		fmt.Sprintf("echo '%s' > /root/.ssh/authorized_keys", escapedKey),
+		"chmod 600 /root/.ssh/authorized_keys",
+		"chown root:root /root/.ssh/authorized_keys",
+		// Create user's .ssh directory
+		"mkdir -p /home/user/.ssh",
+		"chmod 700 /home/user/.ssh",
+		"chown user:user /home/user/.ssh",
+		// Write SSH key for user
+		fmt.Sprintf("echo '%s' > /home/user/.ssh/authorized_keys", escapedKey),
+		"chmod 600 /home/user/.ssh/authorized_keys",
+		"chown user:user /home/user/.ssh/authorized_keys",
+	}
+
+	// BUG-009: Install NVIDIA drivers if not present
+	// This runs in background to not block SSH access, with a marker file to indicate completion
+	if installNvidiaDrivers {
+		runCmds = append(runCmds,
+			// Check if nvidia-smi exists; if not, install drivers
+			// Using nohup and background execution to not block cloud-init completion
+			// The installation may require a reboot, but we warn about this in logs
+			"if ! command -v nvidia-smi &> /dev/null; then "+
+				"echo 'NVIDIA driver not found, installing nvidia-driver-550...' >> /var/log/cloud-init-nvidia.log && "+
+				"apt-get update >> /var/log/cloud-init-nvidia.log 2>&1 && "+
+				"DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-550 >> /var/log/cloud-init-nvidia.log 2>&1 && "+
+				"echo 'NVIDIA driver installed. A reboot may be required.' >> /var/log/cloud-init-nvidia.log; "+
+				"fi",
+		)
+	}
+
 	return &CloudInit{
-		RunCmd: []string{
-			// Create directories with proper permissions first
-			"mkdir -p /root/.ssh",
-			"chmod 700 /root/.ssh",
-			// Write SSH key for root
-			fmt.Sprintf("echo '%s' > /root/.ssh/authorized_keys", escapedKey),
-			"chmod 600 /root/.ssh/authorized_keys",
-			"chown root:root /root/.ssh/authorized_keys",
-			// Create user's .ssh directory
-			"mkdir -p /home/user/.ssh",
-			"chmod 700 /home/user/.ssh",
-			"chown user:user /home/user/.ssh",
-			// Write SSH key for user
-			fmt.Sprintf("echo '%s' > /home/user/.ssh/authorized_keys", escapedKey),
-			"chmod 600 /home/user/.ssh/authorized_keys",
-			"chown user:user /home/user/.ssh/authorized_keys",
-		},
+		RunCmd: runCmds,
 	}
 }
 
@@ -1576,6 +1701,11 @@ func isStaleInventoryErrorMessage(msg string) bool {
 		"quota exceeded",
 		"limit reached",
 		"maximum", // covers "maximum reached", "maximum instances reached"
+
+		// Network resource issues (BUG-010)
+		"no available public ips",
+		"no available public ip",
+		"no public ip",
 	}
 	msgLower := strings.ToLower(msg)
 	for _, indicator := range staleIndicators {

@@ -543,7 +543,7 @@ func TestClient_CreateInstance_RequestValidation(t *testing.T) {
 		assert.Equal(t, TestSSHKey, capturedRequest.Data.Attributes.SSHKey)
 	})
 
-	t.Run("port forward is configured for SSH", func(t *testing.T) {
+	t.Run("dedicated IP is requested for SSH access", func(t *testing.T) {
 		req := provider.CreateInstanceRequest{
 			OfferID:      "tensordock-1a779525-4c04-4f2c-aa45-58b47d54bb38-rtx4090",
 			SSHPublicKey: TestSSHKey,
@@ -553,10 +553,8 @@ func TestClient_CreateInstance_RequestValidation(t *testing.T) {
 		_, err := client.CreateInstance(context.Background(), req)
 		require.NoError(t, err)
 
-		// Verify port forward is included
-		require.Len(t, capturedRequest.Data.Attributes.PortForwards, 1)
-		assert.Equal(t, 22, capturedRequest.Data.Attributes.PortForwards[0].InternalPort)
-		assert.Equal(t, "tcp", capturedRequest.Data.Attributes.PortForwards[0].Protocol)
+		// Verify dedicated IP is requested (replaces port forwarding)
+		assert.True(t, capturedRequest.Data.Attributes.UseDedicatedIP, "useDedicatedIp should be true for SSH access")
 	})
 
 	t.Run("location ID extracted from offer ID", func(t *testing.T) {
@@ -955,6 +953,12 @@ func TestIsStaleInventoryErrorMessage(t *testing.T) {
 		{"Maximum instances reached", true},
 		{"Limit reached for this type", true},
 
+		// Network resource issues (BUG-010)
+		{"No available public IPs on hostnode", true},
+		{"No available public ip for this location", true},
+		{"Error: no public IP available", true},
+		{"NO AVAILABLE PUBLIC IPS", true},
+
 		// Non-stale errors (should return false)
 		{"Invalid image name", false},
 		{"SSH port required", false},
@@ -1019,12 +1023,99 @@ func TestBuildSSHKeyCloudInit(t *testing.T) {
 			// New implementation uses only runcmd (no write_files)
 			assert.Nil(t, cloudInit.WriteFiles)
 
-			// Verify runcmd has all commands for both root and user
-			assert.Len(t, cloudInit.RunCmd, 11)
+			// Verify runcmd has all commands for both root and user, plus driver install
+			// 11 SSH commands + 1 NVIDIA driver command = 12 total
+			assert.Len(t, cloudInit.RunCmd, 12)
 			assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
 			assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
+			// BUG-009: Verify NVIDIA driver installation command is present
+			assert.Contains(t, cloudInit.RunCmd[11], "nvidia-driver-550")
 		})
 	}
+}
+
+func TestBuildCloudInit_WithoutDrivers(t *testing.T) {
+	// Test that we can disable driver installation
+	cloudInit := buildCloudInit("ssh-rsa AAAA test@host", false)
+	assert.NotNil(t, cloudInit)
+	// Should only have 11 SSH commands, no driver install
+	assert.Len(t, cloudInit.RunCmd, 11)
+	for _, cmd := range cloudInit.RunCmd {
+		assert.NotContains(t, cmd, "nvidia-driver", "Should not contain driver install when disabled")
+	}
+}
+
+// =============================================================================
+// Location Stats Tracking (Stale Inventory Fix)
+// =============================================================================
+
+func TestLocationStats_BasicTracking(t *testing.T) {
+	stats := newLocationStats()
+
+	// Initial confidence should be default
+	assert.Equal(t, TensorDockAvailabilityConfidence, stats.getConfidence("loc-123"))
+
+	// Record some failures
+	stats.recordAttempt("loc-123", false)
+	stats.recordAttempt("loc-123", false)
+	stats.recordAttempt("loc-123", false)
+
+	// Confidence should drop (3 failures, 0 successes = 0%, but min is 10%)
+	confidence := stats.getConfidence("loc-123")
+	assert.Equal(t, 0.1, confidence, "Confidence should be at minimum (10%)")
+}
+
+func TestLocationStats_SuccessRateCalculation(t *testing.T) {
+	stats := newLocationStats()
+
+	// 5 successes, 5 failures = 50%
+	for i := 0; i < 5; i++ {
+		stats.recordAttempt("loc-456", true)
+		stats.recordAttempt("loc-456", false)
+	}
+
+	confidence := stats.getConfidence("loc-456")
+	assert.InDelta(t, 0.5, confidence, 0.01, "Confidence should be 50%")
+
+	// Record more successes to increase confidence
+	for i := 0; i < 10; i++ {
+		stats.recordAttempt("loc-456", true)
+	}
+
+	// Now: 15 successes, 5 failures = 75%
+	confidence = stats.getConfidence("loc-456")
+	assert.InDelta(t, 0.75, confidence, 0.01, "Confidence should be 75%")
+}
+
+func TestLocationStats_DifferentLocations(t *testing.T) {
+	stats := newLocationStats()
+
+	// Good location: all successes
+	for i := 0; i < 10; i++ {
+		stats.recordAttempt("good-loc", true)
+	}
+
+	// Bad location: all failures
+	for i := 0; i < 10; i++ {
+		stats.recordAttempt("bad-loc", false)
+	}
+
+	assert.Equal(t, 1.0, stats.getConfidence("good-loc"), "Good location should have 100% confidence")
+	assert.Equal(t, 0.1, stats.getConfidence("bad-loc"), "Bad location should have minimum 10% confidence")
+	assert.Equal(t, TensorDockAvailabilityConfidence, stats.getConfidence("unknown-loc"), "Unknown location should have default confidence")
+}
+
+func TestLocationStats_GetStats(t *testing.T) {
+	stats := newLocationStats()
+
+	stats.recordAttempt("loc-789", true)
+	stats.recordAttempt("loc-789", true)
+	stats.recordAttempt("loc-789", false)
+
+	attempts, successes, confidence := stats.getStats("loc-789")
+	assert.Equal(t, 3, attempts)
+	assert.Equal(t, 2, successes)
+	assert.InDelta(t, 0.666, confidence, 0.01)
 }
 
 // =============================================================================
