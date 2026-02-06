@@ -224,6 +224,42 @@ var (
 		},
 		[]string{"provider"},
 	)
+
+	// SessionRetryAttempts counts auto-retry attempts
+	SessionRetryAttempts = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gpu_session_retry_attempts_total",
+			Help: "Total number of session auto-retry attempts by provider, scope, and reason",
+		},
+		[]string{"provider", "scope", "reason"},
+	)
+
+	// SessionRetrySuccesses counts successful auto-retries
+	SessionRetrySuccesses = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gpu_session_retry_successes_total",
+			Help: "Total number of successful session auto-retries by provider and scope",
+		},
+		[]string{"provider", "scope"},
+	)
+
+	// SessionRetryExhausted counts cases where all retries were exhausted
+	SessionRetryExhausted = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gpu_session_retry_exhausted_total",
+			Help: "Total number of sessions where all retry attempts were exhausted",
+		},
+		[]string{"provider", "scope"},
+	)
+
+	// SessionDiskAvailableGB tracks available disk space observed post-provision
+	SessionDiskAvailableGB = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "gpu_session_disk_available_gb",
+			Help: "Available disk space in GB observed on instance post-provision",
+		},
+		[]string{"provider"},
+	)
 )
 
 // Helper functions for common metric operations
@@ -342,6 +378,26 @@ func UpdateProviderCircuitBreakerState(provider string, state int) {
 func RecordHTTPRequest(method, path, status string, duration time.Duration) {
 	HTTPRequestDuration.WithLabelValues(method, path, status).Observe(duration.Seconds())
 	HTTPRequestsTotal.WithLabelValues(method, path, status).Inc()
+}
+
+// RecordRetryAttempt increments the retry attempt counter
+func RecordRetryAttempt(provider, scope, reason string) {
+	SessionRetryAttempts.WithLabelValues(provider, scope, reason).Inc()
+}
+
+// RecordRetrySuccess increments the retry success counter
+func RecordRetrySuccess(provider, scope string) {
+	SessionRetrySuccesses.WithLabelValues(provider, scope).Inc()
+}
+
+// RecordRetryExhausted increments the retry exhausted counter
+func RecordRetryExhausted(provider, scope string) {
+	SessionRetryExhausted.WithLabelValues(provider, scope).Inc()
+}
+
+// RecordDiskAvailable sets the disk available gauge for a provider
+func RecordDiskAvailable(provider string, gb float64) {
+	SessionDiskAvailableGB.WithLabelValues(provider).Set(gb)
 }
 
 // SessionCount holds the count of sessions for a provider/status combination

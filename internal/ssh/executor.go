@@ -258,6 +258,35 @@ func (e *Executor) RunCommandWithCombinedOutput(ctx context.Context, conn *Conne
 	return stdout, nil
 }
 
+// GetDiskStatus runs df and returns disk usage for key mount points
+func (e *Executor) GetDiskStatus(ctx context.Context, conn *Connection) (*DiskStatus, error) {
+	cmd := `df -BG 2>/dev/null | grep -v tmpfs | grep -v "^none"`
+	stdout, stderr, err := e.RunCommand(ctx, conn, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("df failed: %w (stderr: %s)", err, stderr)
+	}
+
+	status, err := ParseDiskOutput(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse df output: %w", err)
+	}
+
+	return status, nil
+}
+
+// CheckOOM checks dmesg for OOM killer events
+func (e *Executor) CheckOOM(ctx context.Context, conn *Connection) (*OOMStatus, error) {
+	cmd := `dmesg -T 2>/dev/null | grep -i "oom\|out of memory\|killed process" | tail -5`
+	stdout, _, err := e.RunCommand(ctx, conn, cmd)
+	if err != nil {
+		// dmesg may require root or may not be available - not fatal
+		// grep returns exit code 1 if no matches, which is also fine
+		return &OOMStatus{}, nil
+	}
+
+	return ParseOOMOutput(stdout), nil
+}
+
 // GetCUDAVersion retrieves CUDA version information from the remote host.
 // BUG-004: Post-provision CUDA validation to detect version mismatches.
 func (e *Executor) GetCUDAVersion(ctx context.Context, conn *Connection) (*CUDAInfo, error) {
