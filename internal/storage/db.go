@@ -91,6 +91,18 @@ func (db *DB) Migrate(ctx context.Context) error {
 		_, _ = db.ExecContext(ctx, migration) // Ignore errors for idempotency
 	}
 
+	// Run offer failure tracking migrations
+	failureMigrations := []string{
+		migrationOfferFailures,
+		migrationOfferFailuresIndex,
+		migrationOfferSuppressions,
+	}
+	for _, migration := range failureMigrations {
+		if _, err := db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("offer failure migration failed: %w", err)
+		}
+	}
+
 	// Run index migrations that may fail if already exists
 	indexMigrations := []string{
 		migrationDuplicatePrevention,
@@ -224,6 +236,33 @@ ON costs(session_id, hour);
 `
 
 // Auto-retry column migrations
+// Offer failure tracking tables
+const migrationOfferFailures = `
+CREATE TABLE IF NOT EXISTS offer_failures (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	offer_id TEXT NOT NULL,
+	provider TEXT NOT NULL,
+	gpu_type TEXT NOT NULL,
+	failure_type TEXT NOT NULL,
+	reason TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+`
+
+const migrationOfferFailuresIndex = `
+CREATE INDEX IF NOT EXISTS idx_offer_failures_offer_id ON offer_failures(offer_id);
+CREATE INDEX IF NOT EXISTS idx_offer_failures_created_at ON offer_failures(created_at);
+`
+
+const migrationOfferSuppressions = `
+CREATE TABLE IF NOT EXISTS offer_suppressions (
+	offer_id TEXT PRIMARY KEY,
+	provider TEXT NOT NULL,
+	gpu_type TEXT NOT NULL,
+	suppressed_at DATETIME NOT NULL
+);
+`
+
 const migrationAddAutoRetry = `ALTER TABLE sessions ADD COLUMN auto_retry INTEGER DEFAULT 0;`
 const migrationAddMaxRetries = `ALTER TABLE sessions ADD COLUMN max_retries INTEGER DEFAULT 0;`
 const migrationAddRetryScope = `ALTER TABLE sessions ADD COLUMN retry_scope TEXT DEFAULT '';`

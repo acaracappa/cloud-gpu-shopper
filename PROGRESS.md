@@ -2,30 +2,44 @@
 
 ## Current Status
 
-**Phase**: Post-MVP QA Remediation
-**Status**: Complete - All Issues Resolved
-**Date**: 2026-01-31
+**Phase**: Post-MVP Feature Development
+**Status**: Active
+**Date**: 2026-02-06
 
-### MVP Complete
-- All 7 safety rules implemented and tested
-- E2E test coverage for all critical paths
-- Live testing infrastructure for both providers
+### Summary
+- MVP complete with all safety rules, E2E tests, and live testing
+- Feb 2026: Added auto-retry, global failure tracking, benchmarking infrastructure, disk estimation, Docker multi-arch builds
+- Active bug tracking for provider-specific issues (TensorDock stale inventory, RTX 5080 driver incompatibility)
 
 ---
+
+## Known Issues
+
+| ID | Description | Status | Notes |
+|----|-------------|--------|-------|
+| BUG-003 | `.env` not loading provider creds | FIXED | `mapEnvFileKeys()` |
+| BUG-004 | CUDA version mismatch | Open | Provider-side data issue |
+| BUG-005 | SSH timeout too short for heavy templates | Open | vLLM needs longer SSH wait |
+| BUG-006 | pip vLLM incompatible with CUDA 13.0 | Workaround | Use Docker template instead |
+| BUG-008 | TensorDock port_forwards ignored | FIXED | Use `useDedicatedIp: true` |
+| BUG-009 | TensorDock ubuntu2404 missing nvidia drivers | Workaround | Install `nvidia-driver-550` + reboot |
+| BUG-010 | TensorDock "No available public IPs on hostnode" | Mitigated | Global failure tracking suppresses after 3 failures |
+| BUG-011 | TensorDock H100 SXM5 stops immediately | Mitigated | Global failure tracking suppresses offer |
+| BUG-012 | RTX 5080 on Vast.ai can't provision | Mitigated | GPU-type-level degradation after 3+ offer failures |
 
 ## Backlog
 
 ### Outstanding (Medium Priority)
 
-_None - all medium priority items complete_
+- Persistent failure tracking (DB-backed, survives server restarts)
 
 ### Outstanding (Low Priority)
 
-_None - all low priority items complete_
+_None_
 
 ### Deferred
 
-_None - all deferred items complete_
+_None_
 
 ### Completed (QA Remediation)
 | ID | Issue | Status |
@@ -560,3 +574,87 @@ go test -race ./...                    # All pass
 go test -tags=e2e -race ./test/e2e/... # All pass
 go test -race -parallel 4 ./cmd/cli/... # All pass
 ```
+
+### 2026-02-02 — Vast.ai Templates, Provisioning Refactor, SSH Fix
+
+- Implemented Vast.ai template system: list, get, compatibility checking
+- Template-aware provisioning: `template_hash_id` parameter auto-applies host requirements
+- Exposed `cuda_version` field in GPUOffer, added `min_cuda` filter to API
+- Fixed bundle cache merge (filtered queries no longer wipe unfiltered cache)
+- Fixed SSH verification for Vast.ai entrypoint-mode instances
+- Tested ollama and vLLM builds on Vast.ai
+
+### 2026-02-04 — Post-Provision Diagnostics, Disk Estimation, Auto-Retry
+
+#### Post-Provision Runtime Diagnostics
+- Added disk space check and OOM detection after SSH verification
+- Session diagnostics endpoint: `GET /api/v1/sessions/:id/diagnostics`
+- New metric: `gpu_session_disk_available_gb`
+
+#### Disk Estimation
+- `disk_gb` parameter on `POST /api/v1/sessions` for estimated disk needs
+- Filters out offers with insufficient disk during provisioning
+
+#### Auto-Retry Feature
+- `POST /api/v1/sessions` now supports `auto_retry`, `max_retries`, `retry_scope`
+- **Sync retry**: `StaleInventoryError` in `CreateInstance` triggers immediate retry with comparable offer
+- **Async retry**: SSH timeout / instance stopped triggers background retry
+- **Scopes**: `same_gpu` (1.2x price), `same_vram` (1.5x price), `any` (cross-provider, 2x price)
+- `FindComparableOffers()` on inventory service excludes failed offers, sorts by confidence then price
+- Session model extended: `RetryCount`, `RetryParentID`, `RetryChildID`, `FailedOffers`
+- New DB columns via idempotent `ALTER TABLE` migrations
+
+#### Session Model Updates
+- Added retry tracking fields to sessions table
+- Extended `SessionStore` with retry-related queries
+
+### 2026-02-05 — TensorDock Integration Fixes
+
+- **BUG-008 FIXED**: TensorDock `port_forwards` parameter ignored → use `useDedicatedIp: true`
+- **BUG-009**: TensorDock `ubuntu2404` image missing nvidia drivers → manual install + reboot
+- Working location: Joplin, Missouri (RTX 4090, $0.44/hr)
+- After driver install: CUDA 13.0, Driver 580.126.09
+
+### 2026-02-06 — Benchmarking Infrastructure, Global Failure Tracking, Docker Multi-Arch
+
+#### Benchmarking Infrastructure
+- Created `internal/benchmark/` package: models, store, manifest, parser
+- SQLite-backed benchmark storage with `benchmarks` table
+- Benchmark manifest for reproducible GPU test runs
+- Ollama-based benchmark runner with TPS parsing
+- API endpoints: `GET /api/v1/benchmarks`, `POST /api/v1/benchmarks`, compare, recommendations
+- CLI: `gpu-shopper benchmark run`, `gpu-shopper benchmark list`
+- Comprehensive documentation: `docs/BENCHMARKING.md`
+
+#### Benchmark Results (23 total runs)
+
+| GPU | Provider | Model | TPS | $/M tokens | Status |
+|-----|----------|-------|-----|-----------|--------|
+| RTX 4090 | TensorDock | deepseek-r1:14b | 93.7 | $1.30 | Success |
+| RTX 4090 | Vast.ai | deepseek-r1:14b | 84.0 | $0.73 | Success |
+| RTX 3090 | TensorDock | deepseek-r1:14b | 55.5 | $1.50 | Success |
+| RTX 3090 | Vast.ai | deepseek-r1:14b | 60.5 | $1.38 | Success |
+| RTX 5090 | Vast.ai | deepseek-r1:14b | 125.2 | $0.53 | Success |
+| A100 80GB | Vast.ai | deepseek-r1:14b | 83.0 | $1.21 | Success |
+| RTX 5080 | Vast.ai | deepseek-r1:14b | — | — | FAILED (BUG-012) |
+
+#### Global Offer Failure Tracking (BUG-010, BUG-011, BUG-012)
+- In-memory `OfferFailureTracker` in inventory service
+- Per-offer confidence degradation: `0.7^recentFailures`
+- Offer suppression: 3 failures within 30min → hidden for 30min
+- GPU-type-level aggregation: 3+ distinct offers fail → 0.3× multiplier
+- Time-based decay: failures expire after 1 hour
+- 3 failure recording points in provisioner: CreateInstance error, instance stopped, SSH timeout
+- API endpoint: `GET /api/v1/offer-health`
+- Prometheus metric: `gpu_offer_failures_total`
+- 14 unit tests
+
+#### Docker Multi-Arch
+- Added `amd64/arm64` support to Docker build
+- Container build workflow with `gofmt` check
+
+#### Documentation
+- CONTRIBUTING.md with development setup, testing, code style
+- Enhanced README with comprehensive user guide and CLI reference
+- Benchmark report with GPU comparisons and recommendations
+- `docs/BENCHMARKING.md` — full benchmarking infrastructure docs

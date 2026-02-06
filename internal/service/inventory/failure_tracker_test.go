@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -324,5 +325,127 @@ func TestMinimumMultiplierFloor(t *testing.T) {
 	// 0.7^20 * 0.3 is tiny → should be floored to 0.05
 	if m2 != 0.05 {
 		t.Errorf("expected floor multiplier 0.05, got %f", m2)
+	}
+}
+
+func TestLoadFromStore_RestoresFailures(t *testing.T) {
+	tracker := NewOfferFailureTracker()
+	ctx := context.Background()
+	now := time.Now()
+
+	failures := []StoredFailure{
+		{
+			OfferID:     "offer-1",
+			Provider:    "vastai",
+			GPUType:     "RTX 4090",
+			FailureType: "stale_inventory",
+			Reason:      "not available",
+			CreatedAt:   now.Add(-10 * time.Minute),
+		},
+		{
+			OfferID:     "offer-1",
+			Provider:    "vastai",
+			GPUType:     "RTX 4090",
+			FailureType: "ssh_timeout",
+			Reason:      "SSH timed out",
+			CreatedAt:   now.Add(-5 * time.Minute),
+		},
+	}
+
+	tracker.LoadFromStore(ctx, failures, nil)
+
+	// Should have 2 recent failures → multiplier ~0.49
+	m := tracker.GetConfidenceMultiplier("offer-1", "RTX 4090", "vastai")
+	expected := 0.49
+	if diff := m - expected; diff > 0.01 || diff < -0.01 {
+		t.Errorf("expected multiplier ~%f after loading from store, got %f", expected, m)
+	}
+}
+
+func TestLoadFromStore_RestoresSuppressions(t *testing.T) {
+	tracker := NewOfferFailureTracker()
+	ctx := context.Background()
+	now := time.Now()
+
+	suppressions := []StoredSuppression{
+		{
+			OfferID:      "offer-suppressed",
+			Provider:     "vastai",
+			GPUType:      "RTX 5080",
+			SuppressedAt: now.Add(-5 * time.Minute), // suppressed 5 min ago, should still be active
+		},
+	}
+
+	tracker.LoadFromStore(ctx, nil, suppressions)
+
+	if !tracker.IsSuppressed("offer-suppressed") {
+		t.Error("expected offer to be suppressed after loading from store")
+	}
+
+	m := tracker.GetConfidenceMultiplier("offer-suppressed", "RTX 5080", "vastai")
+	if m != 0.0 {
+		t.Errorf("expected multiplier 0.0 for suppressed offer, got %f", m)
+	}
+}
+
+func TestLoadFromStore_GPUTypeAggregation(t *testing.T) {
+	tracker := NewOfferFailureTracker()
+	ctx := context.Background()
+	now := time.Now()
+
+	// Load failures from 3 different RTX 5080 offers → GPU-type degradation
+	failures := []StoredFailure{
+		{OfferID: "5080-a", Provider: "vastai", GPUType: "RTX 5080", FailureType: "instance_stopped", Reason: "loading", CreatedAt: now.Add(-10 * time.Minute)},
+		{OfferID: "5080-b", Provider: "vastai", GPUType: "RTX 5080", FailureType: "instance_stopped", Reason: "loading", CreatedAt: now.Add(-8 * time.Minute)},
+		{OfferID: "5080-c", Provider: "vastai", GPUType: "RTX 5080", FailureType: "instance_stopped", Reason: "loading", CreatedAt: now.Add(-6 * time.Minute)},
+	}
+
+	tracker.LoadFromStore(ctx, failures, nil)
+
+	// A different RTX 5080 offer should be GPU-type degraded
+	m := tracker.GetConfidenceMultiplier("5080-new", "RTX 5080", "vastai")
+	expected := 0.3
+	if diff := m - expected; diff > 0.01 || diff < -0.01 {
+		t.Errorf("expected GPU-type degraded multiplier ~%f, got %f", expected, m)
+	}
+}
+
+func TestLoadFromStore_ExpiredDataIgnored(t *testing.T) {
+	tracker := NewOfferFailureTracker()
+	ctx := context.Background()
+
+	// Load very old failures (should be cleaned up)
+	oldTime := time.Now().Add(-2 * time.Hour)
+	failures := []StoredFailure{
+		{OfferID: "old-offer", Provider: "vastai", GPUType: "RTX 3090", FailureType: "ssh_timeout", Reason: "old", CreatedAt: oldTime},
+	}
+
+	tracker.LoadFromStore(ctx, failures, nil)
+
+	// Should have been cleaned up → multiplier 1.0
+	m := tracker.GetConfidenceMultiplier("old-offer", "RTX 3090", "vastai")
+	if m != 1.0 {
+		t.Errorf("expected multiplier 1.0 for expired failure, got %f", m)
+	}
+}
+
+func TestLoadFromStore_ExpiredSuppressionIgnored(t *testing.T) {
+	tracker := NewOfferFailureTracker()
+	ctx := context.Background()
+
+	// Load suppression from 2 hours ago (expired since cooldown is 30min)
+	suppressions := []StoredSuppression{
+		{
+			OfferID:      "expired-offer",
+			Provider:     "vastai",
+			GPUType:      "RTX 3090",
+			SuppressedAt: time.Now().Add(-2 * time.Hour),
+		},
+	}
+
+	tracker.LoadFromStore(ctx, nil, suppressions)
+
+	if tracker.IsSuppressed("expired-offer") {
+		t.Error("expected expired suppression to be cleared after loading from store")
 	}
 }

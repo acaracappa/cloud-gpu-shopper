@@ -102,6 +102,14 @@ func WithProviderTimeout(d time.Duration) Option {
 	}
 }
 
+// WithFailureStore sets a persistent store for the failure tracker.
+// When set, failures are written through to the DB and loaded on startup.
+func WithFailureStore(store FailureStore) Option {
+	return func(s *Service) {
+		s.failureTracker.SetStore(store, s.logger)
+	}
+}
+
 // WithProviderCacheTTL sets a custom cache TTL for a specific provider
 // This overrides the default cache TTL for providers with volatile inventory
 func WithProviderCacheTTL(providerName string, d time.Duration) Option {
@@ -595,6 +603,12 @@ func (s *Service) RecordOfferFailure(offerID, providerName, gpuType, failureType
 // GetAllOfferHealth returns structured health data for all tracked offers and GPU types
 func (s *Service) GetAllOfferHealth() ([]OfferHealthInfo, []GPUTypeHealthInfo) {
 	return s.failureTracker.GetAllHealth()
+}
+
+// LoadFailureData loads persisted failure data into the in-memory tracker.
+// Call this once at startup after the service is created.
+func (s *Service) LoadFailureData(ctx context.Context, failures []StoredFailure, suppressions []StoredSuppression) {
+	s.failureTracker.LoadFromStore(ctx, failures, suppressions)
 }
 
 // FindComparableOffers returns offers comparable to the original, filtered by scope.
