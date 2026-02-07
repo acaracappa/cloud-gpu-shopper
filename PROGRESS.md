@@ -4,7 +4,7 @@
 
 **Phase**: Post-MVP Feature Development
 **Status**: Active
-**Date**: 2026-02-06
+**Date**: 2026-02-07
 
 ### Summary
 - MVP complete with all safety rules, E2E tests, and live testing
@@ -31,6 +31,11 @@
 | BUG-014 | dpkg lock contention on TensorDock VMs (2-5 min) | Fixed | Cloud-init kills unattended-upgrades, waits for lock, `DPkg::Lock::Timeout=120` |
 | BUG-015 | deepseek-r1:14b cold-start >2 min (CUDA JIT) | Won't Fix | Inherent to CUDA JIT; benchmark script uses warmup request |
 | BUG-016 | RTX 5000 ADA / RTX 5090 Chubbuck intermittent SSH/PCIe | Won't Fix | Hardware issue; failure tracker auto-suppresses after repeated failures |
+| BUG-017 | Vast.ai "loading" state killed during image pull | FIXED | Added "loading" to transient states allowlist in provisioner |
+| BUG-024 | No workload_type or retry_scope validation | FIXED | Validation in handlers.go + models/session.go |
+| BUG-040 | Unsanitized X-Request-ID + user input in errors | FIXED | sanitizeInput() + requestID regex validation |
+| BUG-047 | CLI nil map crash in sessions extend command | FIXED | Nil check before map access in sessions.go |
+| BUG-064 | Cost tracker records $0 for short-lived sessions | FIXED | RecordFinalCost + CostRecorder interface in provisioner |
 
 ## Backlog
 
@@ -728,3 +733,46 @@ Working locations: **Manassas VA** (43% success), **Chubbuck ID** (50% success).
   4. Fall back to full `nvidia-driver-550` install if no DKMS package present
   5. Use `modprobe nvidia` instead of reboot
   6. All `apt` commands use `DPkg::Lock::Timeout=120` for remaining lock contention
+
+### 2026-02-07 — High-Severity Bug Fixes + Cross-Provider Benchmark Campaign
+
+#### Bug Fixes (5 High-Severity)
+
+| Bug | Description | Fix |
+|-----|-------------|-----|
+| BUG-017 | Vast.ai "loading" state treated as fatal — all Vast.ai provisioning killed during Docker image pull | Added `"loading"` to transient states allowlist in `provisioner/service.go:893` |
+| BUG-040 | Unsanitized X-Request-ID and user input reflected in error responses (XSS/log injection risk) | Added `validRequestIDRegex` in `server.go`, `sanitizeInput()` utility in `handlers.go` applied at 8 locations |
+| BUG-024 | No validation on `workload_type` or `retry_scope` — any string accepted | Added `ValidWorkloadTypes` map + `IsValidRetryScope()` in `models/session.go`, validation in `handlers.go` |
+| BUG-047 | CLI nil map crash when extending sessions | Added nil check before map access in `cmd/cli/cmd/sessions.go` |
+| BUG-064 | Cost tracker records $0 for sessions that terminate before hourly aggregation | Added `RecordFinalCost()` to `cost/tracker.go`, `CostRecorder` interface in provisioner, called on destroy/fail |
+
+Files modified: `internal/api/server.go`, `internal/api/handlers.go`, `internal/api/benchmark_handlers.go`, `pkg/models/session.go`, `cmd/cli/cmd/sessions.go`, `internal/service/cost/tracker.go`, `internal/service/provisioner/service.go`, `cmd/server/main.go`
+
+#### Cross-Provider Benchmark Campaign (mistral:7b)
+
+First successful Vast.ai provisioning after BUG-017 fix. 6 nodes across 2 providers, all using Ollama template for Vast.ai.
+
+| GPU | Provider | Location | Avg TPS | $/hr | $/M tokens |
+|-----|----------|----------|---------|------|-----------|
+| RTX 4090 | TensorDock | Joplin, MO | 179.0 | $0.439 | $0.68 |
+| RTX 4090 | TensorDock | Orlando, FL | 178.4 | $0.377 | $0.59 |
+| RTX 4090 | TensorDock | Manassas, VA | 176.0 | $0.377 | $0.59 |
+| RTX 5080 | Vast.ai | California, US | 168.4 | $0.118 | $0.19 |
+| RTX 3090 | Vast.ai | Quebec, CA | 159.2 | $0.082 | $0.14 |
+| RTX 5060 Ti | Vast.ai | Ohio, US | 89.3 | $0.069 | $0.21 |
+
+Key findings:
+- **Best value**: RTX 3090 on Vast.ai at **$0.14/M tokens** — 4x cheaper than TensorDock RTX 4090
+- **Best throughput**: RTX 4090 on TensorDock at **179 TPS**
+- **RTX 5080 sweet spot**: 168 TPS at $0.19/M tokens — excellent price/performance
+- **RTX 5060 Ti**: Budget Blackwell card, only 89 TPS — half the 4090's speed
+- **Vast.ai dramatically cheaper**: 3-4x cheaper per hour than TensorDock for equivalent performance
+- **Vast.ai now works**: BUG-017 fix confirmed — all 3 Vast.ai nodes provisioned successfully via Ollama template
+- **TensorDock reliability improved**: Orlando FL and Joplin MO confirmed as new working locations (previously only Manassas VA and Chubbuck ID)
+
+#### Key Learnings
+
+- **SSH keys are ephemeral**: Private keys returned only in POST /sessions response, not stored in DB. Must save immediately.
+- **Vast.ai Ollama template**: Hash `a8a44c7363cbca20056020397e3bf072`, image `vastai/ollama:0.15.4`, 2-4 min image pull ("loading" phase)
+- **Template-based provisioning**: Provider templates should be the baseline for spinning up nodes, not raw Docker images
+- **TensorDock deployment failures**: Ottawa, Winnipeg, and Chubbuck all returned "unexpected error during deployment" — only Manassas, Orlando, and Joplin succeeded

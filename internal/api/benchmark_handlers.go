@@ -150,7 +150,7 @@ func (s *Server) handleGetBestBenchmark(c *gin.Context) {
 
 	if result == nil {
 		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "no benchmarks found for model: " + model,
+			Error:     "no benchmarks found for model: " + sanitizeInput(model, 128),
 			RequestID: c.GetString("request_id"),
 		})
 		return
@@ -205,7 +205,7 @@ func (s *Server) handleGetCheapestBenchmark(c *gin.Context) {
 
 	if result == nil {
 		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "no benchmarks found for model: " + model,
+			Error:     "no benchmarks found for model: " + sanitizeInput(model, 128),
 			RequestID: c.GetString("request_id"),
 		})
 		return
@@ -318,7 +318,7 @@ func (s *Server) handleCompareBenchmarks(c *gin.Context) {
 
 	if len(results) == 0 {
 		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "no benchmarks found for model: " + model,
+			Error:     "no benchmarks found for model: " + sanitizeInput(model, 128),
 			RequestID: c.GetString("request_id"),
 		})
 		return

@@ -152,11 +152,15 @@ func main() {
 	}
 
 	registry := provisioner.NewSimpleProviderRegistry(providers)
+	costTracker := cost.New(costStore, sessionStore, nil,
+		cost.WithLogger(logger))
+
 	provOpts := []provisioner.Option{
 		provisioner.WithLogger(logger),
 		provisioner.WithSSHVerifyTimeout(cfg.SSH.VerifyTimeout),
 		provisioner.WithSSHCheckInterval(cfg.SSH.CheckInterval),
 		provisioner.WithInventory(invService),
+		provisioner.WithCostRecorder(costTracker),
 	}
 	if cfg.Lifecycle.DeploymentID != "" {
 		provOpts = append(provOpts, provisioner.WithDeploymentID(cfg.Lifecycle.DeploymentID))
@@ -168,9 +172,6 @@ func main() {
 		lifecycle.WithCheckInterval(cfg.Lifecycle.CheckInterval),
 		lifecycle.WithHardMaxHours(cfg.Lifecycle.HardMaxHours),
 		lifecycle.WithOrphanGracePeriod(cfg.Lifecycle.OrphanGracePeriod))
-
-	costTracker := cost.New(costStore, sessionStore, nil,
-		cost.WithLogger(logger))
 
 	// Create reconciler with auto-destroy orphans enabled
 	reconcileOpts := []lifecycle.ReconcilerOption{

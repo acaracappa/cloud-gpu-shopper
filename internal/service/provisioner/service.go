@@ -144,6 +144,11 @@ type InventoryFinder interface {
 	RecordOfferFailure(offerID, provider, gpuType, failureType, reason string)
 }
 
+// CostRecorder records final costs for terminated sessions.
+type CostRecorder interface {
+	RecordFinalCost(ctx context.Context, session *models.Session) error
+}
+
 // SSHVerifier defines the interface for SSH verification
 type SSHVerifier interface {
 	// VerifyOnce attempts a single SSH connection verification (no retries)
@@ -161,6 +166,7 @@ type Service struct {
 	store        SessionStore
 	providers    ProviderRegistry
 	inventory    InventoryFinder // Optional: needed for auto-retry
+	costRecorder CostRecorder   // Optional: records final cost on session termination
 	logger       *slog.Logger
 	deploymentID string
 
@@ -283,6 +289,13 @@ func WithTimeFunc(fn func() time.Time) Option {
 func WithInventory(inv InventoryFinder) Option {
 	return func(s *Service) {
 		s.inventory = inv
+	}
+}
+
+// WithCostRecorder configures an optional cost recorder for the provisioner.
+func WithCostRecorder(cr CostRecorder) Option {
+	return func(s *Service) {
+		s.costRecorder = cr
 	}
 }
 
@@ -873,10 +886,11 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 				}
 
 				// BUG-011 fix: Fail fast if instance stopped unexpectedly
-				// Don't fail for transient states like "creating" or "starting"
+				// Don't fail for transient states like "creating", "starting", or "loading"
 				if !status.Running && status.Status != "" &&
 					status.Status != "creating" && status.Status != "starting" &&
-					status.Status != "provisioning" && status.Status != "booting" {
+					status.Status != "provisioning" && status.Status != "booting" &&
+					status.Status != "loading" {
 					logger.Error("instance stopped unexpectedly",
 						slog.String("status", status.Status),
 						slog.String("error_detail", status.Error),
@@ -1293,6 +1307,15 @@ func (s *Service) failSession(ctx context.Context, session *models.Session, reas
 
 	// Bug #46 fix: Update metrics gauge on state transition
 	metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusFailed))
+
+	// Record final cost so short-lived failed sessions are captured
+	if s.costRecorder != nil {
+		if err := s.costRecorder.RecordFinalCost(ctx, session); err != nil {
+			s.logger.Error("failed to record final cost for failed session",
+				slog.String("session_id", session.ID),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 // generateSSHKeyPair generates an RSA SSH key pair

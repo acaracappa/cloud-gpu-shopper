@@ -221,7 +221,10 @@ func runSessionsExtend(cmd *cobra.Command, args []string) error {
 	reqBody := map[string]interface{}{
 		"additional_hours": extendHours,
 	}
-	jsonBody, _ := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
 
 	reqURL := fmt.Sprintf("%s/api/v1/sessions/%s/extend", serverURL, sessionID)
 	resp, err := http.Post(reqURL, "application/json", bytes.NewReader(jsonBody))
@@ -235,12 +238,13 @@ func runSessionsExtend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to extend session: %s", string(body))
 	}
 
-	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
-
 	fmt.Printf("Session %s extended by %d hours.\n", sessionID, extendHours)
-	if expiresAt, ok := result["new_expires_at"]; ok {
-		fmt.Printf("New expiration: %s\n", expiresAt)
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+		if expiresAt, ok := result["new_expires_at"]; ok {
+			fmt.Printf("New expiration: %s\n", expiresAt)
+		}
 	}
 	return nil
 }

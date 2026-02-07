@@ -15,8 +15,8 @@ import (
 // Predefined Docker images for different launch modes
 const (
 	// ImageSSHBase is the default SSH-enabled base image for interactive access
-	// Using NVIDIA CUDA Ubuntu 22.04 image - stable and widely supported on Vast.ai
-	ImageSSHBase = "nvidia/cuda:12.2.0-runtime-ubuntu22.04"
+	// Using NVIDIA CUDA 12.6 Ubuntu 22.04 image - broadly compatible with modern drivers
+	ImageSSHBase = "nvidia/cuda:12.6.3-runtime-ubuntu22.04"
 
 	// ImageVLLM is the vLLM inference server image (official)
 	ImageVLLM = "vllm/vllm-openai:latest"

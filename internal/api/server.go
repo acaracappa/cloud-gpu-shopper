@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"sync/atomic"
@@ -202,10 +203,17 @@ func (s *Server) Router() *gin.Engine {
 
 // Middleware
 
+// validRequestIDRegex allows alphanumeric, dots, underscores, and hyphens up to 128 chars.
+var validRequestIDRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
+
+func isValidRequestID(id string) bool {
+	return id != "" && validRequestIDRegex.MatchString(id)
+}
+
 func (s *Server) requestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := c.GetHeader("X-Request-ID")
-		if requestID == "" {
+		if !isValidRequestID(requestID) {
 			requestID = uuid.New().String()
 		}
 		c.Set("request_id", requestID)

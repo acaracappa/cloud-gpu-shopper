@@ -24,7 +24,31 @@ const (
 	WorkloadTraining    WorkloadType = "training"    // ML model training
 	WorkloadBatch       WorkloadType = "batch"       // Batch processing job
 	WorkloadInteractive WorkloadType = "interactive" // Interactive SSH session
+	WorkloadInference   WorkloadType = "inference"   // Generic inference
+	WorkloadSSH         WorkloadType = "ssh"         // SSH access (alias for interactive)
 )
+
+// ValidWorkloadTypes enumerates all accepted workload type values.
+var ValidWorkloadTypes = map[WorkloadType]bool{
+	WorkloadLLM: true, WorkloadLLMVLLM: true, WorkloadLLMTGI: true,
+	WorkloadTraining: true, WorkloadBatch: true, WorkloadInteractive: true,
+	WorkloadInference: true, WorkloadSSH: true,
+}
+
+// IsValid returns true if the workload type is a recognized value.
+func (w WorkloadType) IsValid() bool {
+	return ValidWorkloadTypes[w]
+}
+
+// ValidRetryScopes enumerates all accepted retry scope values.
+var ValidRetryScopes = map[string]bool{
+	"same_gpu": true, "same_vram": true, "any": true,
+}
+
+// IsValidRetryScope returns true if scope is empty (default) or a recognized value.
+func IsValidRetryScope(scope string) bool {
+	return scope == "" || ValidRetryScopes[scope]
+}
 
 // LaunchMode determines how the instance is configured
 type LaunchMode string

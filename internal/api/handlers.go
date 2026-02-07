@@ -338,7 +338,7 @@ func (s *Server) handleListInventory(c *gin.Context) {
 		tmpl, err := templateProvider.GetTemplate(ctx, templateHashID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:     "template not found: " + templateHashID,
+				Error:     "template not found: " + sanitizeInput(templateHashID, 128),
 				RequestID: c.GetString("request_id"),
 			})
 			return
@@ -486,11 +486,29 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		return
 	}
 
+	// Validate workload_type
+	if wt := models.WorkloadType(req.WorkloadType); !wt.IsValid() {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid workload_type: must be one of: llm, llm_vllm, llm_tgi, training, batch, interactive, inference, ssh",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Validate retry_scope if auto_retry is enabled
+	if req.AutoRetry && req.RetryScope != "" && !models.IsValidRetryScope(req.RetryScope) {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid retry_scope: must be one of: same_gpu, same_vram, any",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
 	// Get the offer from cache (spot market is fast - don't invalidate)
 	offer, err := s.inventory.GetOffer(ctx, req.OfferID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "offer not found: " + req.OfferID,
+			Error:     "offer not found: " + sanitizeInput(req.OfferID, 128),
 			RequestID: c.GetString("request_id"),
 		})
 		return
@@ -781,7 +799,7 @@ func (s *Server) handleDeleteSession(c *gin.Context) {
 		var sessionNotFound *provisioner.SessionNotFoundError
 		if errors.As(err, &sessionNotFound) || errors.Is(err, storage.ErrNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:     fmt.Sprintf("session not found: %s", sessionID),
+				Error:     fmt.Sprintf("session not found: %s", sanitizeInput(sessionID, 128)),
 				RequestID: c.GetString("request_id"),
 			})
 			return
@@ -819,7 +837,7 @@ func (s *Server) handleGetCosts(c *gin.Context) {
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				c.JSON(http.StatusNotFound, ErrorResponse{
-					Error:     fmt.Sprintf("session not found: %s", params.SessionID),
+					Error:     fmt.Sprintf("session not found: %s", sanitizeInput(params.SessionID, 128)),
 					RequestID: c.GetString("request_id"),
 				})
 				return
@@ -996,6 +1014,22 @@ func formatDuration(d time.Duration) string {
 	return strconv.Itoa(minutes) + "m"
 }
 
+// sanitizeInput strips control characters and angle brackets from user input
+// to prevent log injection and XSS when reflected in error messages.
+func sanitizeInput(s string, maxLen int) string {
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r < 32 || r == '<' || r == '>' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // Bug #9: sanitizeValidationError converts internal field names to JSON field names
 // in validation error messages to avoid leaking internal implementation details.
 func sanitizeValidationError(err error) string {
@@ -1166,7 +1200,7 @@ func (s *Server) handleGetCompatibleTemplates(c *gin.Context) {
 	offer, err := s.inventory.GetOffer(ctx, offerID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "offer not found: " + offerID,
+			Error:     "offer not found: " + sanitizeInput(offerID, 128),
 			RequestID: c.GetString("request_id"),
 		})
 		return
