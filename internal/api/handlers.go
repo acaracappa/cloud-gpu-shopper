@@ -63,6 +63,9 @@ type CreateSessionRequest struct {
 	AutoRetry  bool   `json:"auto_retry,omitempty"`  // Enable auto-reprovision on failure
 	MaxRetries int    `json:"max_retries,omitempty"` // Max alternative offers to try (default 3, max 5)
 	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
+
+	// SSH timeout override
+	SSHTimeoutMinutes int `json:"ssh_timeout_minutes,omitempty"` // SSH verify timeout (1-30 min)
 }
 
 // ListTemplatesQuery defines query parameters for listing templates
@@ -526,9 +529,10 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		Quantization:   req.Quantization,
 		TemplateHashID: req.TemplateHashID,
 		DiskGB:         req.DiskGB,
-		AutoRetry:      req.AutoRetry,
-		MaxRetries:     req.MaxRetries,
-		RetryScope:     req.RetryScope,
+		AutoRetry:          req.AutoRetry,
+		MaxRetries:         req.MaxRetries,
+		RetryScope:         req.RetryScope,
+		SSHTimeoutMinutes:  req.SSHTimeoutMinutes,
 	}
 
 	// Look up template's recommended disk space and SSH timeout (non-fatal if lookup fails)
@@ -540,6 +544,18 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 				createReq.TemplateRecommendedSSHTimeout = tmpl.GetRecommendedSSHTimeout()
 			}
 		}
+	}
+
+	// BUG-005: Client SSH timeout override takes priority over template timeout
+	if req.SSHTimeoutMinutes > 0 {
+		mins := req.SSHTimeoutMinutes
+		if mins > 30 {
+			mins = 30
+		}
+		if mins < 1 {
+			mins = 1
+		}
+		createReq.TemplateRecommendedSSHTimeout = time.Duration(mins) * time.Minute
 	}
 
 	session, err := s.provisioner.CreateSession(ctx, createReq, offer)

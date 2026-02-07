@@ -975,7 +975,7 @@ func TestAPIContract_AvailabilityConfidence_SetCorrectly(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, offers, 1)
-	assert.Equal(t, 0.5, offers[0].AvailabilityConfidence, "TensorDock inventory has 50% confidence due to frequent stale data")
+	assert.Equal(t, 0.3, offers[0].AvailabilityConfidence, "TensorDock inventory has 30% confidence due to frequent stale data")
 }
 
 func TestAPIContract_CreateInstance_NoSSHKey(t *testing.T) {

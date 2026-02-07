@@ -838,9 +838,9 @@ func TestAvailabilityConfidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, offers, 1)
 
-	// TensorDock has 50% confidence due to stale inventory issues
+	// TensorDock has 30% confidence due to stale inventory issues
 	assert.Equal(t, TensorDockAvailabilityConfidence, offers[0].AvailabilityConfidence)
-	assert.Equal(t, 0.5, offers[0].AvailabilityConfidence)
+	assert.Equal(t, 0.3, offers[0].AvailabilityConfidence)
 }
 
 // =============================================================================

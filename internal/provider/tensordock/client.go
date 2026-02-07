@@ -84,7 +84,7 @@ const (
 	// Set to 50% because TensorDock's /locations endpoint frequently shows GPUs
 	// as available when provisioning will fail with "No available nodes found".
 	// This helps users understand these offers may not actually be available.
-	TensorDockAvailabilityConfidence = 0.5
+	TensorDockAvailabilityConfidence = 0.3
 
 	// defaultVCPUs is the default number of vCPUs for new instances
 	defaultVCPUs = 8
@@ -271,20 +271,22 @@ var ErrCircuitOpen = errors.New("circuit breaker is open")
 // locationStats tracks provisioning success/failure rates per location.
 // This enables dynamic availability confidence based on real-world success rates.
 type locationStats struct {
-	mu          sync.RWMutex
-	attempts    map[string]int // locationID -> total attempts
-	successes   map[string]int // locationID -> successful provisions
-	lastAttempt map[string]time.Time
-	decayAfter  time.Duration // Reset stats after this duration of inactivity
+	mu             sync.RWMutex
+	attempts       map[string]int // locationID -> total attempts
+	successes      map[string]int // locationID -> successful provisions
+	lastAttempt    map[string]time.Time
+	lastWasSuccess map[string]bool // whether most recent attempt succeeded
+	decayAfter     time.Duration   // Reset stats after this duration of inactivity
 }
 
 // newLocationStats creates a new location stats tracker
 func newLocationStats() *locationStats {
 	return &locationStats{
-		attempts:    make(map[string]int),
-		successes:   make(map[string]int),
-		lastAttempt: make(map[string]time.Time),
-		decayAfter:  1 * time.Hour, // Reset stats after 1 hour of no attempts
+		attempts:       make(map[string]int),
+		successes:      make(map[string]int),
+		lastAttempt:    make(map[string]time.Time),
+		lastWasSuccess: make(map[string]bool),
+		decayAfter:     30 * time.Minute, // Reset stats after 30 min of no attempts
 	}
 }
 
@@ -298,6 +300,7 @@ func (ls *locationStats) recordAttempt(locationID string, success bool) {
 		if time.Since(lastTime) > ls.decayAfter {
 			ls.attempts[locationID] = 0
 			ls.successes[locationID] = 0
+			delete(ls.lastWasSuccess, locationID)
 		}
 	}
 
@@ -306,27 +309,41 @@ func (ls *locationStats) recordAttempt(locationID string, success bool) {
 		ls.successes[locationID]++
 	}
 	ls.lastAttempt[locationID] = time.Now()
+	ls.lastWasSuccess[locationID] = success
 }
 
 // getConfidence returns the success rate for a location.
-// Returns a value between minConfidence (0.1) and maxConfidence (1.0).
+// Returns a value between minConfidence (0.05) and maxConfidence (1.0).
 // If no data is available, returns the default TensorDock confidence.
+// Applies a recency penalty: if the most recent attempt failed, confidence is halved.
 func (ls *locationStats) getConfidence(locationID string) float64 {
 	ls.mu.RLock()
 	defer ls.mu.RUnlock()
 
-	const minConfidence = 0.1 // Never go below 10%
+	return ls.getConfidenceLocked(locationID)
+}
+
+// getConfidenceLocked is the lock-free implementation of getConfidence.
+// Caller must hold at least a read lock on ls.mu.
+func (ls *locationStats) getConfidenceLocked(locationID string) float64 {
+	const minConfidence = 0.05 // Never go below 5%
 	const maxConfidence = 1.0
 
 	attempts, hasAttempts := ls.attempts[locationID]
 	if !hasAttempts || attempts == 0 {
-		return TensorDockAvailabilityConfidence // Default 50%
+		return TensorDockAvailabilityConfidence // Default 30%
 	}
 
 	successes := ls.successes[locationID]
 	rate := float64(successes) / float64(attempts)
 
-	// Clamp to minimum confidence
+	// Recency penalty: if the most recent attempt failed, halve confidence.
+	// This makes the system react immediately to failures instead of
+	// waiting for the average to drift down.
+	if lastOK, exists := ls.lastWasSuccess[locationID]; exists && !lastOK {
+		rate *= 0.5
+	}
+
 	if rate < minConfidence {
 		return minConfidence
 	}
@@ -344,7 +361,7 @@ func (ls *locationStats) getStats(locationID string) (attempts, successes int, c
 
 	attempts = ls.attempts[locationID]
 	successes = ls.successes[locationID]
-	confidence = ls.getConfidence(locationID)
+	confidence = ls.getConfidenceLocked(locationID)
 	return
 }
 

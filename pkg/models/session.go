@@ -136,6 +136,9 @@ type CreateSessionRequest struct {
 	MaxRetries int    `json:"max_retries,omitempty"`
 	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
 
+	// SSH timeout override
+	SSHTimeoutMinutes int `json:"ssh_timeout_minutes,omitempty"` // Client-specified SSH timeout (1-30 min)
+
 	// Internal fields (set by handler, not from JSON)
 	TemplateRecommendedDiskGB     int           `json:"-"` // Template's recommended disk, used for estimation floor
 	TemplateRecommendedSSHTimeout time.Duration `json:"-"` // BUG-005: Template's recommended SSH timeout for heavy images

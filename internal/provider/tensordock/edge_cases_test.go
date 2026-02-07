@@ -1060,9 +1060,9 @@ func TestLocationStats_BasicTracking(t *testing.T) {
 	stats.recordAttempt("loc-123", false)
 	stats.recordAttempt("loc-123", false)
 
-	// Confidence should drop (3 failures, 0 successes = 0%, but min is 10%)
+	// Confidence should drop (3 failures, 0 successes = 0%, last failed → 0% * 0.5, but min is 5%)
 	confidence := stats.getConfidence("loc-123")
-	assert.Equal(t, 0.1, confidence, "Confidence should be at minimum (10%)")
+	assert.Equal(t, 0.05, confidence, "Confidence should be at minimum (5%)")
 }
 
 func TestLocationStats_SuccessRateCalculation(t *testing.T) {
@@ -1074,15 +1074,17 @@ func TestLocationStats_SuccessRateCalculation(t *testing.T) {
 		stats.recordAttempt("loc-456", false)
 	}
 
+	// Last attempt was false (loop alternates true, false), so recency penalty applies:
+	// rate = 5/10 = 0.5, then * 0.5 = 0.25
 	confidence := stats.getConfidence("loc-456")
-	assert.InDelta(t, 0.5, confidence, 0.01, "Confidence should be 50%")
+	assert.InDelta(t, 0.25, confidence, 0.01, "Confidence should be 25% (50% base with recency penalty)")
 
 	// Record more successes to increase confidence
 	for i := 0; i < 10; i++ {
 		stats.recordAttempt("loc-456", true)
 	}
 
-	// Now: 15 successes, 5 failures = 75%
+	// Now: 15 successes, 5 failures = 75%, last was success (no penalty)
 	confidence = stats.getConfidence("loc-456")
 	assert.InDelta(t, 0.75, confidence, 0.01, "Confidence should be 75%")
 }
@@ -1101,7 +1103,7 @@ func TestLocationStats_DifferentLocations(t *testing.T) {
 	}
 
 	assert.Equal(t, 1.0, stats.getConfidence("good-loc"), "Good location should have 100% confidence")
-	assert.Equal(t, 0.1, stats.getConfidence("bad-loc"), "Bad location should have minimum 10% confidence")
+	assert.Equal(t, 0.05, stats.getConfidence("bad-loc"), "Bad location should have minimum 5% confidence")
 	assert.Equal(t, TensorDockAvailabilityConfidence, stats.getConfidence("unknown-loc"), "Unknown location should have default confidence")
 }
 
@@ -1115,7 +1117,8 @@ func TestLocationStats_GetStats(t *testing.T) {
 	attempts, successes, confidence := stats.getStats("loc-789")
 	assert.Equal(t, 3, attempts)
 	assert.Equal(t, 2, successes)
-	assert.InDelta(t, 0.666, confidence, 0.01)
+	// 2/3 ≈ 0.667, last attempt was failure → 0.667 * 0.5 ≈ 0.333
+	assert.InDelta(t, 0.333, confidence, 0.01)
 }
 
 // =============================================================================
