@@ -176,4 +176,3 @@ func (s *OfferFailureStore) CountByOfferID(ctx context.Context, since time.Time)
 	}
 	return counts, nil
 }
-

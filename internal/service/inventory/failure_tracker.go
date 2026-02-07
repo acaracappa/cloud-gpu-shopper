@@ -12,7 +12,7 @@ import (
 type FailureType string
 
 const (
-	FailureStaleInventory FailureType = "stale_inventory"
+	FailureStaleInventory  FailureType = "stale_inventory"
 	FailureInstanceStopped FailureType = "instance_stopped"
 	FailureSSHTimeout      FailureType = "ssh_timeout"
 	FailureUnknown         FailureType = "unknown"
@@ -356,11 +356,11 @@ func (t *OfferFailureTracker) GetAllHealth() ([]OfferHealthInfo, []GPUTypeHealth
 		}
 
 		info := OfferHealthInfo{
-			OfferID:        offerID,
-			Provider:       record.Provider,
-			GPUType:        record.GPUType,
-			RecentFailures: recentCount,
-			IsSuppressed:   !record.SuppressedAt.IsZero() && now.Before(record.SuppressedAt.Add(SuppressionCooldown)),
+			OfferID:              offerID,
+			Provider:             record.Provider,
+			GPUType:              record.GPUType,
+			RecentFailures:       recentCount,
+			IsSuppressed:         !record.SuppressedAt.IsZero() && now.Before(record.SuppressedAt.Add(SuppressionCooldown)),
 			ConfidenceMultiplier: t.getConfidenceMultiplierLocked(offerID, record.GPUType, record.Provider, now),
 		}
 

@@ -9,7 +9,8 @@
 ### Summary
 - MVP complete with all safety rules, E2E tests, and live testing
 - Feb 2026: Added auto-retry, global failure tracking, benchmarking infrastructure, disk estimation, Docker multi-arch builds
-- Active bug tracking for provider-specific issues (TensorDock stale inventory, RTX 5080 driver incompatibility)
+- Active bug tracking for provider-specific issues (RTX 5080 driver incompatibility)
+- TensorDock inventory quality improved with aggressive confidence tuning and recency penalty
 
 ---
 
@@ -19,7 +20,7 @@
 |----|-------------|--------|-------|
 | BUG-003 | `.env` not loading provider creds | FIXED | `mapEnvFileKeys()` |
 | BUG-004 | CUDA version mismatch | Open | Provider-side data issue |
-| BUG-005 | SSH timeout too short for heavy templates | Open | vLLM needs longer SSH wait |
+| BUG-005 | SSH timeout too short for heavy templates | FIXED | Client-configurable `ssh_timeout_minutes` (1-30 min) |
 | BUG-006 | pip vLLM incompatible with CUDA 13.0 | Workaround | Use Docker template instead |
 | BUG-008 | TensorDock port_forwards ignored | FIXED | Use `useDedicatedIp: true` |
 | BUG-009 | TensorDock ubuntu2404 missing nvidia drivers | Workaround | Install `nvidia-driver-550` + reboot |
@@ -31,7 +32,7 @@
 
 ### Outstanding (Medium Priority)
 
-- Persistent failure tracking (DB-backed, survives server restarts)
+_None_
 
 ### Outstanding (Low Priority)
 
@@ -658,3 +659,23 @@ go test -race -parallel 4 ./cmd/cli/... # All pass
 - Enhanced README with comprehensive user guide and CLI reference
 - Benchmark report with GPU comparisons and recommendations
 - `docs/BENCHMARKING.md` — full benchmarking infrastructure docs
+
+### 2026-02-06 — BUG-005 Fix + TensorDock Inventory Quality
+
+#### BUG-005: Client-Configurable SSH Timeout
+- Added `ssh_timeout_minutes` (1-30 min) to `POST /api/v1/sessions`
+- Client override takes priority over template-recommended timeout
+- Clamped to 1-30 minutes with validation
+- No provisioner changes needed — existing `TemplateRecommendedSSHTimeout` path handles it
+
+#### TensorDock Inventory Quality Improvements
+- Default confidence lowered: 50% → 30% (reflects 80%+ failure rate)
+- Minimum confidence floor lowered: 10% → 5%
+- Decay window shortened: 1 hour → 30 minutes (recover faster, punish faster)
+- Added `lastWasSuccess` tracking to `locationStats`
+- Added recency penalty: if last attempt failed, confidence halved
+- Net effect examples:
+  - Fresh location: 30% (was 50%)
+  - After 1 failure: 5% (was 10%)
+  - 1 success + 1 failure (failure last): 12.5% (was 50%)
+  - 3 successes, 0 failures: 100% (unchanged)
