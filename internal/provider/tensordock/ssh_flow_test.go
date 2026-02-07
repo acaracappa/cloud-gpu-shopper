@@ -886,11 +886,11 @@ func TestCloudInit_ExpectedExecutionOrder(t *testing.T) {
 	assert.Contains(t, cloudInit.RunCmd[10], "chown user:user /home/user/.ssh/authorized_keys")
 
 	// Verify NVIDIA driver fix commands (BUG-009/013/014)
-	assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades")  // BUG-014: stop lock holder
-	assert.Contains(t, cloudInit.RunCmd[12], "unattended-upgrades")  // BUG-014: kill lock holder
-	assert.Contains(t, cloudInit.RunCmd[13], "fuser")                // BUG-014: wait for dpkg lock
-	assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a")  // BUG-013: fix partial installs
-	assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")           // BUG-009: driver fix
+	assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades") // BUG-014: stop lock holder
+	assert.Contains(t, cloudInit.RunCmd[12], "unattended-upgrades") // BUG-014: kill lock holder
+	assert.Contains(t, cloudInit.RunCmd[13], "fuser")               // BUG-014: wait for dpkg lock
+	assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a") // BUG-013: fix partial installs
+	assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")          // BUG-009: driver fix
 }
 
 // =============================================================================

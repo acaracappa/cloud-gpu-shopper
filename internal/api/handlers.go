@@ -618,9 +618,12 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:     err.Error(),
-			RequestID: c.GetString("request_id"),
+		errorType, retrySuggested := classifyProvisionError(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":           err.Error(),
+			"error_type":      errorType,
+			"retry_suggested": retrySuggested,
+			"request_id":      c.GetString("request_id"),
 		})
 		return
 	}
@@ -1028,6 +1031,28 @@ func sanitizeInput(s string, maxLen int) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// classifyProvisionError categorizes provisioning errors for consumer apps.
+// Returns an error type string and whether the consumer should retry.
+func classifyProvisionError(err error) (errorType string, retrySuggested bool) {
+	if err == nil {
+		return "none", false
+	}
+	msg := strings.ToLower(err.Error())
+
+	switch {
+	case strings.Contains(msg, "ssh") || strings.Contains(msg, "timeout"):
+		return "ssh_timeout", true
+	case strings.Contains(msg, "stopped") || strings.Contains(msg, "terminated"):
+		return "instance_stopped", true
+	case strings.Contains(msg, "connection refused"):
+		return "provider_unavailable", true
+	case strings.Contains(msg, "not found") || strings.Contains(msg, "invalid"):
+		return "invalid_request", false
+	default:
+		return "provision_failed", true
+	}
 }
 
 // Bug #9: sanitizeValidationError converts internal field names to JSON field names

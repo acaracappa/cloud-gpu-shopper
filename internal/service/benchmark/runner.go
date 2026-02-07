@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,9 @@ type Runner struct {
 	manifest    *benchmarkpkg.ManifestStore
 	logger      *slog.Logger
 
+	// Benchmark script content, loaded at construction time
+	scriptContent string
+
 	// Active runs tracking
 	mu      sync.Mutex
 	runs    map[string]*BenchmarkRun
@@ -77,22 +81,33 @@ type Runner struct {
 }
 
 // NewRunner creates a new benchmark runner.
+// scriptPath is the path to the gpu-benchmark.sh script (e.g. "scripts/gpu-benchmark.sh").
 func NewRunner(
 	prov *provisioner.Service,
 	inv *inventory.Service,
 	store *benchmarkpkg.Store,
 	manifest *benchmarkpkg.ManifestStore,
 	logger *slog.Logger,
+	scriptPath string,
 ) *Runner {
+	var scriptContent string
+	if data, err := os.ReadFile(scriptPath); err != nil {
+		logger.Error("failed to read benchmark script", slog.String("path", scriptPath), slog.String("error", err.Error()))
+	} else {
+		scriptContent = string(data)
+		logger.Info("loaded benchmark script", slog.String("path", scriptPath), slog.Int("bytes", len(scriptContent)))
+	}
+
 	return &Runner{
-		provisioner: prov,
-		inventory:   inv,
-		store:       store,
-		manifest:    manifest,
-		logger:      logger,
-		runs:        make(map[string]*BenchmarkRun),
-		cancels:     make(map[string]context.CancelFunc),
-		workerSem:   make(chan struct{}, 3), // Max 3 concurrent benchmarks
+		provisioner:   prov,
+		inventory:     inv,
+		store:         store,
+		manifest:      manifest,
+		logger:        logger,
+		scriptContent: scriptContent,
+		runs:          make(map[string]*BenchmarkRun),
+		cancels:       make(map[string]context.CancelFunc),
+		workerSem:     make(chan struct{}, 3), // Max 3 concurrent benchmarks
 	}
 }
 
@@ -333,9 +348,32 @@ func (r *Runner) updateRunStatus(run *BenchmarkRun) {
 	run.UpdatedAt = time.Now()
 }
 
-// processEntry handles a single manifest entry: provision, benchmark, collect, cleanup.
+// processEntry handles a single manifest entry with 1 retry (2 total attempts).
 // The entry is already marked as running by processRun before dispatch.
 func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *benchmarkpkg.ManifestEntry) {
+	const maxAttempts = 2
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			r.logger.Info("retrying benchmark entry",
+				slog.String("entry_id", entry.ID),
+				slog.Int("attempt", attempt))
+			// Reset entry state for retry and wait for cleanup to propagate
+			entry.SessionID = ""
+			entry.OfferID = ""
+			time.Sleep(10 * time.Second)
+		}
+		if r.processEntryOnce(ctx, run, entry, attempt) {
+			return // success
+		}
+		// Check if context was cancelled before retrying
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// processEntryOnce runs a single attempt. Returns true on success, false on failure.
+func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry *benchmarkpkg.ManifestEntry, attempt int) bool {
 	r.logger.Info("processing benchmark entry",
 		slog.String("entry_id", entry.ID),
 		slog.String("model", entry.Model),
@@ -354,7 +392,7 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 		}
 		r.logger.Warn("no offers for benchmark", slog.String("gpu_type", entry.GPUType), slog.String("provider", entry.Provider))
 		_ = r.manifest.MarkFailed(ctx, entry.ID, reason, "find_offer")
-		return
+		return false
 	}
 
 	offer := &offers[0]
@@ -362,21 +400,27 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 	entry.PriceHour = offer.PricePerHour
 
 	// Step 2: Provision a session (benchmark script deployed via SSH after session is ready)
-	session, err := r.provisioner.CreateSession(ctx, models.CreateSessionRequest{
-		ConsumerID:     "benchmark-" + run.ID,
+	createReq := models.CreateSessionRequest{
+		ConsumerID:     fmt.Sprintf("bench-%s-%d", entry.ID, attempt),
 		OfferID:        offer.ID,
 		WorkloadType:   models.WorkloadBenchmark,
 		ReservationHrs: 1,
 		AutoRetry:      true,
 		MaxRetries:     2,
 		RetryScope:     "same_gpu",
-	}, offer)
+	}
+	// Vast.ai: use the Ollama template so Ollama is pre-installed
+	if entry.Provider == "vastai" {
+		createReq.TemplateHashID = "a8a44c7363cbca20056020397e3bf072"
+		createReq.DiskGB = 64
+	}
+	session, err := r.provisioner.CreateSession(ctx, createReq, offer)
 	if err != nil {
 		r.logger.Error("failed to provision session for benchmark",
 			slog.String("error", err.Error()),
 			slog.String("entry_id", entry.ID))
 		_ = r.manifest.MarkFailed(ctx, entry.ID, err.Error(), "provision")
-		return
+		return false
 	}
 
 	entry.SessionID = session.ID
@@ -404,7 +448,7 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 				slog.String("session_id", session.ID))
 			_ = r.manifest.MarkTimeout(ctx, entry.ID, "ssh_wait")
 			r.cleanupSession(ctx, session.ID)
-			return
+			return false
 		case <-ticker.C:
 			s, err := r.provisioner.GetSession(ctx, session.ID)
 			if err != nil {
@@ -413,7 +457,7 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 			if s.Status == models.StatusFailed {
 				_ = r.manifest.MarkFailed(ctx, entry.ID, s.Error, "provision")
 				r.cleanupSession(ctx, session.ID)
-				return
+				return false
 			}
 			if s.Status == models.StatusRunning && s.SSHHost != "" {
 				sshHost = s.SSHHost
@@ -425,9 +469,33 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 		}
 	}
 
-	// Step 4: Deploy and run the benchmark script via SSH with correct session ID
+	// Step 4: Upload and run the benchmark script via SSH
+	if r.scriptContent == "" {
+		r.logger.Error("benchmark script not loaded, cannot deploy")
+		_ = r.manifest.MarkFailed(ctx, entry.ID, "benchmark script not loaded", "deploy")
+		r.cleanupSession(ctx, session.ID)
+		return false
+	}
+
+	r.logger.Info("uploading benchmark script via SCP",
+		slog.String("session_id", session.ID),
+		slog.String("ssh_host", sshHost))
+
+	if err := sshpkg.SCPWrite(ctx, sshHost, sshPort, sshUser, sshKey, "/tmp/gpu-benchmark.sh", r.scriptContent); err != nil {
+		r.logger.Error("failed to upload benchmark script", slog.String("error", err.Error()))
+		_ = r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+err.Error(), "deploy")
+		r.cleanupSession(ctx, session.ID)
+		return false
+	}
+	if _, err := sshpkg.RunCommand(ctx, sshHost, sshPort, sshUser, sshKey, "chmod +x /tmp/gpu-benchmark.sh"); err != nil {
+		r.logger.Error("failed to chmod benchmark script", slog.String("error", err.Error()))
+		_ = r.manifest.MarkFailed(ctx, entry.ID, "chmod failed: "+err.Error(), "deploy")
+		r.cleanupSession(ctx, session.ID)
+		return false
+	}
+
 	benchmarkCmd := buildBenchmarkOnStartCmd(entry.Model, session.ID, offer.PricePerHour, entry.Provider, offer.Location)
-	r.logger.Info("deploying benchmark script via SSH",
+	r.logger.Info("running benchmark script via SSH",
 		slog.String("session_id", session.ID),
 		slog.String("ssh_host", sshHost))
 
@@ -438,11 +506,11 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 			slog.String("session_id", session.ID))
 		_ = r.manifest.MarkFailed(ctx, entry.ID, "deploy failed: "+deployErr.Error(), "deploy")
 		r.cleanupSession(ctx, session.ID)
-		return
+		return false
 	}
 
 	// Step 5: Poll for results via SSH
-	resultCtx, resultCancel := context.WithTimeout(ctx, 20*time.Minute)
+	resultCtx, resultCancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer resultCancel()
 
 	resultTicker := time.NewTicker(30 * time.Second)
@@ -456,12 +524,19 @@ func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *ben
 				slog.String("session_id", session.ID))
 			_ = r.manifest.MarkTimeout(ctx, entry.ID, "result_collection")
 			r.cleanupSession(ctx, session.ID)
-			return
+			return false
 		case <-resultTicker.C:
 			// Check if benchmark is complete
 			output, err := sshpkg.RunCommand(resultCtx, sshHost, sshPort, sshUser, sshKey,
 				"test -f /tmp/benchmark_complete && cat /tmp/benchmark_result.json")
 			if err != nil {
+				// Log benchmark script progress for visibility
+				if logTail, logErr := sshpkg.RunCommand(resultCtx, sshHost, sshPort, sshUser, sshKey,
+					"tail -1 /tmp/benchmark.log 2>/dev/null || echo 'no log yet'"); logErr == nil {
+					r.logger.Info("benchmark progress",
+						slog.String("session_id", session.ID),
+						slog.String("last_line", strings.TrimSpace(logTail)))
+				}
 				continue // Not ready yet
 			}
 			if strings.TrimSpace(output) != "" {
@@ -484,7 +559,7 @@ resultsCollected:
 			slog.String("session_id", session.ID))
 		_ = r.manifest.MarkFailed(ctx, entry.ID, "invalid result JSON: "+err.Error(), "parse")
 		r.cleanupSession(ctx, session.ID)
-		return
+		return false
 	}
 
 	if err := r.store.Save(ctx, &result); err != nil {
@@ -492,7 +567,7 @@ resultsCollected:
 			slog.String("error", err.Error()))
 		_ = r.manifest.MarkFailed(ctx, entry.ID, "save failed: "+err.Error(), "save")
 		r.cleanupSession(ctx, session.ID)
-		return
+		return false
 	}
 
 	// Calculate cost: session duration * price/hour
@@ -509,6 +584,7 @@ resultsCollected:
 
 	// Step 7: Cleanup session
 	r.cleanupSession(ctx, session.ID)
+	return true
 }
 
 // cleanupSession destroys a benchmark session.

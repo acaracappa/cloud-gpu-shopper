@@ -16,6 +16,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/tensordock"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/vastai"
+	benchsvc "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
@@ -203,6 +204,16 @@ func main() {
 	}
 	if benchmarkStore != nil {
 		apiOpts = append(apiOpts, api.WithBenchmarkStore(benchmarkStore))
+
+		// Initialize benchmark runner with manifest store
+		manifestStore, err := benchmark.NewManifestStore(db.DB)
+		if err != nil {
+			logger.Warn("failed to initialize benchmark manifest store", slog.String("error", err.Error()))
+		} else {
+			benchRunner := benchsvc.NewRunner(provService, invService, benchmarkStore, manifestStore, logger, "scripts/gpu-benchmark.sh")
+			apiOpts = append(apiOpts, api.WithBenchmarkRunner(benchRunner))
+			logger.Info("initialized benchmark runner")
+		}
 	}
 	server := api.New(invService, provService, lifecycleManager, costTracker, apiOpts...)
 

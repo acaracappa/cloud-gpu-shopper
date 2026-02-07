@@ -776,3 +776,43 @@ Key findings:
 - **Vast.ai Ollama template**: Hash `a8a44c7363cbca20056020397e3bf072`, image `vastai/ollama:0.15.4`, 2-4 min image pull ("loading" phase)
 - **Template-based provisioning**: Provider templates should be the baseline for spinning up nodes, not raw Docker images
 - **TensorDock deployment failures**: Ottawa, Winnipeg, and Chubbuck all returned "unexpected error during deployment" — only Manassas, Orlando, and Joplin succeeded
+
+### 2026-02-07 — Automated Benchmark Infrastructure & $3 Benchmark Campaign
+
+#### Benchmark Runner Reliability Fixes (5 fixes, ~200 lines across 7 files)
+
+| Fix | Description | File(s) |
+|-----|-------------|---------|
+| Script upload via SCP | Benchmark script was never uploaded to instances — auto-uploads via SCP before execution | `runner.go` |
+| Vast.ai Ollama template | Auto-selects Ollama template (`a8a44c7363cbca20056020397e3bf072`) for Vast.ai benchmarks | `runner.go` |
+| Fail fast on permanent SSH | Detects `auth_failed`/`key_parse_failed` after 3 consecutive errors, destroys instance immediately | `provisioner/service.go` |
+| Entry-level retry | Each benchmark entry gets 2 attempts with unique consumer IDs | `runner.go` |
+| Structured error types | `classifyProvisionError()` returns `error_type` and `retry_suggested` for consumer apps | `handlers.go` |
+
+Additional fixes:
+- Ollama auto-start in benchmark script (ssh_proxy runtype doesn't execute container entrypoints)
+- Idempotent manifest migration (ALTER TABLE for missing columns)
+- Result timeout increased to 30 minutes (model pull + benchmark)
+- Benchmark progress logging (tails `/tmp/benchmark.log` on each poll)
+
+#### Automated Benchmark Campaign Results
+
+Ran $3 benchmark matrix across 3 batches via Docker container. 4 new Vast.ai data points collected:
+
+| GPU | Provider | Model | TPS | $/hr | $/M tokens | TTFT | Match | Location |
+|-----|----------|-------|-----|------|-----------|------|-------|----------|
+| RTX 3090 | Vast.ai | llama3.1:8b | 144.8 | $0.076 | $0.14 | 4454ms | 100% | Spain |
+| RTX 5060 Ti | Vast.ai | llama3.1:8b | 83.3 | $0.069 | $0.23 | 6149ms | 100% | Ohio |
+| RTX 3090 | Vast.ai | deepseek-r1:14b | 82.8 | $0.079 | $0.26 | 6890ms | — | Quebec |
+| RTX 4090 | Vast.ai | deepseek-r1:32b | 44.5 | $0.141 | $0.88 | 10422ms | — | India |
+
+Batch 3 (TensorDock validation) failed: nvidia drivers not ready, model pull failed on all 4 entries. This confirms TensorDock's high failure rate (71%+) persists despite cloud-init driver fixes.
+
+#### Benchmark Database Totals
+
+- **49 benchmark results** in database (45 with valid TPS)
+- **9 GPU types**: RTX 3090, RTX 4090, RTX 5060 Ti, RTX 5070, RTX 5070 Ti, RTX 5080, RTX 5090, A100 80GB, H200 NVL
+- **8 models**: qwen2:1.5b, qwen2:7b, phi3:mini, mistral:7b, llama3.1:8b, deepseek-r1:14b, deepseek-r1:32b, deepseek-r1:70b
+- **2 providers**: Vast.ai, TensorDock
+- **New quality metrics**: TTFT (4.4s-10.4s range), match rate (0-100%)
+- **Best value**: RTX 3090 on Vast.ai at $0.14/M tokens for llama3.1:8b

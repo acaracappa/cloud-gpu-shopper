@@ -1029,9 +1029,9 @@ func TestBuildSSHKeyCloudInit(t *testing.T) {
 			assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
 			assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
 			// BUG-009/013/014: Verify NVIDIA driver fix commands are present
-			assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades")  // kill lock holder
-			assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a")  // fix partial installs
-			assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")           // driver fix
+			assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades") // kill lock holder
+			assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a") // fix partial installs
+			assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")          // driver fix
 		})
 	}
 }

@@ -828,6 +828,7 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 	attemptCount := 0
 	lastErrorType := "none"
 	lastError := ""
+	consecutivePermanentErrors := 0
 	for {
 		select {
 		case <-timeout.C:
@@ -992,6 +993,29 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 					slog.Int("port", session.SSHPort),
 					slog.String("error", lastError))
 				metrics.RecordSSHVerifyError(session.Provider, lastErrorType)
+
+				// Fail fast on permanent SSH errors (auth_failed, key_parse_failed)
+				if lastErrorType == "auth_failed" || lastErrorType == "key_parse_failed" {
+					consecutivePermanentErrors++
+					if consecutivePermanentErrors >= 3 {
+						logger.Error("permanent SSH error detected, failing session early",
+							slog.String("error_type", lastErrorType),
+							slog.Int("consecutive_errors", consecutivePermanentErrors))
+
+						if session.ProviderID != "" {
+							if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+								logger.Error("failed to destroy instance after permanent SSH error",
+									slog.String("error", err.Error()))
+							}
+						}
+						s.failSession(ctx, session, "permanent SSH error: "+lastErrorType)
+						metrics.RecordSSHVerifyFailure()
+						metrics.RecordSessionDestroyed(session.Provider, "permanent_ssh_error")
+						return
+					}
+				} else {
+					consecutivePermanentErrors = 0
+				}
 			}
 
 			// Schedule next poll with progressive backoff

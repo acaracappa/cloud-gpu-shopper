@@ -24,8 +24,9 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apk add --no-cache ca-certificates tzdata
 
-# Copy the binary
+# Copy the binary and benchmark script
 COPY --from=builder /server /app/server
+COPY --from=builder /app/scripts/gpu-benchmark.sh /app/scripts/gpu-benchmark.sh
 
 # Create directories for data and config
 RUN mkdir -p /app/data /app/config

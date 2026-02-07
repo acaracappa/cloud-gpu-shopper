@@ -44,7 +44,27 @@ QUALITY_PROMPTS=(
 THROUGHPUT_PROMPT="Explain the concept of machine learning in detail. Cover supervised learning, unsupervised learning, and reinforcement learning. Discuss common algorithms, their applications, and the mathematical foundations behind gradient descent and backpropagation."
 THROUGHPUT_MAX_TOKENS=500
 
-# ── Step 1: Wait for Ollama ─────────────────────────────────────────────────
+# ── Step 1: Start Ollama if not running, then wait ──────────────────────────
+if ! curl -sf "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
+  log "Ollama not running, attempting to start it..."
+  # Try common install locations
+  OLLAMA_BIN=""
+  for candidate in /usr/local/bin/ollama /usr/bin/ollama ollama; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      OLLAMA_BIN="$candidate"
+      break
+    fi
+  done
+  if [ -z "$OLLAMA_BIN" ]; then
+    log "Ollama not found, installing..."
+    curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null || true
+    OLLAMA_BIN="ollama"
+  fi
+  log "Starting Ollama server ($OLLAMA_BIN)..."
+  nohup "$OLLAMA_BIN" serve > /tmp/ollama.log 2>&1 &
+  sleep 3
+fi
+
 log "Waiting for Ollama at $OLLAMA_URL ..."
 OLLAMA_TIMEOUT=300
 OLLAMA_START=$(date +%s)

@@ -106,9 +106,27 @@ func (s *ManifestStore) migrate() error {
 
 		CREATE INDEX IF NOT EXISTS idx_manifest_run_id ON benchmark_manifest(run_id);
 		CREATE INDEX IF NOT EXISTS idx_manifest_status ON benchmark_manifest(status);
-		CREATE INDEX IF NOT EXISTS idx_manifest_priority ON benchmark_manifest(priority, status);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Idempotent column additions for tables created by older schema
+	alters := []string{
+		"ALTER TABLE benchmark_manifest ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE benchmark_manifest ADD COLUMN worker_id TEXT",
+		"ALTER TABLE benchmark_manifest ADD COLUMN output_file TEXT",
+		"ALTER TABLE benchmark_manifest ADD COLUMN offer_id TEXT",
+		"ALTER TABLE benchmark_manifest ADD COLUMN price_per_hour REAL",
+		"ALTER TABLE benchmark_manifest ADD COLUMN total_cost REAL",
+	}
+	for _, stmt := range alters {
+		_, _ = s.db.Exec(stmt) // Ignore "duplicate column" errors
+	}
+
+	_, _ = s.db.Exec("CREATE INDEX IF NOT EXISTS idx_manifest_priority ON benchmark_manifest(priority, status)")
+
+	return nil
 }
 
 // Create inserts a new manifest entry

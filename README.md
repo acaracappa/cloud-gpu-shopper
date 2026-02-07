@@ -260,32 +260,38 @@ Cloud GPU Shopper includes comprehensive benchmarking infrastructure for evaluat
 
 ### Benchmark Matrix Results
 
-We tested 3 models across 4 GPUs on 2 providers (17 successful benchmarks):
+We tested 8 models across 9 GPUs on 2 providers (49 benchmarks, 45 successful):
 
-| GPU | Provider | $/hr | qwen2:7b | deepseek-r1:14b | deepseek-r1:32b |
-|-----|----------|------|----------|-----------------|-----------------|
-| RTX 5090 | Vast.ai | $0.21 | **305 TPS** | **149 TPS** | **72.5 TPS** |
-| A100 80GB | Vast.ai | $0.33 | 200 TPS | 86 TPS | 42 TPS |
-| RTX 4090 | Vast.ai | $0.16 | 195 TPS | 97 TPS | N/A* |
-| RTX 4090 | TensorDock | $0.44 | 190 TPS | 94 TPS | 13 TPS |
-| RTX 3090 | Vast.ai | $0.08 | 167 TPS | 81 TPS | 3.6 TPS |
-| RTX 3090 | TensorDock | $0.20 | 127 TPS | 45 TPS | 11 TPS |
-
-*RTX 4090 on Vast.ai had VRAM pressure errors with the 32b model.
+| GPU | Provider | $/hr | llama3.1:8b | mistral:7b | deepseek-r1:14b | deepseek-r1:32b |
+|-----|----------|------|-------------|------------|-----------------|-----------------|
+| RTX 5090 | Vast.ai | $0.21 | — | — | **149 TPS** | **72.5 TPS** |
+| RTX 5080 | Vast.ai | $0.12 | — | 168 TPS | 89 TPS | — |
+| RTX 4090 | Vast.ai | $0.08-0.32 | — | — | 94-97 TPS | **44.5 TPS** |
+| RTX 4090 | TensorDock | $0.38-0.44 | **169 TPS** | **179 TPS** | 92-94 TPS | 13 TPS |
+| RTX 3090 | Vast.ai | $0.08 | **145 TPS** | **159 TPS** | **83 TPS** | 3.6 TPS |
+| RTX 3090 | TensorDock | $0.20 | — | — | 80 TPS | 11 TPS |
+| RTX A6000 | TensorDock | $0.40 | 122 TPS | — | 68 TPS | — |
+| RTX 5060 Ti | Vast.ai | $0.06-0.07 | 83 TPS | 89 TPS | — | — |
+| A100 80GB | Vast.ai | $0.33 | — | — | 86 TPS | 42 TPS |
 
 **Key Findings:**
+- **RTX 3090 on Vast.ai** ($0.08/hr) is the best value across the board: $0.14/M tokens for llama3.1:8b
 - **RTX 5090** leads all consumer GPUs, handling 32b models 7x faster than RTX 4090
-- **RTX 3090 on Vast.ai** ($0.08/hr) offers best cost efficiency for small/medium models
+- **Vast.ai is 3-4x cheaper** per hour than TensorDock for equivalent performance
 - **Provider variance is significant** - same GPU can differ 20-80% between providers
+- **New quality metrics**: TTFT (time to first token) ranging 4.4s-10.4s, match rate up to 100%
 
-### Cost Efficiency (Tokens per Dollar)
+### Cost Efficiency ($/Million Tokens)
 
-| GPU | Provider | qwen2:7b | deepseek-r1:14b | deepseek-r1:32b |
-|-----|----------|----------|-----------------|-----------------|
-| RTX 3090 | Vast.ai | **7.5M** | **3.7M** | 161K |
-| RTX 5090 | Vast.ai | 5.2M | 2.6M | **1.2M** |
-| RTX 4090 | Vast.ai | 4.4M | 2.2M | N/A |
-| A100 80GB | Vast.ai | 2.2M | 941K | 459K |
+| GPU | Provider | llama3.1:8b | mistral:7b | deepseek-r1:14b | deepseek-r1:32b |
+|-----|----------|-------------|------------|-----------------|-----------------|
+| RTX 3090 | Vast.ai | **$0.14** | **$0.14** | **$0.26** | $6.20 |
+| RTX 5060 Ti | Vast.ai | $0.23 | $0.21 | — | — |
+| RTX 5080 | Vast.ai | — | $0.19 | $0.40 | — |
+| RTX 5090 | Vast.ai | — | — | $0.39 | **$0.80** |
+| RTX 4090 | Vast.ai | — | — | $0.46 | $0.88 |
+| RTX 4090 | TensorDock | $0.65 | $0.59-0.68 | $1.14-1.30 | $9.38 |
+| RTX 3090 | TensorDock | — | — | $0.69 | $4.91 |
 
 ### Benchmark API Endpoints
 
@@ -307,6 +313,31 @@ curl "http://localhost:8080/api/v1/benchmarks/compare?model=deepseek-r1:14b"
 # Get hardware recommendations
 curl "http://localhost:8080/api/v1/benchmarks/recommendations?model=qwen2:7b"
 ```
+
+### Automated Benchmark Runs
+
+The benchmark runner provisions GPU instances, uploads the benchmark script, runs tests, and collects results automatically:
+
+```bash
+# Run automated benchmarks across Vast.ai GPUs
+curl -X POST http://localhost:8080/api/v1/benchmark-runs -H 'Content-Type: application/json' -d '{
+  "models": ["llama3.1:8b", "deepseek-r1:14b"],
+  "gpu_types": ["RTX 3090", "RTX 4090", "RTX 5060 Ti"],
+  "providers": ["vastai"],
+  "max_budget": 1.00
+}'
+
+# Monitor progress
+curl http://localhost:8080/api/v1/benchmark-runs/<run-id>
+```
+
+Features:
+- Auto-provisions instances with correct templates (Ollama for Vast.ai, cloud-init for TensorDock)
+- Uploads benchmark script via SCP, starts Ollama if needed
+- Collects TTFT, match rate, TPS, GPU stats, and cost data
+- Entry-level retry (2 attempts per GPU/model combo)
+- Structured error reporting with `error_type` and `retry_suggested`
+- Fail-fast on permanent SSH errors (auth_failed, key_parse_failed)
 
 ### Running Your Own Benchmarks
 
@@ -339,12 +370,13 @@ go run ./cmd/benchmark-loader -db ./data/gpu-shopper.db \
 
 ### Benchmark Methodology
 
-- **Duration**: 5 minutes per model per GPU
-- **Max Tokens**: 256 per request
+- **Duration**: 5 minutes throughput + 5 quality prompts per model per GPU
+- **Max Tokens**: 500 per request
 - **Concurrency**: 1 (sequential requests)
-- **Prompts**: 10 diverse prompts (coding, technical, creative, general)
+- **Prompts**: 6 types (reasoning, coding, knowledge, creative, instruction, throughput)
+- **Quality Metrics**: TTFT (time to first token), match rate (output correctness)
 - **Runtime**: Ollama (latest stable)
-- **Metrics**: TPS, GPU utilization, temperature, power draw, error rates
+- **Metrics**: TPS, TTFT, match rate, GPU utilization, temperature, power draw, error rates
 
 See [docs/BENCHMARKING.md](docs/BENCHMARKING.md) for the complete benchmarking infrastructure documentation, collected results, and API reference. See [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for the raw benchmark analysis.
 
@@ -791,6 +823,8 @@ watch -n 60 './bin/gpu-shopper costs -c my-app'
 | `/api/v1/benchmarks` | GET | List benchmark results |
 | `/api/v1/benchmarks/:id` | GET | Get specific benchmark |
 | `/api/v1/benchmarks` | POST | Submit new benchmark result |
+| `/api/v1/benchmark-runs` | POST | Start automated benchmark run |
+| `/api/v1/benchmark-runs/:id` | GET | Get benchmark run status |
 | `/api/v1/benchmarks/best` | GET | Best performing benchmark for model |
 | `/api/v1/benchmarks/cheapest` | GET | Most cost-effective benchmark for model |
 | `/api/v1/benchmarks/compare` | GET | Compare benchmarks for model across hardware |
@@ -920,12 +954,13 @@ All tests are designed to be:
 
 See [PROGRESS.md](PROGRESS.md) for detailed implementation status.
 
-**Current Phase**: Post-MVP - QA Remediation Complete
+**Current Phase**: Post-MVP - Automated Benchmarking & Reliability
 
 - MVP fully implemented with all safety systems
 - Comprehensive QA review completed (120+ issues addressed)
-- Test suite hardened for race-free, deterministic execution
-- E2E and live testing infrastructure operational
+- Automated benchmark infrastructure with 49 results across 9 GPUs, 8 models, 2 providers
+- Auto-retry, failure tracking, and structured error types for consumer apps
+- 17 bugs tracked and resolved (5 provider-side mitigated)
 
 ## Getting Help
 
