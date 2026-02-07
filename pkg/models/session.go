@@ -26,13 +26,14 @@ const (
 	WorkloadInteractive WorkloadType = "interactive" // Interactive SSH session
 	WorkloadInference   WorkloadType = "inference"   // Generic inference
 	WorkloadSSH         WorkloadType = "ssh"         // SSH access (alias for interactive)
+	WorkloadBenchmark   WorkloadType = "benchmark"   // Automated GPU benchmark
 )
 
 // ValidWorkloadTypes enumerates all accepted workload type values.
 var ValidWorkloadTypes = map[WorkloadType]bool{
 	WorkloadLLM: true, WorkloadLLMVLLM: true, WorkloadLLMTGI: true,
 	WorkloadTraining: true, WorkloadBatch: true, WorkloadInteractive: true,
-	WorkloadInference: true, WorkloadSSH: true,
+	WorkloadInference: true, WorkloadSSH: true, WorkloadBenchmark: true,
 }
 
 // IsValid returns true if the workload type is a recognized value.
@@ -159,6 +160,9 @@ type CreateSessionRequest struct {
 	AutoRetry  bool   `json:"auto_retry,omitempty"`
 	MaxRetries int    `json:"max_retries,omitempty"`
 	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
+
+	// On-start command (injected by benchmark runner or user)
+	OnStartCmd string `json:"on_start_cmd,omitempty"` // Script to run after provisioning
 
 	// SSH timeout override
 	SSHTimeoutMinutes int `json:"ssh_timeout_minutes,omitempty"` // Client-specified SSH timeout (1-30 min)

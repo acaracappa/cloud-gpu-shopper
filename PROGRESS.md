@@ -19,18 +19,18 @@
 | ID | Description | Status | Notes |
 |----|-------------|--------|-------|
 | BUG-003 | `.env` not loading provider creds | FIXED | `mapEnvFileKeys()` |
-| BUG-004 | CUDA version mismatch | Open | Provider-side data issue |
+| BUG-004 | CUDA version mismatch | Provider-side — Won't Fix | Provider-side data issue; `min_cuda` filter works around it |
 | BUG-005 | SSH timeout too short for heavy templates | FIXED | Client-configurable `ssh_timeout_minutes` (1-30 min) |
-| BUG-006 | pip vLLM incompatible with CUDA 13.0 | Workaround | Use Docker template instead |
+| BUG-006 | pip vLLM incompatible with CUDA 13.0 | Provider-side — Won't Fix | Use Docker template instead |
 | BUG-008 | TensorDock port_forwards ignored | FIXED | Use `useDedicatedIp: true` |
 | BUG-009 | ALL TensorDock VMs missing nvidia drivers (systemic) | Fixed | Cloud-init: dpkg fix + DKMS build + modprobe |
-| BUG-010 | TensorDock "No available public IPs on hostnode" | Mitigated | Stale inventory; only Manassas VA + Chubbuck ID reliable |
-| BUG-011 | TensorDock H100 SXM5 stops immediately | Mitigated | Global failure tracking suppresses offer |
-| BUG-012 | RTX 5080 on Vast.ai can't provision | Mitigated | GPU-type-level degradation after 3+ offer failures |
+| BUG-010 | TensorDock "No available public IPs on hostnode" | Provider-side — Won't Fix | Stale inventory; confidence scoring suppresses bad offers |
+| BUG-011 | TensorDock H100 SXM5 stops immediately | Provider-side — Won't Fix | Global failure tracking auto-suppresses offer |
+| BUG-012 | RTX 5080 on Vast.ai can't provision | Provider-side — Won't Fix | Driver incompatibility; GPU-type degradation after 3+ failures |
 | BUG-013 | TensorDock nvidia packages in `iU` state (DKMS never built) | Fixed | Cloud-init runs `dpkg --configure -a` + DKMS build/install |
 | BUG-014 | dpkg lock contention on TensorDock VMs (2-5 min) | Fixed | Cloud-init kills unattended-upgrades, waits for lock, `DPkg::Lock::Timeout=120` |
-| BUG-015 | deepseek-r1:14b cold-start >2 min (CUDA JIT) | Won't Fix | Inherent to CUDA JIT; benchmark script uses warmup request |
-| BUG-016 | RTX 5000 ADA / RTX 5090 Chubbuck intermittent SSH/PCIe | Won't Fix | Hardware issue; failure tracker auto-suppresses after repeated failures |
+| BUG-015 | deepseek-r1:14b cold-start >2 min (CUDA JIT) | Provider-side — Won't Fix | Inherent to CUDA JIT; benchmark script uses warmup request |
+| BUG-016 | RTX 5000 ADA / RTX 5090 Chubbuck intermittent SSH/PCIe | Provider-side — Won't Fix | Hardware issue; failure tracker auto-suppresses |
 | BUG-017 | Vast.ai "loading" state killed during image pull | FIXED | Added "loading" to transient states allowlist in provisioner |
 | BUG-024 | No workload_type or retry_scope validation | FIXED | Validation in handlers.go + models/session.go |
 | BUG-040 | Unsanitized X-Request-ID + user input in errors | FIXED | sanitizeInput() + requestID regex validation |

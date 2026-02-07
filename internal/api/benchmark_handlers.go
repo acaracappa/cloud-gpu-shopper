@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/benchmark"
+	benchsvc "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/benchmark"
 )
 
 // BenchmarkQuery defines query parameters for benchmark endpoints
@@ -369,4 +370,248 @@ func (s *Server) handleCompareBenchmarks(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, comparison)
+}
+
+// ── Benchmark Runs ──────────────────────────────────────────────────────────
+
+// handleStartBenchmarkRun starts a new benchmark run.
+func (s *Server) handleStartBenchmarkRun(c *gin.Context) {
+	if s.benchmarkRunner == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark runner not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	var req benchsvc.BenchmarkRunRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid request: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	if len(req.Models) == 0 {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "at least one model is required",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	run, err := s.benchmarkRunner.StartRun(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to start benchmark run: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"run": run,
+	})
+}
+
+// handleGetBenchmarkRun returns the status of a benchmark run.
+func (s *Server) handleGetBenchmarkRun(c *gin.Context) {
+	if s.benchmarkRunner == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark runner not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	runID := c.Param("id")
+	run, err := s.benchmarkRunner.GetRun(c.Request.Context(), runID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     "run not found: " + sanitizeInput(runID, 128),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	entries, _ := s.benchmarkRunner.GetRunEntries(c.Request.Context(), runID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"run":     run,
+		"entries": entries,
+	})
+}
+
+// handleCancelBenchmarkRun cancels a running benchmark.
+func (s *Server) handleCancelBenchmarkRun(c *gin.Context) {
+	if s.benchmarkRunner == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark runner not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	runID := c.Param("id")
+	if err := s.benchmarkRunner.CancelRun(c.Request.Context(), runID); err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     "run not found: " + sanitizeInput(runID, 128),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "cancelled",
+	})
+}
+
+// ── Benchmark Schedules ─────────────────────────────────────────────────────
+
+// handleCreateBenchmarkSchedule creates a new benchmark schedule.
+func (s *Server) handleCreateBenchmarkSchedule(c *gin.Context) {
+	if s.benchmarkScheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark scheduler not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	var sched benchsvc.Schedule
+	if err := c.ShouldBindJSON(&sched); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid request: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	if sched.Name == "" || sched.CronExpr == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "name and cron expression are required",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	sched.Enabled = true
+	if err := s.benchmarkScheduler.GetStore().Create(c.Request.Context(), &sched); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to create schedule: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"schedule": sched})
+}
+
+// handleListBenchmarkSchedules lists all benchmark schedules.
+func (s *Server) handleListBenchmarkSchedules(c *gin.Context) {
+	if s.benchmarkScheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark scheduler not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	schedules, err := s.benchmarkScheduler.GetStore().List(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to list schedules: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"schedules": schedules,
+		"count":     len(schedules),
+	})
+}
+
+// handleUpdateBenchmarkSchedule updates an existing benchmark schedule.
+func (s *Server) handleUpdateBenchmarkSchedule(c *gin.Context) {
+	if s.benchmarkScheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark scheduler not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	id := c.Param("id")
+	store := s.benchmarkScheduler.GetStore()
+
+	existing, err := store.Get(c.Request.Context(), id)
+	if err != nil || existing == nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     "schedule not found: " + sanitizeInput(id, 128),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	var update struct {
+		Name    string                        `json:"name"`
+		Cron    string                        `json:"cron"`
+		Request *benchsvc.BenchmarkRunRequest `json:"run_request"`
+		Enabled *bool                         `json:"enabled"` // Pointer so omitted field != false
+	}
+	if err := c.ShouldBindJSON(&update); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid request: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Merge only provided fields
+	if update.Name != "" {
+		existing.Name = update.Name
+	}
+	if update.Cron != "" {
+		existing.CronExpr = update.Cron
+	}
+	if update.Request != nil && len(update.Request.Models) > 0 {
+		existing.Request = *update.Request
+	}
+	if update.Enabled != nil {
+		existing.Enabled = *update.Enabled
+	}
+
+	if err := store.Update(c.Request.Context(), existing); err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to update schedule: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"schedule": existing})
+}
+
+// handleDeleteBenchmarkSchedule deletes a benchmark schedule.
+func (s *Server) handleDeleteBenchmarkSchedule(c *gin.Context) {
+	if s.benchmarkScheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error:     "benchmark scheduler not available",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	id := c.Param("id")
+	if err := s.benchmarkScheduler.GetStore().Delete(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     "schedule not found: " + sanitizeInput(id, 128),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }

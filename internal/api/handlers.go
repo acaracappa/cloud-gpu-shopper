@@ -489,7 +489,7 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 	// Validate workload_type
 	if wt := models.WorkloadType(req.WorkloadType); !wt.IsValid() {
 		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:     "invalid workload_type: must be one of: llm, llm_vllm, llm_tgi, training, batch, interactive, inference, ssh",
+			Error:     "invalid workload_type: must be one of: llm, llm_vllm, llm_tgi, training, batch, interactive, inference, ssh, benchmark",
 			RequestID: c.GetString("request_id"),
 		})
 		return

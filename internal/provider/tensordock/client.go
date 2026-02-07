@@ -1013,6 +1013,14 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		createReq.Data.Attributes.CloudInit = buildSSHKeyCloudInit(req.SSHPublicKey)
 	}
 
+	// Append OnStartCmd to cloud-init runcmd if specified
+	if req.OnStartCmd != "" && createReq.Data.Attributes.CloudInit != nil {
+		createReq.Data.Attributes.CloudInit.RunCmd = append(
+			createReq.Data.Attributes.CloudInit.RunCmd,
+			req.OnStartCmd,
+		)
+	}
+
 	reqURL := c.buildURL("/instances")
 
 	body, err := json.Marshal(createReq)

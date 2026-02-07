@@ -98,6 +98,11 @@ type PerformanceResults struct {
 	AvgTTFTMs float64 `json:"avg_ttft_ms"`
 	P50TTFTMs float64 `json:"p50_ttft_ms"`
 	P95TTFTMs float64 `json:"p95_ttft_ms"`
+
+	// Quality validation (match-rate from structured prompts)
+	MatchRate           float64 `json:"match_rate,omitempty"`            // 0.0-1.0, quality score
+	PromptsWithExpected int     `json:"prompts_with_expected,omitempty"` // Count of prompts with validation
+	PromptsMatching     int     `json:"prompts_matching,omitempty"`      // Count that matched
 }
 
 // GPUStats contains GPU utilization statistics during the benchmark.

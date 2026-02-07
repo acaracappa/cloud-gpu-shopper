@@ -17,6 +17,7 @@ import (
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
+	benchsvc "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
@@ -30,11 +31,13 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Services
-	inventory      *inventory.Service
-	provisioner    *provisioner.Service
-	lifecycle      *lifecycle.Manager
-	costTracker    *cost.Tracker
-	benchmarkStore *benchmark.Store
+	inventory          *inventory.Service
+	provisioner        *provisioner.Service
+	lifecycle          *lifecycle.Manager
+	costTracker        *cost.Tracker
+	benchmarkStore     *benchmark.Store
+	benchmarkRunner    *benchsvc.Runner
+	benchmarkScheduler *benchsvc.Scheduler
 
 	// Configuration
 	host string
@@ -72,6 +75,20 @@ func WithPort(port int) Option {
 func WithBenchmarkStore(store *benchmark.Store) Option {
 	return func(s *Server) {
 		s.benchmarkStore = store
+	}
+}
+
+// WithBenchmarkRunner sets the benchmark runner
+func WithBenchmarkRunner(runner *benchsvc.Runner) Option {
+	return func(s *Server) {
+		s.benchmarkRunner = runner
+	}
+}
+
+// WithBenchmarkScheduler sets the benchmark scheduler
+func WithBenchmarkScheduler(scheduler *benchsvc.Scheduler) Option {
+	return func(s *Server) {
+		s.benchmarkScheduler = scheduler
 	}
 }
 
@@ -167,6 +184,17 @@ func (s *Server) setupRouter() {
 		v1.GET("/benchmarks/cheapest", s.handleGetCheapestBenchmark)
 		v1.GET("/benchmarks/compare", s.handleCompareBenchmarks)
 		v1.GET("/benchmarks/recommendations", s.handleGetHardwareRecommendations)
+
+		// Benchmark Runs (automated orchestration)
+		v1.POST("/benchmark-runs", s.handleStartBenchmarkRun)
+		v1.GET("/benchmark-runs/:id", s.handleGetBenchmarkRun)
+		v1.DELETE("/benchmark-runs/:id", s.handleCancelBenchmarkRun)
+
+		// Benchmark Schedules (recurring automation)
+		v1.POST("/benchmark-schedules", s.handleCreateBenchmarkSchedule)
+		v1.GET("/benchmark-schedules", s.handleListBenchmarkSchedules)
+		v1.PUT("/benchmark-schedules/:id", s.handleUpdateBenchmarkSchedule)
+		v1.DELETE("/benchmark-schedules/:id", s.handleDeleteBenchmarkSchedule)
 	}
 
 	s.router = router
