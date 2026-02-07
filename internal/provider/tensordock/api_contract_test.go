@@ -345,7 +345,7 @@ func TestAPIContract_CreateInstance_RequestFormat_CloudInit(t *testing.T) {
 	assert.Nil(t, receivedRequest.Data.Attributes.CloudInit.WriteFiles)
 
 	// Should have runcmd for all operations: directory creation, key writing, permissions
-	require.Len(t, receivedRequest.Data.Attributes.CloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
+	require.Len(t, receivedRequest.Data.Attributes.CloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 	runcmdStr := strings.Join(receivedRequest.Data.Attributes.CloudInit.RunCmd, " ")
 	assert.Contains(t, runcmdStr, "mkdir -p /root/.ssh")
 	assert.Contains(t, runcmdStr, "authorized_keys")

@@ -1023,13 +1023,15 @@ func TestBuildSSHKeyCloudInit(t *testing.T) {
 			// New implementation uses only runcmd (no write_files)
 			assert.Nil(t, cloudInit.WriteFiles)
 
-			// Verify runcmd has all commands for both root and user, plus driver install
-			// 11 SSH commands + 1 NVIDIA driver command = 12 total
-			assert.Len(t, cloudInit.RunCmd, 12)
+			// Verify runcmd has all commands for both root and user, plus driver fix
+			// 11 SSH commands + 5 NVIDIA driver fix commands = 16 total
+			assert.Len(t, cloudInit.RunCmd, 16)
 			assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
 			assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
-			// BUG-009: Verify NVIDIA driver installation command is present
-			assert.Contains(t, cloudInit.RunCmd[11], "nvidia-driver-550")
+			// BUG-009/013/014: Verify NVIDIA driver fix commands are present
+			assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades")  // kill lock holder
+			assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a")  // fix partial installs
+			assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")           // driver fix
 		})
 	}
 }

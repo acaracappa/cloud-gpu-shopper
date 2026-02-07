@@ -1540,8 +1540,10 @@ func buildSSHKeyCloudInit(publicKey string) *CloudInit {
 // buildCloudInit creates cloud-init configuration for SSH key installation and
 // optionally NVIDIA driver installation.
 //
-// BUG-009: TensorDock images may be missing NVIDIA drivers. When installNvidiaDrivers
-// is true, we add commands to install the driver if not present.
+// BUG-009/013/014: TensorDock images have partially-installed nvidia packages (dpkg iU
+// state) with DKMS modules never built, and unattended-upgrades holds dpkg lock for
+// 2-5 min after boot. When installNvidiaDrivers is true, we kill the lock holder, fix
+// dpkg state, attempt DKMS build, and fall back to full driver install if needed.
 func buildCloudInit(publicKey string, installNvidiaDrivers bool) *CloudInit {
 	// TensorDock's cloud-init write_files may not support encoding field,
 	// and runs before runcmd (which creates directories).
@@ -1571,18 +1573,33 @@ func buildCloudInit(publicKey string, installNvidiaDrivers bool) *CloudInit {
 		"chown user:user /home/user/.ssh/authorized_keys",
 	}
 
-	// BUG-009: Install NVIDIA drivers if not present
-	// This runs in background to not block SSH access, with a marker file to indicate completion
+	// BUG-009/013/014: Fix NVIDIA drivers on TensorDock VMs.
+	// Root cause chain: base images have partially-installed nvidia packages (dpkg iU state),
+	// DKMS kernel module never built, and unattended-upgrades holds dpkg lock for 2-5 min.
 	if installNvidiaDrivers {
 		runCmds = append(runCmds,
-			// Check if nvidia-smi exists; if not, install drivers
-			// Using nohup and background execution to not block cloud-init completion
-			// The installation may require a reboot, but we warn about this in logs
-			"if ! command -v nvidia-smi &> /dev/null; then "+
-				"echo 'NVIDIA driver not found, installing nvidia-driver-550...' >> /var/log/cloud-init-nvidia.log && "+
-				"apt-get update >> /var/log/cloud-init-nvidia.log 2>&1 && "+
-				"DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-550 >> /var/log/cloud-init-nvidia.log 2>&1 && "+
-				"echo 'NVIDIA driver installed. A reboot may be required.' >> /var/log/cloud-init-nvidia.log; "+
+			// BUG-014: Kill unattended-upgrades and wait for dpkg lock
+			"systemctl stop unattended-upgrades 2>/dev/null || true",
+			"killall -9 unattended-upgrades 2>/dev/null || true",
+			"while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done",
+			// BUG-013: Fix partially-installed packages first
+			"DEBIAN_FRONTEND=noninteractive dpkg --configure -a",
+			// BUG-009: Install/fix nvidia driver if nvidia-smi doesn't work
+			"if ! nvidia-smi > /dev/null 2>&1; then "+
+				"echo 'nvidia-smi failed, attempting driver fix...' >> /var/log/cloud-init-nvidia.log && "+
+				// Try DKMS build first (handles iU state where package is installed but module isn't)
+				"if dpkg -l nvidia-dkms-* 2>/dev/null | grep -q '^.i'; then "+
+				"NVIDIA_VER=$(dpkg -l nvidia-dkms-* 2>/dev/null | grep '^.i' | awk '{print $3}' | head -1 | cut -d- -f1) && "+
+				"dkms build nvidia/$NVIDIA_VER >> /var/log/cloud-init-nvidia.log 2>&1 && "+
+				"dkms install nvidia/$NVIDIA_VER >> /var/log/cloud-init-nvidia.log 2>&1 && "+
+				"modprobe nvidia >> /var/log/cloud-init-nvidia.log 2>&1; "+
+				"else "+
+				// No nvidia-dkms package at all — full install
+				"apt-get update -o DPkg::Lock::Timeout=120 >> /var/log/cloud-init-nvidia.log 2>&1 && "+
+				"DEBIAN_FRONTEND=noninteractive apt-get install -y -o DPkg::Lock::Timeout=120 nvidia-driver-550 >> /var/log/cloud-init-nvidia.log 2>&1 && "+
+				"modprobe nvidia >> /var/log/cloud-init-nvidia.log 2>&1; "+
+				"fi && "+
+				"echo 'Driver fix complete.' >> /var/log/cloud-init-nvidia.log; "+
 				"fi",
 		)
 	}

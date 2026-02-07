@@ -33,8 +33,8 @@ func TestBuildSSHKeyCloudInit_BasicEncoding(t *testing.T) {
 	assert.Nil(t, cloudInit.WriteFiles)
 
 	// Verify runcmd contains all commands for both root and user + driver install
-	// 5 commands for root + 6 commands for user + 1 NVIDIA driver = 12 total
-	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+	// 5 commands for root + 6 commands for user + 5 NVIDIA driver fix = 16 total
+	require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 	// Verify root directory and key setup (first 6 commands)
 	assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
@@ -92,7 +92,7 @@ func TestBuildSSHKeyCloudInit_SpecialCharacters(t *testing.T) {
 
 			require.NotNil(t, cloudInit)
 			assert.Nil(t, cloudInit.WriteFiles)
-			require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+			require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 			// Find the echo command for root's authorized_keys
 			echoCmd := cloudInit.RunCmd[2]
@@ -140,7 +140,7 @@ func TestBuildSSHKeyCloudInit_RealKeyFormats(t *testing.T) {
 
 			require.NotNil(t, cloudInit)
 			assert.Nil(t, cloudInit.WriteFiles)
-			require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+			require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 			// Verify the echo command contains the key for root
 			echoCmd := cloudInit.RunCmd[2]
@@ -160,7 +160,7 @@ func TestBuildSSHKeyCloudInit_EmptyKey(t *testing.T) {
 	require.NotNil(t, cloudInit)
 	// Even with empty key, should still create the structure
 	assert.Nil(t, cloudInit.WriteFiles)
-	assert.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+	assert.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 	// Verify echo command exists (even with empty key)
 	assert.Contains(t, cloudInit.RunCmd[2], "echo ''")
@@ -175,7 +175,7 @@ func TestBuildSSHKeyCloudInit_VeryLongKey(t *testing.T) {
 
 	require.NotNil(t, cloudInit)
 	assert.Nil(t, cloudInit.WriteFiles)
-	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+	require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 	// Verify the long key is included in the echo command
 	echoCmd := cloudInit.RunCmd[2]
@@ -235,7 +235,7 @@ func TestCreateInstance_SSHKeyInRequest(t *testing.T) {
 	// Verify cloud-init was populated with runcmd (no write_files in new impl)
 	require.NotNil(t, capturedRequest.Data.Attributes.CloudInit)
 	assert.Nil(t, capturedRequest.Data.Attributes.CloudInit.WriteFiles)
-	require.Len(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
+	require.Len(t, capturedRequest.Data.Attributes.CloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 	// Verify the echo command contains the key
 	assert.Contains(t, capturedRequest.Data.Attributes.CloudInit.RunCmd[2], "/root/.ssh/authorized_keys")
@@ -724,7 +724,7 @@ func TestCloudInit_JSONSerialization(t *testing.T) {
 
 	runcmd, ok := parsed["runcmd"].([]interface{})
 	require.True(t, ok, "runcmd should be an array")
-	assert.Len(t, runcmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+	assert.Len(t, runcmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 	// Verify commands are strings
 	for _, cmd := range runcmd {
@@ -776,7 +776,7 @@ func TestCreateInstanceRequest_FullSerialization(t *testing.T) {
 	assert.Equal(t, sshKey, parsed.Data.Attributes.SSHKey)
 	assert.NotNil(t, parsed.Data.Attributes.CloudInit)
 	assert.Nil(t, parsed.Data.Attributes.CloudInit.WriteFiles)
-	assert.Len(t, parsed.Data.Attributes.CloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
+	assert.Len(t, parsed.Data.Attributes.CloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 }
 
 // =============================================================================
@@ -792,7 +792,7 @@ func TestBuildSSHKeyCloudInit_UnicodeKey(t *testing.T) {
 
 	require.NotNil(t, cloudInit)
 	assert.Nil(t, cloudInit.WriteFiles)
-	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+	require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 	// Verify the key is in the echo command
 	echoCmd := cloudInit.RunCmd[2]
@@ -866,9 +866,9 @@ func TestCloudInit_ExpectedExecutionOrder(t *testing.T) {
 	// New implementation uses only runcmd for everything (no write_files)
 	// This ensures proper directory creation before file writing
 	assert.Nil(t, cloudInit.WriteFiles)
-	require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install (BUG-009)
+	require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
-	// Verify execution order for root (first 6 commands)
+	// Verify execution order for root (first 5 commands)
 	assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
 	assert.Contains(t, cloudInit.RunCmd[1], "chmod 700 /root/.ssh")
 	assert.Contains(t, cloudInit.RunCmd[2], "echo") // Key write
@@ -884,6 +884,13 @@ func TestCloudInit_ExpectedExecutionOrder(t *testing.T) {
 	assert.Contains(t, cloudInit.RunCmd[8], "/home/user/.ssh/authorized_keys")
 	assert.Contains(t, cloudInit.RunCmd[9], "chmod 600 /home/user/.ssh/authorized_keys")
 	assert.Contains(t, cloudInit.RunCmd[10], "chown user:user /home/user/.ssh/authorized_keys")
+
+	// Verify NVIDIA driver fix commands (BUG-009/013/014)
+	assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades")  // BUG-014: stop lock holder
+	assert.Contains(t, cloudInit.RunCmd[12], "unattended-upgrades")  // BUG-014: kill lock holder
+	assert.Contains(t, cloudInit.RunCmd[13], "fuser")                // BUG-014: wait for dpkg lock
+	assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a")  // BUG-013: fix partial installs
+	assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")           // BUG-009: driver fix
 }
 
 // =============================================================================

@@ -23,10 +23,14 @@
 | BUG-005 | SSH timeout too short for heavy templates | FIXED | Client-configurable `ssh_timeout_minutes` (1-30 min) |
 | BUG-006 | pip vLLM incompatible with CUDA 13.0 | Workaround | Use Docker template instead |
 | BUG-008 | TensorDock port_forwards ignored | FIXED | Use `useDedicatedIp: true` |
-| BUG-009 | TensorDock ubuntu2404 missing nvidia drivers | Workaround | Install `nvidia-driver-550` + reboot |
-| BUG-010 | TensorDock "No available public IPs on hostnode" | Mitigated | Global failure tracking suppresses after 3 failures |
+| BUG-009 | ALL TensorDock VMs missing nvidia drivers (systemic) | Fixed | Cloud-init: dpkg fix + DKMS build + modprobe |
+| BUG-010 | TensorDock "No available public IPs on hostnode" | Mitigated | Stale inventory; only Manassas VA + Chubbuck ID reliable |
 | BUG-011 | TensorDock H100 SXM5 stops immediately | Mitigated | Global failure tracking suppresses offer |
 | BUG-012 | RTX 5080 on Vast.ai can't provision | Mitigated | GPU-type-level degradation after 3+ offer failures |
+| BUG-013 | TensorDock nvidia packages in `iU` state (DKMS never built) | Fixed | Cloud-init runs `dpkg --configure -a` + DKMS build/install |
+| BUG-014 | dpkg lock contention on TensorDock VMs (2-5 min) | Fixed | Cloud-init kills unattended-upgrades, waits for lock, `DPkg::Lock::Timeout=120` |
+| BUG-015 | deepseek-r1:14b cold-start >2 min (CUDA JIT) | Won't Fix | Inherent to CUDA JIT; benchmark script uses warmup request |
+| BUG-016 | RTX 5000 ADA / RTX 5090 Chubbuck intermittent SSH/PCIe | Won't Fix | Hardware issue; failure tracker auto-suppresses after repeated failures |
 
 ## Backlog
 
@@ -679,3 +683,48 @@ go test -race -parallel 4 ./cmd/cli/... # All pass
   - After 1 failure: 5% (was 10%)
   - 1 success + 1 failure (failure last): 12.5% (was 50%)
   - 3 successes, 0 failures: 100% (unchanged)
+
+### 2026-02-06 — TensorDock-Only Benchmark Campaign + Bug Fixes
+
+#### Benchmark Results (TensorDock)
+
+31 attempts, 5 successful (29% success rate). 22 failed (71%).
+
+| GPU | Model | TPS | $/M tokens | Price/hr | Location |
+|-----|-------|-----|-----------|----------|----------|
+| RTX 4090 | llama3.1:8b | 169.0 | $0.65 | $0.396 | Chubbuck ID |
+| RTX A6000 | llama3.1:8b | 121.9 | $0.91 | $0.400 | Chubbuck ID |
+| RTX 4090 | deepseek-r1:14b | 92.3 | $1.14 | $0.377 | Manassas VA |
+| RTX 3090 | deepseek-r1:14b | 80.1 | $0.69 | $0.200 | Manassas VA |
+| RTX A6000 | deepseek-r1:14b | 68.0 | $1.63 | $0.400 | Chubbuck ID |
+
+Key finding: **RTX 3090 is best value** for deepseek-r1:14b at $0.69/M tokens ($0.200/hr).
+
+#### Failure Analysis (22/31 = 71% failure rate)
+
+| Stage | Count | Cause |
+|-------|-------|-------|
+| Provision (stale inventory) | 8 | BUG-010: "No available public IPs on hostnode" |
+| SSH timeout | 6 | BUG-009/013/014: nvidia driver not loading, dpkg lock |
+| Instance stopped | 4 | BUG-011: instance stops immediately after provisioning |
+| SSH auth failure | 2 | BUG-016: RTX 5000 ADA / RTX 5090 Chubbuck PCIe issues |
+| Benchmark timeout | 2 | BUG-015: CUDA JIT cold-start >2 min |
+
+Working locations: **Manassas VA** (43% success), **Chubbuck ID** (50% success). All other locations failed.
+
+#### New Bugs Discovered
+
+- **BUG-013**: TensorDock nvidia packages in `iU` state — DKMS kernel module never built, `nvidia-smi` fails even though package is "installed"
+- **BUG-014**: `unattended-upgrades` holds dpkg lock for 2-5 min after boot, causing `apt` to fail in cloud-init
+- **BUG-015**: deepseek-r1:14b cold-start >2 min due to CUDA JIT compilation on first inference (not a code bug — inherent to model)
+- **BUG-016**: RTX 5000 ADA / RTX 5090 in Chubbuck have intermittent PCIe passthrough failures (hardware issue, won't fix)
+
+#### Bug Fixes
+
+- **BUG-009/013/014 (combined)**: Rewrote `buildCloudInit()` nvidia driver sequence:
+  1. Kill `unattended-upgrades` and wait for dpkg lock release
+  2. Run `dpkg --configure -a` to fix partially-installed packages
+  3. Try DKMS build/install first (handles `iU` state without full reinstall)
+  4. Fall back to full `nvidia-driver-550` install if no DKMS package present
+  5. Use `modprobe nvidia` instead of reboot
+  6. All `apt` commands use `DPkg::Lock::Timeout=120` for remaining lock contention

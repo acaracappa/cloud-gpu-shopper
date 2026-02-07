@@ -217,7 +217,7 @@ func TestCloudInitCommandInjection(t *testing.T) {
 			// Single quotes are escaped as '\'' which safely embeds them in shell
 			require.NotNil(t, cloudInit)
 			assert.Nil(t, cloudInit.WriteFiles, "New implementation uses runcmd only")
-			require.Len(t, cloudInit.RunCmd, 12) // 11 SSH + 1 NVIDIA driver install
+			require.Len(t, cloudInit.RunCmd, 16) // 11 SSH + 5 NVIDIA driver fix (BUG-009/013/014)
 
 			// Find the echo command for root's authorized_keys
 			echoCmd := cloudInit.RunCmd[2]
