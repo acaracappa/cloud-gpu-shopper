@@ -17,7 +17,7 @@ Thank you for your interest in contributing to Cloud GPU Shopper! This guide wil
 
 Before you begin, ensure you have the following installed:
 
-- **Go 1.22+** - [Download Go](https://go.dev/dl/)
+- **Go 1.25+** - [Download Go](https://go.dev/dl/)
 - **Git** - [Download Git](https://git-scm.com/downloads)
 - **Docker** (optional) - Required for containerized deployment and monitoring stack
 
@@ -25,7 +25,7 @@ Verify your Go installation:
 
 ```bash
 go version
-# Should output: go version go1.22.x (or higher)
+# Should output: go version go1.25.x (or higher)
 ```
 
 ## Development Setup

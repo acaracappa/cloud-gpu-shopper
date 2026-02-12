@@ -1,8 +1,7 @@
 # Cloud GPU Shopper
 
-[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen)]()
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/)
+[![CI](https://github.com/cloud-gpu-shopper/cloud-gpu-shopper/actions/workflows/ci.yml/badge.svg)](https://github.com/cloud-gpu-shopper/cloud-gpu-shopper/actions/workflows/ci.yml)
 
 A unified inventory and orchestration service for commodity GPU providers (Vast.ai, TensorDock). Acts as a "menu and provisioner" - select, provision, hand off credentials, ensure cleanup.
 
@@ -63,7 +62,7 @@ ssh user@<ip> "sudo apt-get update && sudo apt-get install -y nvidia-driver-550 
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - Docker (optional, for containerized deployment)
 
 ### Environment Variables
@@ -806,29 +805,37 @@ watch -n 60 './bin/gpu-shopper costs -c my-app'
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
+| `/ready` | GET | Readiness check |
 | `/metrics` | GET | Prometheus metrics |
 | `/api/v1/inventory` | GET | List available GPUs (supports `min_cuda`, `template_hash_id` filters) |
 | `/api/v1/inventory/:id` | GET | Get specific offer |
 | `/api/v1/inventory/:id/compatible-templates` | GET | Get compatible templates for offer |
 | `/api/v1/templates` | GET | List available templates (Vast.ai) |
 | `/api/v1/templates/:hash_id` | GET | Get specific template |
-| `/api/v1/sessions` | POST | Create session (supports `template_hash_id` and `disk_gb`) |
+| `/api/v1/sessions` | POST | Create session (supports `template_hash_id`, `disk_gb`, `auto_retry`) |
 | `/api/v1/sessions` | GET | List sessions |
 | `/api/v1/sessions/:id` | GET | Get session |
 | `/api/v1/sessions/:id` | DELETE | Force destroy session |
 | `/api/v1/sessions/:id/done` | POST | Signal session complete |
 | `/api/v1/sessions/:id/extend` | POST | Extend session |
+| `/api/v1/sessions/:id/diagnostics` | GET | Post-provision runtime diagnostics |
 | `/api/v1/costs` | GET | Get costs |
 | `/api/v1/costs/summary` | GET | Monthly cost summary |
+| `/api/v1/offer-health` | GET | Offer failure tracking status |
 | `/api/v1/benchmarks` | GET | List benchmark results |
 | `/api/v1/benchmarks/:id` | GET | Get specific benchmark |
 | `/api/v1/benchmarks` | POST | Submit new benchmark result |
-| `/api/v1/benchmark-runs` | POST | Start automated benchmark run |
-| `/api/v1/benchmark-runs/:id` | GET | Get benchmark run status |
 | `/api/v1/benchmarks/best` | GET | Best performing benchmark for model |
 | `/api/v1/benchmarks/cheapest` | GET | Most cost-effective benchmark for model |
 | `/api/v1/benchmarks/compare` | GET | Compare benchmarks for model across hardware |
 | `/api/v1/benchmarks/recommendations` | GET | Hardware recommendations based on benchmarks |
+| `/api/v1/benchmark-runs` | POST | Start automated benchmark run |
+| `/api/v1/benchmark-runs/:id` | GET | Get benchmark run status |
+| `/api/v1/benchmark-runs/:id` | DELETE | Cancel benchmark run |
+| `/api/v1/benchmark-schedules` | POST | Create benchmark schedule |
+| `/api/v1/benchmark-schedules` | GET | List benchmark schedules |
+| `/api/v1/benchmark-schedules/:id` | PUT | Update benchmark schedule |
+| `/api/v1/benchmark-schedules/:id` | DELETE | Delete benchmark schedule |
 
 See [docs/API.md](docs/API.md) for full API documentation with request/response examples.
 
@@ -935,31 +942,45 @@ All tests are designed to be:
 
 ```
 ├── cmd/
-│   ├── server/     # API server
-│   └── cli/        # CLI tool
+│   ├── server/           # API server
+│   ├── cli/              # CLI tool (gpu-shopper)
+│   └── benchmark-loader/ # Bulk benchmark result importer
 ├── internal/
-│   ├── api/        # REST API handlers
-│   ├── config/     # Configuration
-│   ├── logging/    # Structured logging
-│   ├── metrics/    # Prometheus metrics
-│   ├── provider/   # Provider adapters
-│   ├── service/    # Business logic
-│   └── storage/    # SQLite persistence
-├── pkg/models/     # Shared data models
-├── deploy/         # Docker files
-└── docs/           # Documentation
+│   ├── api/              # REST API handlers
+│   ├── benchmark/        # Benchmark models, store, parser
+│   ├── config/           # Configuration
+│   ├── filetransfer/     # SCP/SFTP file transfer
+│   ├── logging/          # Structured logging
+│   ├── metrics/          # Prometheus metrics
+│   ├── provider/         # Provider adapters (Vast.ai, TensorDock)
+│   ├── service/          # Business logic
+│   │   ├── benchmark/    #   Benchmark runner & scheduler
+│   │   ├── cost/         #   Cost tracking & aggregation
+│   │   ├── inventory/    #   Inventory cache & failure tracking
+│   │   ├── lifecycle/    #   Lifecycle, reconciliation, startup recovery
+│   │   └── provisioner/  #   Two-phase provisioning, SSH verification
+│   ├── ssh/              # SSH verification, GPU/disk/OOM status
+│   └── storage/          # SQLite persistence
+├── pkg/
+│   ├── models/           # Shared data models
+│   └── client/           # Go client library
+├── scripts/              # Benchmark & test scripts
+├── deploy/               # Docker & compose files
+├── test/                 # E2E, live, and mock provider tests
+└── docs/                 # Documentation
 ```
 
 ### Development Status
 
 See [PROGRESS.md](PROGRESS.md) for detailed implementation status.
 
-**Current Phase**: Post-MVP - Automated Benchmarking & Reliability
+**Current Phase**: Post-MVP Feature Development
 
 - MVP fully implemented with all safety systems
 - Comprehensive QA review completed (120+ issues addressed)
-- Automated benchmark infrastructure with 49 results across 9 GPUs, 8 models, 2 providers
+- Automated benchmark infrastructure with 50 results across 9 GPUs, 8 models, 2 providers
 - Auto-retry, failure tracking, and structured error types for consumer apps
+- Benchmark scheduling, CI/CD with native ARM64 builds
 - 17 bugs tracked and resolved (5 provider-side mitigated)
 
 ## Getting Help

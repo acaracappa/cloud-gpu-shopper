@@ -4,11 +4,12 @@
 
 **Phase**: Post-MVP Feature Development
 **Status**: Active
-**Date**: 2026-02-07
+**Date**: 2026-02-12
 
 ### Summary
 - MVP complete with all safety rules, E2E tests, and live testing
 - Feb 2026: Added auto-retry, global failure tracking, benchmarking infrastructure, disk estimation, Docker multi-arch builds
+- CI/CD optimized: native ARM64 runners (6x faster Docker builds), consolidated CI pipeline
 - Active bug tracking for provider-specific issues (RTX 5080 driver incompatibility)
 - TensorDock inventory quality improved with aggressive confidence tuning and recency penalty
 
@@ -810,9 +811,18 @@ Batch 3 (TensorDock validation) failed: nvidia drivers not ready, model pull fai
 
 #### Benchmark Database Totals
 
-- **49 benchmark results** in database (45 with valid TPS)
+- **50 benchmark results** in database (46 with valid TPS)
 - **9 GPU types**: RTX 3090, RTX 4090, RTX 5060 Ti, RTX 5070, RTX 5070 Ti, RTX 5080, RTX 5090, A100 80GB, H200 NVL
 - **8 models**: qwen2:1.5b, qwen2:7b, phi3:mini, mistral:7b, llama3.1:8b, deepseek-r1:14b, deepseek-r1:32b, deepseek-r1:70b
 - **2 providers**: Vast.ai, TensorDock
 - **New quality metrics**: TTFT (4.4s-10.4s range), match rate (0-100%)
 - **Best value**: RTX 3090 on Vast.ai at $0.14/M tokens for llama3.1:8b
+
+### 2026-02-12 — CI/CD Pipeline Optimization
+
+- Consolidated CI into single job for faster builds
+- Migrated Docker builds from QEMU emulation to native ARM64 GitHub Actions runners
+- Build time reduced from ~17 minutes to ~3 minutes (6x improvement)
+- Matrix strategy: amd64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` in parallel
+- Per-platform cache scoping to prevent concurrent build cache interference
+- Unified multi-arch manifest created via merge job after platform-specific builds
