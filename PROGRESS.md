@@ -42,7 +42,9 @@
 
 ### Outstanding (Medium Priority)
 
-_None_
+| ID | Description | Notes |
+|----|-------------|-------|
+| B1 | Configure `DEPLOYMENT_ID` env var for production gpu-shopper | Reconciler logs `deploymentID is empty; all provider instances will be considered ours` every cycle for every instance. Set a deployment tag so orphan detection scopes correctly to our instances only. Without it, instances from other deployments on the same Vast.ai account could be incorrectly flagged as orphans. See `internal/service/lifecycle/reconciler.go:278`. |
 
 ### Outstanding (Low Priority)
 
