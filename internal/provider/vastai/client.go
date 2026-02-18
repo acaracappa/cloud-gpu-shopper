@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
@@ -196,10 +198,8 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 
-	// Rate limiting
-	mu          sync.Mutex
-	lastRequest time.Time
-	minInterval time.Duration
+	// Rate limiting (token bucket)
+	limiter *rate.Limiter
 
 	// Bug #48: Circuit breaker for API calls
 	circuitBreaker *circuitBreaker
@@ -228,10 +228,24 @@ func WithHTTPClient(client *http.Client) ClientOption {
 	}
 }
 
-// WithMinInterval sets the minimum interval between requests
+// WithRateLimit sets the token bucket rate limiter parameters.
+// rps is requests per second, burst is the maximum burst size.
+func WithRateLimit(rps float64, burst int) ClientOption {
+	return func(c *Client) {
+		c.limiter = rate.NewLimiter(rate.Limit(rps), burst)
+	}
+}
+
+// WithMinInterval sets the minimum interval between requests.
+// Kept for backward compatibility — converts to token bucket rate.
+// A zero duration sets rate.Inf (unlimited).
 func WithMinInterval(d time.Duration) ClientOption {
 	return func(c *Client) {
-		c.minInterval = d
+		if d <= 0 {
+			c.limiter = rate.NewLimiter(rate.Inf, 1)
+		} else {
+			c.limiter = rate.NewLimiter(rate.Every(d), 1)
+		}
 	}
 }
 
@@ -248,7 +262,7 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 		apiKey:         apiKey,
 		baseURL:        defaultBaseURL,
 		httpClient:     &http.Client{Timeout: defaultTimeout},
-		minInterval:    time.Second,                                      // Default 1 request per second
+		limiter:        rate.NewLimiter(rate.Limit(2), 3),                  // 2 req/s, burst 3
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()), // Bug #48
 		templates:      &templateCache{},
 		bundles:        &bundleCache{bundles: make(map[int]Bundle)},
@@ -296,7 +310,9 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 		c.recordAPIMetrics("ListOffers", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Build query - Vast.ai uses JSON query syntax
 	query := map[string]interface{}{
@@ -387,7 +403,9 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 		c.recordAPIMetrics("ListAllInstances", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	reqURL := fmt.Sprintf("%s/instances/", c.baseURL)
 
@@ -450,7 +468,9 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		c.recordAPIMetrics("CreateInstance", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Build the create request based on launch mode
 	createReq := c.buildCreateRequest(req)
@@ -701,7 +721,9 @@ func (c *Client) AttachSSHKey(ctx context.Context, instanceID string, sshPublicK
 		c.recordAPIMetrics("AttachSSHKey", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	reqURL := fmt.Sprintf("%s/instances/%s/ssh/", c.baseURL, instanceID)
 
@@ -748,7 +770,9 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err er
 		c.recordAPIMetrics("DestroyInstance", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	reqURL := fmt.Sprintf("%s/instances/%s/", c.baseURL, instanceID)
 
@@ -788,7 +812,9 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	reqURL := fmt.Sprintf("%s/instances/%s/", c.baseURL, instanceID)
 
@@ -867,7 +893,9 @@ func (c *Client) ListTemplates(ctx context.Context, filter models.TemplateFilter
 	}
 
 	// Fetch from API - only fetch recommended templates
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Only fetch recommended templates from Vast.ai using select_filters
 	// These are the curated templates shown in the Vast.ai console
@@ -961,16 +989,10 @@ func (c *Client) GetTemplate(ctx context.Context, hashID string) (*models.VastTe
 	return nil, fmt.Errorf("%w: %s", provider.ErrTemplateNotFound, hashID)
 }
 
-// rateLimit enforces minimum interval between requests
-func (c *Client) rateLimit() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	elapsed := time.Since(c.lastRequest)
-	if elapsed < c.minInterval {
-		time.Sleep(c.minInterval - elapsed)
-	}
-	c.lastRequest = time.Now()
+// rateLimit waits for a token from the rate limiter.
+// Returns an error if the context is cancelled while waiting.
+func (c *Client) rateLimit(ctx context.Context) error {
+	return c.limiter.Wait(ctx)
 }
 
 // handleError converts HTTP errors to provider errors
