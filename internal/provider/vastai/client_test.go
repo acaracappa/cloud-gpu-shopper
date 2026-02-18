@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
@@ -926,6 +928,68 @@ func TestClient_CreateInstance_WithTemplateHashID(t *testing.T) {
 	assert.Equal(t, "ssh_proxy", capturedRequest.RunType)
 	// Image should not be set when using template
 	assert.Empty(t, capturedRequest.Image)
+}
+
+func TestTokenBucketRateLimiting(t *testing.T) {
+	var requestTimes []time.Time
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestTimes = append(requestTimes, time.Now())
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"offers": []interface{}{}})
+	}))
+	defer server.Close()
+
+	// 5 req/s with burst of 3
+	client := NewClient("test-key",
+		WithBaseURL(server.URL),
+		WithRateLimit(5, 3),
+	)
+
+	// Make 5 rapid requests
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		_, _ = client.ListOffers(context.Background(), models.OfferFilter{})
+	}
+	elapsed := time.Since(start)
+
+	// First 3 use burst tokens (immediate), then 2 more at 200ms each = ~400ms
+	assert.GreaterOrEqual(t, elapsed.Milliseconds(), int64(350),
+		"Requests beyond burst should be throttled")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 5, len(requestTimes), "All requests should complete")
+}
+
+func TestRateLimitRespectsContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"offers": []interface{}{}})
+	}))
+	defer server.Close()
+
+	// Very slow rate to force waiting
+	client := NewClient("test-key",
+		WithBaseURL(server.URL),
+		WithRateLimit(0.1, 1), // 1 per 10 seconds, burst 1
+	)
+
+	// First request uses burst token
+	_, err := client.ListOffers(context.Background(), models.OfferFilter{})
+	assert.NoError(t, err)
+
+	// Second request must wait — cancel it
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err = client.ListOffers(ctx, models.OfferFilter{})
+	assert.Error(t, err, "Should fail when context cancelled during rate limit wait")
 }
 
 func TestTemplate_ToModel(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 )
 
 // =============================================================================
@@ -962,7 +963,7 @@ func TestClientOptions(t *testing.T) {
 
 	assert.Equal(t, "https://custom.url", client.baseURL)
 	assert.Equal(t, customClient, client.httpClient)
-	assert.Equal(t, 500*time.Millisecond, client.minInterval)
+	assert.Equal(t, rate.Every(500*time.Millisecond), client.limiter.Limit())
 	assert.Equal(t, "debian12", client.defaultImage)
 	assert.True(t, client.debugEnabled)
 }
