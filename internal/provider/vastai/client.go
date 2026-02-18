@@ -262,7 +262,7 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 		apiKey:         apiKey,
 		baseURL:        defaultBaseURL,
 		httpClient:     &http.Client{Timeout: defaultTimeout},
-		limiter:        rate.NewLimiter(rate.Limit(2), 3),                  // 2 req/s, burst 3
+		limiter:        rate.NewLimiter(rate.Limit(2), 3),                // 2 req/s, burst 3
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()), // Bug #48
 		templates:      &templateCache{},
 		bundles:        &bundleCache{bundles: make(map[int]Bundle)},
