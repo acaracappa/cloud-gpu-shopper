@@ -3,7 +3,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/)
 [![CI](https://github.com/cloud-gpu-shopper/cloud-gpu-shopper/actions/workflows/ci.yml/badge.svg)](https://github.com/cloud-gpu-shopper/cloud-gpu-shopper/actions/workflows/ci.yml)
 
-A unified inventory and orchestration service for commodity GPU providers (Vast.ai, TensorDock). Acts as a "menu and provisioner" - select, provision, hand off credentials, ensure cleanup.
+A unified inventory and orchestration service for commodity GPU providers (Vast.ai, TensorDock, Blue Lobster). Acts as a "menu and provisioner" - select, provision, hand off credentials, ensure cleanup.
 
 ## Table of Contents
 
@@ -33,7 +33,7 @@ This design philosophy means Cloud GPU Shopper acts as a catalog and orchestrato
 
 Managing GPU compute across multiple cloud providers is complex and risky:
 
-- **Unified Interface**: Browse and compare GPU offers across Vast.ai and TensorDock from a single API. No need to learn multiple provider interfaces or maintain separate integrations.
+- **Unified Interface**: Browse and compare GPU offers across Vast.ai, TensorDock, and Blue Lobster from a single API. No need to learn multiple provider interfaces or maintain separate integrations.
 
 - **Built-in Safety Systems**: Prevent runaway costs with automatic 12-hour session limits, orphan instance detection, and verified destruction. The service is designed with "zero orphaned instances" as the primary goal.
 
@@ -52,11 +52,14 @@ Managing GPU compute across multiple cloud providers is complex and risky:
 |----------|--------|----------|
 | Vast.ai | Implemented | Instance tags, spot pricing, Docker templates |
 | TensorDock | Implemented | On-demand pricing, dedicated IPs |
+| Blue Lobster | Implemented | Fixed pricing, dedicated GPUs, direct SSH on port 22 |
 
 **TensorDock Note:** The `ubuntu2404` image requires manual NVIDIA driver installation:
 ```bash
 ssh user@<ip> "sudo apt-get update && sudo apt-get install -y nvidia-driver-550 && sudo reboot"
 ```
+
+**Blue Lobster Note:** Instances run `apt-get dist-upgrade` on boot, which rebuilds NVIDIA DKMS kernel modules for 7-19 minutes after SSH becomes available. Cloud GPU Shopper handles this automatically with a readiness probe that waits for dpkg locks to clear and nvidia-smi to stabilize.
 
 ## Quick Start
 
@@ -73,6 +76,7 @@ Create a `.env` file in the project root (automatically loaded by the server):
 VASTAI_API_KEY=your-vastai-key
 TENSORDOCK_API_TOKEN=your-tensordock-token
 TENSORDOCK_AUTH_ID=your-tensordock-auth-id
+BLUELOBSTER_API_KEY=your-bluelobster-key
 DATABASE_PATH=./data/gpu-shopper.db
 ```
 
@@ -82,6 +86,7 @@ Or export them directly:
 export VASTAI_API_KEY=your-vastai-key
 export TENSORDOCK_API_TOKEN=your-tensordock-token
 export TENSORDOCK_AUTH_ID=your-tensordock-auth-id
+export BLUELOBSTER_API_KEY=your-bluelobster-key
 ```
 
 ### Run the Server
@@ -326,6 +331,13 @@ curl -X POST http://localhost:8080/api/v1/benchmark-runs -H 'Content-Type: appli
   "max_budget": 1.00
 }'
 
+# Run benchmarks across Blue Lobster GPUs
+curl -X POST http://localhost:8080/api/v1/benchmark-runs -H 'Content-Type: application/json' -d '{
+  "models": ["qwen2:0.5b"],
+  "gpu_types": ["RTX 5090", "RTX 8000", "RTX A4000", "RTX A5000"],
+  "providers": ["bluelobster"]
+}'
+
 # Monitor progress
 curl http://localhost:8080/api/v1/benchmark-runs/<run-id>
 ```
@@ -405,7 +417,7 @@ List available GPU offers from all providers.
 ./bin/gpu-shopper inventory [flags]
 
 Flags:
-  -p, --provider string   Filter by provider ("vastai", "tensordock")
+  -p, --provider string   Filter by provider ("vastai", "tensordock", "bluelobster")
   -g, --gpu string        Filter by GPU type (e.g., "RTX4090", "A100")
       --min-vram int      Minimum VRAM in GB
       --max-price float   Maximum price per hour in USD
@@ -848,6 +860,7 @@ See [docs/API.md](docs/API.md) for full API documentation with request/response 
 | `VASTAI_API_KEY` | Yes* | API key for Vast.ai provider |
 | `TENSORDOCK_API_TOKEN` | Yes* | API token for TensorDock provider |
 | `TENSORDOCK_AUTH_ID` | Yes* | Auth ID for TensorDock provider |
+| `BLUELOBSTER_API_KEY` | Yes* | API key for Blue Lobster provider |
 | `DATABASE_PATH` | No | SQLite database path (default: `./data/gpu-shopper.db`) |
 | `SERVER_HOST` | No | Server bind address (default: `0.0.0.0`) |
 | `SERVER_PORT` | No | Server port (default: `8080`) |
@@ -881,7 +894,7 @@ See [docs/API.md](docs/API.md) for full API documentation with request/response 
 ├─────────────────────────────────────────────────────────────┤
 │  Inventory │ Provisioner │ Lifecycle │ Cost Tracker          │
 ├─────────────────────────────────────────────────────────────┤
-│         Vast.ai Adapter    │    TensorDock Adapter           │
+│     Vast.ai Adapter  │  TensorDock Adapter  │  Blue Lobster Adapter │
 ├─────────────────────────────────────────────────────────────┤
 │                     SQLite Storage                           │
 └─────────────────────────────────────────────────────────────┘
@@ -952,7 +965,7 @@ All tests are designed to be:
 │   ├── filetransfer/     # SCP/SFTP file transfer
 │   ├── logging/          # Structured logging
 │   ├── metrics/          # Prometheus metrics
-│   ├── provider/         # Provider adapters (Vast.ai, TensorDock)
+│   ├── provider/         # Provider adapters (Vast.ai, TensorDock, Blue Lobster)
 │   ├── service/          # Business logic
 │   │   ├── benchmark/    #   Benchmark runner & scheduler
 │   │   ├── cost/         #   Cost tracking & aggregation

@@ -6,6 +6,7 @@ tags:
   - providers
   - vastai
   - tensordock
+  - bluelobster
 related:
   - "[[API]]"
   - "[[CONFIGURATION]]"
@@ -181,41 +182,145 @@ Cloud GPU Shopper tags TensorDock instances with:
 
 ---
 
+## Blue Lobster
+
+### Overview
+
+Blue Lobster Cloud offers dedicated GPU instances with fixed pricing and direct SSH access. Instances run on dedicated hardware with no oversubscription, providing consistent performance. The API uses async task-based provisioning.
+
+### Account Setup
+
+1. **Create Account**: Visit [bluelobster.ai](https://bluelobster.ai/) and sign up
+2. **Add Payment Method**: Go to Billing and add a payment method
+3. **Generate API Key**:
+   - Navigate to **Account** → **API Keys**
+   - Create a new API key
+   - Copy the key string
+
+### API Configuration
+
+```bash
+BLUELOBSTER_API_KEY=your_api_key_here
+```
+
+### Pricing Model
+
+Blue Lobster uses fixed hourly pricing:
+
+| Component | Billing |
+|-----------|---------|
+| **GPU Compute** | Fixed per-hour rate |
+| **Storage** | Included |
+| **Bandwidth** | Included |
+
+No marketplace bidding or variable pricing — rates are fixed per instance type.
+
+### Available GPUs
+
+| GPU | VRAM | Approx. Price |
+|-----|------|---------------|
+| RTX 5090 | 32 GB | $0.75/hr |
+| Quadro RTX 8000 | 48 GB | $0.50/hr |
+| RTX A5000 | 24 GB | $0.40/hr |
+| RTX A4000 | 16 GB | $0.30/hr |
+| RTX A6000 | 48 GB | $0.60/hr |
+| RTX 2080 Ti | 11 GB | $0.15/hr |
+
+### Regions
+
+| Region Code | Location |
+|-------------|----------|
+| `igl` | Wilmington, DE (production) |
+| `phl` | Philadelphia, PA (development) |
+
+### Instance Templates
+
+Blue Lobster provides OS templates for instance creation. The default GPU template is `UBUNTU-22-04-NV` which includes:
+- Ubuntu 22.04 LTS
+- NVIDIA drivers pre-installed
+- Docker + NVIDIA Container Toolkit
+
+### SSH Access
+
+- **Direct IP**: Instances get a public IP with SSH on port 22 (no port forwarding)
+- **Username**: `ubuntu`
+- **Key**: Ephemeral keypair generated per session (same as other providers)
+
+### Instance Tagging
+
+Cloud GPU Shopper tags Blue Lobster instances using the API's `metadata` field with:
+- `shopper_deployment_id` — identifies our deployment
+- `shopper_session_id` — links to our session
+- `shopper_expires_at` — expiration timestamp
+
+**Note:** Blue Lobster's API does not reliably persist metadata (BL-007), so `FeatureInstanceTags` is disabled. Orphan detection falls back to instance name matching.
+
+### Known Limitations
+
+1. **Post-Boot DKMS Rebuild**: Instances run `apt-get dist-upgrade` on boot, rebuilding NVIDIA kernel modules for 7-19 minutes. SSH becomes available before the system is fully usable. Cloud GPU Shopper handles this with:
+   - 60-second boot delay before SSH polling
+   - System readiness probe (checks dpkg locks + nvidia-smi stability)
+   - 2 consecutive SSH successes required before marking instance ready
+   - Extended timeouts for SCP uploads and benchmark execution
+
+2. **Metadata Not Persisted (BL-007)**: The API accepts metadata on instance creation but may not return it on subsequent queries. Instance tagging is disabled.
+
+3. **Power Status Gaps (BL-008)**: The `power_status` field may be null even when an instance is running. Cloud GPU Shopper infers "running" status from the presence of an IP address.
+
+4. **Async Provisioning**: Instance creation is task-based (launch returns a task ID, poll for completion). Task poll timeout is 5 minutes.
+
+5. **NVIDIA Driver/Library Version Mismatch**: During DKMS rebuild, `nvidia-smi` returns driver/library version mismatch errors. This is transient and resolves once the rebuild completes. Ollama uses CUDA directly and can function despite nvidia-smi instability.
+
+### Tips for Blue Lobster
+
+- **Allow Time for Readiness**: First-boot DKMS rebuild means instances need 7-19 minutes after SSH becomes available before GPU workloads can start. Cloud GPU Shopper handles this automatically.
+- **Fixed Pricing**: Easier to budget than marketplace providers — no bidding or price fluctuations.
+- **Direct SSH**: No port forwarding needed, simplifies connectivity.
+- **RTX 5090 Available**: One of the few providers offering the latest consumer GPU.
+
+---
+
 ## Provider Comparison
 
 ### Feature Comparison
 
-| Feature | Vast.ai | TensorDock |
-|---------|---------|------------|
-| GPU Variety | Extensive (marketplace) | Limited (owned) |
-| Pricing Model | Variable (market-based) | Fixed |
-| Spot/Interruptible | Yes | No |
-| Storage Charges | Separate | Included |
-| Bandwidth Charges | Yes | Included |
-| SSH Access | Yes | Yes |
-| Docker Support | Yes | Yes (VM-based) |
-| Instance Tagging | Labels | VM names |
-| Rate Limits | Moderate | Conservative |
+| Feature | Vast.ai | TensorDock | Blue Lobster |
+|---------|---------|------------|--------------|
+| GPU Variety | Extensive (marketplace) | Limited (owned) | Moderate (dedicated) |
+| Pricing Model | Variable (market-based) | Fixed | Fixed |
+| Spot/Interruptible | Yes | No | No |
+| Storage Charges | Separate | Included | Included |
+| Bandwidth Charges | Yes | Included | Included |
+| SSH Access | Yes (mapped ports) | Yes (dedicated IP) | Yes (direct IP, port 22) |
+| Docker Support | Yes | Yes (VM-based) | Yes (pre-installed) |
+| Instance Tagging | Labels | VM names | Metadata (limited) |
+| Rate Limits | Moderate | Conservative | 2 req/s |
+| Provisioning | Synchronous | Synchronous | Async (task-based) |
 
 ### Pricing Comparison (Approximate)
 
 *Prices vary by availability and change frequently*
 
-| GPU Type | Vast.ai Range | TensorDock Range |
-|----------|---------------|------------------|
-| RTX 4090 | $0.30-0.60/hr | $0.40-0.50/hr |
-| A100 40GB | $1.00-2.00/hr | $1.50-2.00/hr |
-| A100 80GB | $1.50-3.00/hr | $2.00-2.50/hr |
-| H100 | $2.50-4.00/hr | N/A |
+| GPU Type | Vast.ai Range | TensorDock Range | Blue Lobster |
+|----------|---------------|------------------|--------------|
+| RTX 5090 | $0.21/hr | N/A | $0.75/hr |
+| RTX 4090 | $0.30-0.60/hr | $0.40-0.50/hr | N/A |
+| RTX A5000 | N/A | N/A | $0.40/hr |
+| RTX A6000 | N/A | $0.40/hr | $0.60/hr |
+| Quadro RTX 8000 | N/A | N/A | $0.50/hr |
+| A100 40GB | $1.00-2.00/hr | $1.50-2.00/hr | N/A |
+| A100 80GB | $1.50-3.00/hr | $2.00-2.50/hr | N/A |
+| H100 | $2.50-4.00/hr | N/A | N/A |
 
 ### Reliability Comparison
 
-| Aspect | Vast.ai | TensorDock |
-|--------|---------|------------|
-| Uptime | Varies by host | Consistent |
-| Performance | Varies | Consistent |
-| Support | Community | Direct |
-| SLA | None | Service-dependent |
+| Aspect | Vast.ai | TensorDock | Blue Lobster |
+|--------|---------|------------|--------------|
+| Uptime | Varies by host | Consistent | Consistent |
+| Performance | Varies | Consistent | Consistent |
+| Support | Community | Direct | Direct |
+| SLA | None | Service-dependent | Service-dependent |
+| Boot Time | Fast (Docker) | Moderate (VM) | Slow (DKMS rebuild) |
 
 ### When to Use Each Provider
 
@@ -232,6 +337,13 @@ Cloud GPU Shopper tags TensorDock instances with:
 - Simpler billing is preferred
 - You value direct support
 - Bandwidth costs are a concern
+
+**Choose Blue Lobster when:**
+- You need RTX 5090 or Quadro RTX 8000 GPUs
+- Fixed, predictable pricing matters
+- Direct SSH access on port 22 is preferred (no port mapping)
+- Dedicated hardware with no oversubscription is important
+- You can tolerate longer boot times (DKMS rebuild)
 
 ---
 
@@ -291,5 +403,26 @@ curl "http://localhost:8080/api/v1/inventory?gpu_type=RTX%204090&max_price=0.50"
 - Check specific location availability
 - Try different GPU types
 - Contact TensorDock support if persistent
+
+### Blue Lobster
+
+**"Provider authentication failed"**
+- Verify `BLUELOBSTER_API_KEY` is correct
+- Check key hasn't been revoked
+
+**"Task poll timeout"**
+- Instance creation is async — the task may take up to 5 minutes
+- Check Blue Lobster dashboard for instance status
+- Retry the request
+
+**SSH connection works but GPU commands fail**
+- Blue Lobster instances rebuild NVIDIA kernel modules on boot (7-19 minutes)
+- Wait for the DKMS rebuild to complete — `nvidia-smi` will return errors until then
+- Cloud GPU Shopper's readiness probe handles this automatically for benchmarks
+
+**"system readiness timeout"**
+- The dpkg lock or nvidia-smi stability check exceeded 20 minutes
+- This can happen if the instance is performing a large system update
+- Check instance status on the Blue Lobster dashboard
 
 For more troubleshooting help, see [[TROUBLESHOOTING]].
