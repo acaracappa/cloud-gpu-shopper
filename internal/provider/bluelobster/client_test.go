@@ -220,7 +220,7 @@ func TestCreateInstance_HappyPath(t *testing.T) {
 	client := newTestClient(t, handler)
 	info, err := client.CreateInstance(context.Background(), provider.CreateInstanceRequest{
 		OfferID:      "bluelobster:gpu-a100:us-east-1",
-		SSHPublicKey: "ssh-rsa AAAA...",
+		SSHPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZKc67k8xgOtBqKhxpzM0lJl7rLG/dQTqWBCpHLwEJN test@example",
 		Tags: models.InstanceTags{
 			ShopperSessionID: "sess-1",
 		},
@@ -275,8 +275,9 @@ func TestCreateInstance_TaskFailed(t *testing.T) {
 
 	client := newTestClient(t, handler)
 	_, err := client.CreateInstance(context.Background(), provider.CreateInstanceRequest{
-		OfferID: "bluelobster:gpu-a100:us-east-1",
-		Tags:    models.InstanceTags{ShopperSessionID: "sess-2"},
+		OfferID:      "bluelobster:gpu-a100:us-east-1",
+		SSHPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZKc67k8xgOtBqKhxpzM0lJl7rLG/dQTqWBCpHLwEJN test@example",
+		Tags:         models.InstanceTags{ShopperSessionID: "sess-2"},
 	})
 	if err == nil {
 		t.Fatal("expected error for failed task, got nil")
@@ -332,8 +333,9 @@ func TestCreateInstance_TaskPollTimeout(t *testing.T) {
 
 	client := newTestClient(t, handler)
 	_, err := client.CreateInstance(context.Background(), provider.CreateInstanceRequest{
-		OfferID: "bluelobster:gpu-a100:us-east-1",
-		Tags:    models.InstanceTags{ShopperSessionID: "sess-timeout"},
+		OfferID:      "bluelobster:gpu-a100:us-east-1",
+		SSHPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZKc67k8xgOtBqKhxpzM0lJl7rLG/dQTqWBCpHLwEJN test@example",
+		Tags:         models.InstanceTags{ShopperSessionID: "sess-timeout"},
 	})
 	if err == nil {
 		t.Fatal("expected error for task poll timeout, got nil")
@@ -499,11 +501,12 @@ func TestListAllInstances_FiltersByTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAllInstances returned error: %v", err)
 	}
-	if len(instances) != 2 {
-		t.Fatalf("expected 2 instances, got %d", len(instances))
+	// Should only return the "shopper-" prefixed instance, filtering out "other-workload"
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 shopper-managed instance, got %d", len(instances))
 	}
 
-	// Verify first instance has parsed tags
+	// Verify the shopper instance has parsed tags
 	inst := instances[0]
 	if inst.ID != "inst-ours" {
 		t.Errorf("expected ID 'inst-ours', got '%s'", inst.ID)
@@ -527,14 +530,8 @@ func TestListAllInstances_FiltersByTags(t *testing.T) {
 		t.Error("expected StartedAt to be parsed from CreatedAt")
 	}
 
-	// Verify second instance has empty tags
-	inst2 := instances[1]
-	if inst2.ID != "inst-other" {
-		t.Errorf("expected ID 'inst-other', got '%s'", inst2.ID)
-	}
-	if inst2.Tags.ShopperSessionID != "" {
-		t.Errorf("expected empty session ID for untagged instance, got '%s'", inst2.Tags.ShopperSessionID)
-	}
+	// "inst-other" (named "other-workload") should have been filtered out
+	// since it doesn't have a "shopper-" prefix and has no metadata tags
 }
 
 func TestListAllInstances_InfersRunningFromIP(t *testing.T) {

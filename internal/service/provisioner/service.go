@@ -1460,12 +1460,12 @@ func buildBenchmarkOnStart(sessionID string, offer *models.GPUOffer) string {
 	// with the full script via SCP. This bootstrap just creates the marker
 	// structure so the runner knows to deploy the script.
 	return fmt.Sprintf(
-		"echo 'benchmark_pending' > /tmp/benchmark_status && echo '%s %s %.4f %s %s' > /tmp/benchmark_args",
-		sessionID,
-		"${MODEL:-unknown}",
+		"echo 'benchmark_pending' > /tmp/benchmark_status && echo %s %s %.4f %s %s > /tmp/benchmark_args",
+		shellQuote(sessionID),
+		shellQuote("${MODEL:-unknown}"),
 		offer.PricePerHour,
-		offer.Provider,
-		offer.Location,
+		shellQuote(offer.Provider),
+		shellQuote(offer.Location),
 	)
 }
 
@@ -1477,6 +1477,12 @@ func (s *Service) buildInstanceTags(sessionID, consumerID string, expiresAt time
 		ShopperExpiresAt:    expiresAt,
 		ShopperConsumerID:   consumerID,
 	}
+}
+
+// shellQuote wraps a string in single quotes with proper escaping for safe
+// shell interpolation, preventing injection via untrusted values like location names.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // waitForAPIVerifyAsync waits for API endpoint verification in the background

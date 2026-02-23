@@ -320,6 +320,11 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 	}
 
 	for _, vm := range vms {
+		// Only include instances managed by this application (name starts with "shopper-").
+		// This matches the filtering behavior of Vast.ai and TensorDock adapters,
+		// preventing the reconciler from interacting with non-Shopper instances.
+		_, isShopper := models.ParseLabel(vm.Name)
+
 		pricePerHour := float64(vm.PriceCentsPerHour) / 100.0
 
 		// Parse metadata tags
@@ -341,6 +346,12 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 			if sessionID, ok := models.ParseLabel(vm.Name); ok {
 				tags.ShopperSessionID = sessionID
 			}
+		}
+
+		// Skip non-Shopper instances (must check after metadata parsing since
+		// metadata could theoretically identify a shopper instance with a non-standard name)
+		if !isShopper && tags.ShopperSessionID == "" {
+			continue
 		}
 
 		// Parse started time
@@ -386,6 +397,11 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	// Parse the offer ID to extract instance type and region
 	instanceType, region, err := parseOfferID(req.OfferID)
 	if err != nil {
+		return nil, fmt.Errorf("bluelobster: CreateInstance: %w", err)
+	}
+
+	// Validate SSH public key before sending to provider API
+	if err := validateSSHPublicKey(req.SSHPublicKey); err != nil {
 		return nil, fmt.Errorf("bluelobster: CreateInstance: %w", err)
 	}
 
@@ -474,6 +490,9 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 
 // getInstanceInfo fetches VM details and returns provider.InstanceInfo
 func (c *Client) getInstanceInfo(ctx context.Context, instanceID string) (*provider.InstanceInfo, error) {
+	if err := validateInstanceID(instanceID); err != nil {
+		return nil, fmt.Errorf("bluelobster: getInstanceInfo: %w", err)
+	}
 	var vm VMInstance
 	if err := c.doRequest(ctx, http.MethodGet, "/instances/"+instanceID, nil, &vm); err != nil {
 		return nil, fmt.Errorf("bluelobster: getInstanceInfo: %w", err)
@@ -510,6 +529,10 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err er
 		c.recordAPIMetrics("DestroyInstance", startTime, err)
 	}()
 
+	if err := validateInstanceID(instanceID); err != nil {
+		return fmt.Errorf("bluelobster: DestroyInstance: %w", err)
+	}
+
 	if err = c.doRequest(ctx, http.MethodDelete, "/instances/"+instanceID, nil, nil); err != nil {
 		return fmt.Errorf("bluelobster: DestroyInstance: %w", err)
 	}
@@ -529,6 +552,10 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 		c.recordAPIResult(err)
 		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
 	}()
+
+	if err := validateInstanceID(instanceID); err != nil {
+		return nil, fmt.Errorf("bluelobster: GetInstanceStatus: %w", err)
+	}
 
 	var vm VMInstance
 	if err = c.doRequest(ctx, http.MethodGet, "/instances/"+instanceID, nil, &vm); err != nil {
@@ -669,13 +696,14 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	// Execute request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.recordAPIResult(err)
+		// Note: Do NOT call recordAPIResult here — callers record via defer
+		// to avoid double-counting against the circuit breaker threshold.
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
+	// Read response body (capped at 10 MB to prevent OOM from malicious/broken API responses)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -752,6 +780,54 @@ func (c *Client) mapHTTPError(statusCode int, message, operation string) error {
 	}
 
 	return provider.NewProviderError("bluelobster", operation, statusCode, message, baseErr)
+}
+
+// Sentinel errors for input validation
+var (
+	ErrInvalidInstanceID = errors.New("invalid instance ID")
+	ErrInvalidSSHKey     = errors.New("invalid SSH public key")
+)
+
+// maxInstanceIDLength is the maximum allowed length for instance IDs.
+const maxInstanceIDLength = 128
+
+// validateInstanceID validates that an instance ID is well-formed and safe for URL construction.
+func validateInstanceID(instanceID string) error {
+	if instanceID == "" {
+		return fmt.Errorf("%w: empty instance ID", ErrInvalidInstanceID)
+	}
+	if len(instanceID) > maxInstanceIDLength {
+		return fmt.Errorf("%w: instance ID too long (max %d characters)", ErrInvalidInstanceID, maxInstanceIDLength)
+	}
+	if strings.Contains(instanceID, "/") || strings.Contains(instanceID, "\\") {
+		return fmt.Errorf("%w: instance ID contains invalid characters", ErrInvalidInstanceID)
+	}
+	if strings.Contains(instanceID, "%2f") || strings.Contains(instanceID, "%2F") ||
+		strings.Contains(instanceID, "%5c") || strings.Contains(instanceID, "%5C") {
+		return fmt.Errorf("%w: instance ID contains invalid characters", ErrInvalidInstanceID)
+	}
+	return nil
+}
+
+// validateSSHPublicKey validates that the SSH public key is non-empty and well-formed.
+func validateSSHPublicKey(key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("%w: empty key", ErrInvalidSSHKey)
+	}
+	// Basic format check: must start with a known key type prefix
+	validPrefixes := []string{"ssh-rsa ", "ssh-ed25519 ", "ecdsa-sha2-", "ssh-dss "}
+	valid := false
+	for _, prefix := range validPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return fmt.Errorf("%w: unrecognized key type", ErrInvalidSSHKey)
+	}
+	return nil
 }
 
 // Ensure Client implements provider.Provider at compile time

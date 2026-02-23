@@ -34,8 +34,8 @@ type DatabaseConfig struct {
 // ProvidersConfig holds configuration for GPU providers
 type ProvidersConfig struct {
 	VastAI      VastAIConfig      `mapstructure:"vastai"`
-	TensorDock  TensorDockConfig  `mapstructure:"tensordock"`
 	BlueLobster BlueLobsterConfig `mapstructure:"bluelobster"`
+	TensorDock  TensorDockConfig  `mapstructure:"tensordock"`
 }
 
 // VastAIConfig holds Vast.ai specific configuration
@@ -44,19 +44,19 @@ type VastAIConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 }
 
+// BlueLobsterConfig holds Blue Lobster specific configuration
+type BlueLobsterConfig struct {
+	APIKey          string `mapstructure:"api_key"`
+	Enabled         bool   `mapstructure:"enabled"`
+	DefaultTemplate string `mapstructure:"default_template"`
+}
+
 // TensorDockConfig holds TensorDock specific configuration
 type TensorDockConfig struct {
 	AuthID       string `mapstructure:"auth_id"`
 	APIToken     string `mapstructure:"api_token"`
 	Enabled      bool   `mapstructure:"enabled"`
 	DefaultImage string `mapstructure:"default_image"` // Default OS image (e.g., "ubuntu2404")
-}
-
-// BlueLobsterConfig holds Blue Lobster specific configuration
-type BlueLobsterConfig struct {
-	APIKey          string `mapstructure:"api_key"`
-	Enabled         bool   `mapstructure:"enabled"`
-	DefaultTemplate string `mapstructure:"default_template"`
 }
 
 // InventoryConfig holds inventory cache configuration
@@ -165,10 +165,10 @@ func setDefaults(v *viper.Viper) {
 
 	// Provider defaults
 	v.SetDefault("providers.vastai.enabled", true)
-	v.SetDefault("providers.tensordock.enabled", true)
-	v.SetDefault("providers.tensordock.default_image", "ubuntu2204") // BUG-009: ubuntu2204 has better NVIDIA driver support
 	v.SetDefault("providers.bluelobster.enabled", true)
 	v.SetDefault("providers.bluelobster.default_template", "UBUNTU-22-04-NV")
+	v.SetDefault("providers.tensordock.enabled", true)
+	v.SetDefault("providers.tensordock.default_image", "ubuntu2204") // BUG-009: ubuntu2204 has better NVIDIA driver support
 
 	// Inventory defaults
 	v.SetDefault("inventory.default_cache_ttl", time.Minute)
@@ -201,10 +201,10 @@ func setDefaults(v *viper.Viper) {
 func mapEnvFileKeys(v *viper.Viper) {
 	mappings := map[string]string{
 		"vastai_api_key":           "providers.vastai.api_key",
+		"bluelobster_api_key":      "providers.bluelobster.api_key",
 		"tensordock_auth_id":       "providers.tensordock.auth_id",
 		"tensordock_api_token":     "providers.tensordock.api_token",
 		"tensordock_default_image": "providers.tensordock.default_image",
-		"bluelobster_api_key":      "providers.bluelobster.api_key",
 		"database_path":            "database.path",
 		"server_host":              "server.host",
 		"server_port":              "server.port",
@@ -233,10 +233,10 @@ func bindEnvVars(v *viper.Viper) {
 
 	// Provider credentials from environment
 	bindEnv("providers.vastai.api_key", "VASTAI_API_KEY")
+	bindEnv("providers.bluelobster.api_key", "BLUELOBSTER_API_KEY")
 	bindEnv("providers.tensordock.auth_id", "TENSORDOCK_AUTH_ID")
 	bindEnv("providers.tensordock.api_token", "TENSORDOCK_API_TOKEN")
 	bindEnv("providers.tensordock.default_image", "TENSORDOCK_DEFAULT_IMAGE")
-	bindEnv("providers.bluelobster.api_key", "BLUELOBSTER_API_KEY")
 
 	// Database path
 	bindEnv("database.path", "DATABASE_PATH")
@@ -256,13 +256,18 @@ func bindEnvVars(v *viper.Viper) {
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
 	// Check that at least one provider is configured
-	if !c.Providers.VastAI.Enabled && !c.Providers.TensorDock.Enabled && !c.Providers.BlueLobster.Enabled {
+	if !c.Providers.VastAI.Enabled && !c.Providers.BlueLobster.Enabled && !c.Providers.TensorDock.Enabled {
 		return fmt.Errorf("at least one provider must be enabled")
 	}
 
 	// Check Vast.ai config if enabled
 	if c.Providers.VastAI.Enabled && c.Providers.VastAI.APIKey == "" {
 		return fmt.Errorf("VASTAI_API_KEY is required when Vast.ai is enabled")
+	}
+
+	// Check Blue Lobster config if enabled
+	if c.Providers.BlueLobster.Enabled && c.Providers.BlueLobster.APIKey == "" {
+		return fmt.Errorf("BLUELOBSTER_API_KEY is required when Blue Lobster is enabled")
 	}
 
 	// Check TensorDock config if enabled
@@ -273,11 +278,6 @@ func (c *Config) Validate() error {
 		if c.Providers.TensorDock.APIToken == "" {
 			return fmt.Errorf("TENSORDOCK_API_TOKEN is required when TensorDock is enabled")
 		}
-	}
-
-	// Check Blue Lobster config if enabled
-	if c.Providers.BlueLobster.Enabled && c.Providers.BlueLobster.APIKey == "" {
-		return fmt.Errorf("BLUELOBSTER_API_KEY is required when Blue Lobster is enabled")
 	}
 
 	return nil

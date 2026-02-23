@@ -148,7 +148,7 @@ func (r *Runner) StartRun(ctx context.Context, req BenchmarkRunRequest) (*Benchm
 	// Determine providers to use
 	providers := req.Providers
 	if len(providers) == 0 {
-		providers = []string{"vastai", "tensordock"}
+		providers = []string{"vastai", "bluelobster", "tensordock"}
 	}
 
 	// Create manifest entries: models x GPU types x providers

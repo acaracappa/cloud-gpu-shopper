@@ -79,6 +79,16 @@ func main() {
 		logger.Info("initialized Vast.ai provider")
 	}
 
+	if cfg.Providers.BlueLobster.Enabled && cfg.Providers.BlueLobster.APIKey != "" {
+		bluelobsterClient := bluelobster.NewClient(
+			cfg.Providers.BlueLobster.APIKey,
+			bluelobster.WithDefaultTemplate(cfg.Providers.BlueLobster.DefaultTemplate),
+		)
+		providers = append(providers, bluelobsterClient)
+		logger.Info("initialized Blue Lobster provider",
+			slog.String("default_template", cfg.Providers.BlueLobster.DefaultTemplate))
+	}
+
 	if cfg.Providers.TensorDock.AuthID != "" && cfg.Providers.TensorDock.APIToken != "" {
 		tensordockClient := tensordock.NewClient(
 			cfg.Providers.TensorDock.AuthID,
@@ -88,16 +98,6 @@ func main() {
 		providers = append(providers, tensordockClient)
 		logger.Info("initialized TensorDock provider",
 			slog.String("default_image", cfg.Providers.TensorDock.DefaultImage))
-	}
-
-	if cfg.Providers.BlueLobster.APIKey != "" {
-		bluelobsterClient := bluelobster.NewClient(
-			cfg.Providers.BlueLobster.APIKey,
-			bluelobster.WithDefaultTemplate(cfg.Providers.BlueLobster.DefaultTemplate),
-		)
-		providers = append(providers, bluelobsterClient)
-		logger.Info("initialized Blue Lobster provider",
-			slog.String("default_template", cfg.Providers.BlueLobster.DefaultTemplate))
 	}
 
 	if len(providers) == 0 {

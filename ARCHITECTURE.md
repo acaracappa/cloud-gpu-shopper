@@ -43,13 +43,13 @@ Cloud GPU Shopper is a Go service that provides unified inventory and orchestrat
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                      PROVIDER ADAPTERS                            │   │
 │  ├──────────────────────────────────────────────────────────────────┤   │
-│  │  ┌─────────────────────────┐  ┌─────────────────────────────────┐│   │
-│  │  │       Vast.ai           │  │         TensorDock              ││   │
-│  │  │  - ListOffers()         │  │  - ListOffers()                 ││   │
-│  │  │  - CreateInstance()     │  │  - CreateInstance()             ││   │
-│  │  │  - DestroyInstance()    │  │  - DestroyInstance()            ││   │
-│  │  │  - GetInstanceStatus()  │  │  - GetInstanceStatus()          ││   │
-│  │  └─────────────────────────┘  └─────────────────────────────────┘│   │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐│   │
+│  │  │     Vast.ai      │  │   Blue Lobster   │  │    TensorDock    ││   │
+│  │  │ - ListOffers()   │  │ - ListOffers()   │  │ - ListOffers()   ││   │
+│  │  │ - CreateInstance()│  │ - CreateInstance()│  │ - CreateInstance()││   │
+│  │  │ - DestroyInstance │  │ - DestroyInstance │  │ - DestroyInstance ││   │
+│  │  │ - GetInstStatus() │  │ - GetInstStatus() │  │ - GetInstStatus() ││   │
+│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘│   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
@@ -102,6 +102,7 @@ cloud-gpu-shopper/
 │   ├── provider/             # Provider adapters
 │   │   ├── interface.go      #   Common interface + error types
 │   │   ├── vastai/           #   Vast.ai adapter
+│   │   ├── bluelobster/      #   Blue Lobster adapter
 │   │   └── tensordock/       #   TensorDock adapter
 │   ├── service/              # Business logic
 │   │   ├── benchmark/        #   Benchmark runner & scheduler
@@ -140,7 +141,7 @@ cloud-gpu-shopper/
 ```go
 type GPUOffer struct {
     ID           string    `json:"id"`
-    Provider     string    `json:"provider"`      // "vastai" | "tensordock"
+    Provider     string    `json:"provider"`      // "vastai" | "bluelobster" | "tensordock"
     ProviderID   string    `json:"provider_id"`   // Provider's ID for this offer
     GPUType      string    `json:"gpu_type"`      // "RTX 4090", "A100", etc.
     GPUCount     int       `json:"gpu_count"`
@@ -218,7 +219,7 @@ All providers implement this interface:
 
 ```go
 type Provider interface {
-    // Name returns the provider identifier ("vastai", "tensordock")
+    // Name returns the provider identifier ("vastai", "bluelobster", "tensordock")
     Name() string
 
     // ListOffers returns available GPU offers
@@ -370,6 +371,9 @@ database:
 providers:
   vastai:
     api_key: "${VASTAI_API_KEY}"
+    enabled: true
+  bluelobster:
+    api_key: "${BLUELOBSTER_API_KEY}"
     enabled: true
   tensordock:
     auth_id: "${TENSORDOCK_AUTH_ID}"

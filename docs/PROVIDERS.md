@@ -115,73 +115,6 @@ POST /api/v1/sessions
 
 ---
 
-## TensorDock
-
-### Overview
-
-TensorDock operates its own infrastructure, providing more consistent performance and availability compared to marketplace models.
-
-### Account Setup
-
-1. **Create Account**: Visit [tensordock.com](https://tensordock.com/) and sign up
-2. **Add Payment Method**: Go to Billing and add a credit card
-3. **Generate API Credentials**:
-   - Navigate to **Dashboard** → **API** → **Credentials**
-   - Create new credentials
-   - Note both:
-     - **Authorization ID** (for `TENSORDOCK_AUTH_ID`)
-     - **API Token** (for `TENSORDOCK_API_TOKEN`)
-
-### API Configuration
-
-```bash
-TENSORDOCK_AUTH_ID=your_authorization_id_here
-TENSORDOCK_API_TOKEN=your_api_token_here
-```
-
-### Pricing Model
-
-TensorDock uses straightforward hourly pricing:
-
-| Component | Billing |
-|-----------|---------|
-| **GPU Compute** | Per-hour while running |
-| **Storage** | Included in compute price |
-| **Bandwidth** | Included |
-
-No separate storage or bandwidth charges simplifies cost calculation.
-
-### Instance Tagging
-
-Cloud GPU Shopper tags TensorDock instances with:
-- Session ID in the VM name
-- Deployment ID for reconciliation
-- Metadata for lifecycle management
-
-### Provider-Specific Features
-
-1. **Default OS Image**: Configure via `TENSORDOCK_DEFAULT_IMAGE` (default: `ubuntu2404`)
-
-2. **Location-Based Deployment**: TensorDock organizes resources by geographic location
-
-3. **Consistent Pricing**: Unlike marketplace models, prices are fixed by TensorDock
-
-### Known Limitations
-
-1. **Limited GPU Variety**: Fewer GPU types compared to Vast.ai marketplace
-
-2. **Regional Availability**: Not all GPU types available in all regions
-
-3. **API Rate Limits**: TensorDock recommends ~1 request per second. Cloud GPU Shopper handles this automatically.
-
-### Tips for TensorDock
-
-- **Check Location Availability**: GPU types vary by datacenter
-- **Predictable Costs**: Easier to budget than marketplace pricing
-- **Reliable Performance**: Infrastructure-owned machines have consistent specs
-
----
-
 ## Blue Lobster
 
 ### Overview
@@ -280,47 +213,114 @@ Cloud GPU Shopper tags Blue Lobster instances using the API's `metadata` field w
 
 ---
 
+## TensorDock
+
+### Overview
+
+TensorDock operates its own infrastructure, providing more consistent performance and availability compared to marketplace models.
+
+### Account Setup
+
+1. **Create Account**: Visit [tensordock.com](https://tensordock.com/) and sign up
+2. **Add Payment Method**: Go to Billing and add a credit card
+3. **Generate API Credentials**:
+   - Navigate to **Dashboard** → **API** → **Credentials**
+   - Create new credentials
+   - Note both:
+     - **Authorization ID** (for `TENSORDOCK_AUTH_ID`)
+     - **API Token** (for `TENSORDOCK_API_TOKEN`)
+
+### API Configuration
+
+```bash
+TENSORDOCK_AUTH_ID=your_authorization_id_here
+TENSORDOCK_API_TOKEN=your_api_token_here
+```
+
+### Pricing Model
+
+TensorDock uses straightforward hourly pricing:
+
+| Component | Billing |
+|-----------|---------|
+| **GPU Compute** | Per-hour while running |
+| **Storage** | Included in compute price |
+| **Bandwidth** | Included |
+
+No separate storage or bandwidth charges simplifies cost calculation.
+
+### Instance Tagging
+
+Cloud GPU Shopper tags TensorDock instances with:
+- Session ID in the VM name
+- Deployment ID for reconciliation
+- Metadata for lifecycle management
+
+### Provider-Specific Features
+
+1. **Default OS Image**: Configure via `TENSORDOCK_DEFAULT_IMAGE` (default: `ubuntu2404`)
+
+2. **Location-Based Deployment**: TensorDock organizes resources by geographic location
+
+3. **Consistent Pricing**: Unlike marketplace models, prices are fixed by TensorDock
+
+### Known Limitations
+
+1. **Limited GPU Variety**: Fewer GPU types compared to Vast.ai marketplace
+
+2. **Regional Availability**: Not all GPU types available in all regions
+
+3. **API Rate Limits**: TensorDock recommends ~1 request per second. Cloud GPU Shopper handles this automatically.
+
+### Tips for TensorDock
+
+- **Check Location Availability**: GPU types vary by datacenter
+- **Predictable Costs**: Easier to budget than marketplace pricing
+- **Reliable Performance**: Infrastructure-owned machines have consistent specs
+
+---
+
 ## Provider Comparison
 
 ### Feature Comparison
 
-| Feature | Vast.ai | TensorDock | Blue Lobster |
-|---------|---------|------------|--------------|
-| GPU Variety | Extensive (marketplace) | Limited (owned) | Moderate (dedicated) |
+| Feature | Vast.ai | Blue Lobster | TensorDock |
+|---------|---------|--------------|------------|
+| GPU Variety | Extensive (marketplace) | Moderate (dedicated) | Limited (owned) |
 | Pricing Model | Variable (market-based) | Fixed | Fixed |
 | Spot/Interruptible | Yes | No | No |
 | Storage Charges | Separate | Included | Included |
 | Bandwidth Charges | Yes | Included | Included |
-| SSH Access | Yes (mapped ports) | Yes (dedicated IP) | Yes (direct IP, port 22) |
-| Docker Support | Yes | Yes (VM-based) | Yes (pre-installed) |
-| Instance Tagging | Labels | VM names | Metadata (limited) |
-| Rate Limits | Moderate | Conservative | 2 req/s |
-| Provisioning | Synchronous | Synchronous | Async (task-based) |
+| SSH Access | Yes (mapped ports) | Yes (direct IP, port 22) | Yes (dedicated IP) |
+| Docker Support | Yes | Yes (pre-installed) | Yes (VM-based) |
+| Instance Tagging | Labels | Metadata (limited) | VM names |
+| Rate Limits | Moderate | 2 req/s | Conservative |
+| Provisioning | Synchronous | Async (task-based) | Synchronous |
 
 ### Pricing Comparison (Approximate)
 
 *Prices vary by availability and change frequently*
 
-| GPU Type | Vast.ai Range | TensorDock Range | Blue Lobster |
-|----------|---------------|------------------|--------------|
-| RTX 5090 | $0.21/hr | N/A | $0.75/hr |
-| RTX 4090 | $0.30-0.60/hr | $0.40-0.50/hr | N/A |
-| RTX A5000 | N/A | N/A | $0.40/hr |
-| RTX A6000 | N/A | $0.40/hr | $0.60/hr |
-| Quadro RTX 8000 | N/A | N/A | $0.50/hr |
-| A100 40GB | $1.00-2.00/hr | $1.50-2.00/hr | N/A |
-| A100 80GB | $1.50-3.00/hr | $2.00-2.50/hr | N/A |
+| GPU Type | Vast.ai Range | Blue Lobster | TensorDock Range |
+|----------|---------------|--------------|------------------|
+| RTX 5090 | $0.21/hr | $0.75/hr | N/A |
+| RTX 4090 | $0.30-0.60/hr | N/A | $0.40-0.50/hr |
+| RTX A5000 | N/A | $0.40/hr | N/A |
+| RTX A6000 | N/A | $0.60/hr | $0.40/hr |
+| Quadro RTX 8000 | N/A | $0.50/hr | N/A |
+| A100 40GB | $1.00-2.00/hr | N/A | $1.50-2.00/hr |
+| A100 80GB | $1.50-3.00/hr | N/A | $2.00-2.50/hr |
 | H100 | $2.50-4.00/hr | N/A | N/A |
 
 ### Reliability Comparison
 
-| Aspect | Vast.ai | TensorDock | Blue Lobster |
-|--------|---------|------------|--------------|
+| Aspect | Vast.ai | Blue Lobster | TensorDock |
+|--------|---------|--------------|------------|
 | Uptime | Varies by host | Consistent | Consistent |
 | Performance | Varies | Consistent | Consistent |
 | Support | Community | Direct | Direct |
 | SLA | None | Service-dependent | Service-dependent |
-| Boot Time | Fast (Docker) | Moderate (VM) | Slow (DKMS rebuild) |
+| Boot Time | Fast (Docker) | Slow (DKMS rebuild) | Moderate (VM) |
 
 ### When to Use Each Provider
 
@@ -331,19 +331,19 @@ Cloud GPU Shopper tags Blue Lobster instances using the API's `metadata` field w
 - You need interruptible/spot pricing
 - Maximum GPU variety is important
 
-**Choose TensorDock when:**
-- Predictable pricing is important
-- Consistent performance is critical
-- Simpler billing is preferred
-- You value direct support
-- Bandwidth costs are a concern
-
 **Choose Blue Lobster when:**
 - You need RTX 5090 or Quadro RTX 8000 GPUs
 - Fixed, predictable pricing matters
 - Direct SSH access on port 22 is preferred (no port mapping)
 - Dedicated hardware with no oversubscription is important
 - You can tolerate longer boot times (DKMS rebuild)
+
+**Choose TensorDock when:**
+- Predictable pricing is important
+- Consistent performance is critical
+- Simpler billing is preferred
+- You value direct support
+- Bandwidth costs are a concern
 
 ---
 
@@ -393,17 +393,6 @@ curl "http://localhost:8080/api/v1/inventory?gpu_type=RTX%204090&max_price=0.50"
 - Allow 10-15 seconds for SSH key propagation
 - Check if host is online
 
-### TensorDock
-
-**"Provider authentication failed"**
-- Verify both `TENSORDOCK_AUTH_ID` and `TENSORDOCK_API_TOKEN`
-- Check credentials haven't been revoked
-
-**"No offers available"**
-- Check specific location availability
-- Try different GPU types
-- Contact TensorDock support if persistent
-
 ### Blue Lobster
 
 **"Provider authentication failed"**
@@ -424,5 +413,16 @@ curl "http://localhost:8080/api/v1/inventory?gpu_type=RTX%204090&max_price=0.50"
 - The dpkg lock or nvidia-smi stability check exceeded 20 minutes
 - This can happen if the instance is performing a large system update
 - Check instance status on the Blue Lobster dashboard
+
+### TensorDock
+
+**"Provider authentication failed"**
+- Verify both `TENSORDOCK_AUTH_ID` and `TENSORDOCK_API_TOKEN`
+- Check credentials haven't been revoked
+
+**"No offers available"**
+- Check specific location availability
+- Try different GPU types
+- Contact TensorDock support if persistent
 
 For more troubleshooting help, see [[TROUBLESHOOTING]].

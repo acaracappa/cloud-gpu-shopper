@@ -48,14 +48,18 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```bash
+# Vast.ai API Credentials
+# Get from: https://cloud.vast.ai/api/
+VASTAI_API_KEY=your-api-key-here
+
+# Blue Lobster API Credentials
+# Get from: https://bluelobster.ai/ → Account → API Keys
+BLUELOBSTER_API_KEY=your-api-key-here
+
 # TensorDock API Credentials
 # Get from: https://dashboard.tensordock.com/api
 TENSORDOCK_AUTH_ID=your-auth-id-here
 TENSORDOCK_API_TOKEN=your-api-token-here
-
-# Vast.ai API Credentials
-# Get from: https://cloud.vast.ai/api/
-VASTAI_API_KEY=your-api-key-here
 
 # Database
 DATABASE_PATH=./data/gpu-shopper.db
@@ -65,7 +69,7 @@ SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 ```
 
-**Note:** At least one provider (Vast.ai or TensorDock) must be configured for the service to work.
+**Note:** At least one provider (Vast.ai, Blue Lobster, or TensorDock) must be configured for the service to work.
 
 ### 3. Build the Project
 
@@ -267,6 +271,7 @@ go test -tags=live ./test/live/...
 
 **Requirements for live tests:**
 - `VASTAI_API_KEY` environment variable for Vast.ai tests
+- `BLUELOBSTER_API_KEY` for Blue Lobster tests
 - `TENSORDOCK_AUTH_ID` and `TENSORDOCK_API_TOKEN` for TensorDock tests
 - Budget allocation (tests have spending limits built in)
 
@@ -808,7 +813,7 @@ When reporting a bug, please include as much detail as possible:
 - Operating system and version
 - Relevant environment variables (redact API keys!)
 - Log output with `DEBUG` level enabled
-- Provider being used (Vast.ai, TensorDock, or both)
+- Provider being used (Vast.ai, Blue Lobster, TensorDock, or multiple)
 
 **Bug Report Template:**
 
@@ -918,6 +923,7 @@ Understanding issue labels helps you find relevant issues and understand the tri
 | `good first issue` | Suitable for new contributors |
 | `help wanted` | Extra attention needed |
 | `provider:vastai` | Related to Vast.ai provider |
+| `provider:bluelobster` | Related to Blue Lobster provider |
 | `provider:tensordock` | Related to TensorDock provider |
 | `priority:high` | Critical issues needing immediate attention |
 | `priority:low` | Nice-to-have, can be addressed later |
