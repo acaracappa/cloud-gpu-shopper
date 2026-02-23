@@ -1,6 +1,7 @@
 package bluelobster
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -267,33 +268,280 @@ func (c *Client) SupportsFeature(feature provider.ProviderFeature) bool {
 }
 
 // ListOffers returns available GPU offers from Blue Lobster
-func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) ([]models.GPUOffer, error) {
-	// Stub - will be implemented in Task 3
-	return nil, fmt.Errorf("bluelobster: ListOffers not yet implemented")
+func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (offers []models.GPUOffer, err error) {
+	startTime := time.Now()
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListOffers", startTime, err)
+	}()
+
+	var resp AvailableResponse
+	if err = c.doRequest(ctx, http.MethodGet, "/instances/available", nil, &resp); err != nil {
+		return nil, fmt.Errorf("bluelobster: ListOffers: %w", err)
+	}
+
+	for _, inst := range resp.Data {
+		// Skip CPU-only instances
+		if inst.InstanceType.Specs.GPUs == 0 {
+			continue
+		}
+
+		// Create one offer per region
+		for _, region := range inst.Regions {
+			offer := inst.ToGPUOffer(region)
+			if offer.MatchesFilter(filter) {
+				offers = append(offers, offer)
+			}
+		}
+	}
+
+	c.logger.Debug("ListOffers completed",
+		slog.String("provider", "bluelobster"),
+		slog.Int("total_offers", len(offers)),
+	)
+
+	return offers, nil
 }
 
 // ListAllInstances returns all instances with our tags (for reconciliation)
-func (c *Client) ListAllInstances(ctx context.Context) ([]provider.ProviderInstance, error) {
-	// Stub - will be implemented in Task 6
-	return nil, fmt.Errorf("bluelobster: ListAllInstances not yet implemented")
+func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.ProviderInstance, err error) {
+	startTime := time.Now()
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("ListAllInstances", startTime, err)
+	}()
+
+	// The /instances endpoint returns a plain array of VMInstance
+	var vms []VMInstance
+	if err = c.doRequest(ctx, http.MethodGet, "/instances", nil, &vms); err != nil {
+		return nil, fmt.Errorf("bluelobster: ListAllInstances: %w", err)
+	}
+
+	for _, vm := range vms {
+		pricePerHour := float64(vm.PriceCentsPerHour) / 100.0
+
+		// Parse metadata tags
+		var tags models.InstanceTags
+		if vm.Metadata != nil {
+			tags.ShopperSessionID = vm.Metadata["shopper_session_id"]
+			tags.ShopperDeploymentID = vm.Metadata["shopper_deployment_id"]
+			tags.ShopperConsumerID = vm.Metadata["shopper_consumer_id"]
+			if expiresStr, ok := vm.Metadata["shopper_expires_at"]; ok && expiresStr != "" {
+				if t, parseErr := time.Parse(time.RFC3339, expiresStr); parseErr == nil {
+					tags.ShopperExpiresAt = t
+				}
+			}
+		}
+
+		// Parse started time
+		var startedAt time.Time
+		if vm.CreatedAt != "" {
+			if t, parseErr := time.Parse(time.RFC3339, vm.CreatedAt); parseErr == nil {
+				startedAt = t
+			}
+		}
+
+		instances = append(instances, provider.ProviderInstance{
+			ID:           vm.UUID,
+			Name:         vm.Name,
+			Status:       vm.PowerStatus,
+			StartedAt:    startedAt,
+			Tags:         tags,
+			PricePerHour: pricePerHour,
+		})
+	}
+
+	c.logger.Debug("ListAllInstances completed",
+		slog.String("provider", "bluelobster"),
+		slog.Int("count", len(instances)),
+	)
+
+	return instances, nil
 }
 
 // CreateInstance provisions a new GPU instance
-func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
-	// Stub - will be implemented in Task 4
-	return nil, fmt.Errorf("bluelobster: CreateInstance not yet implemented")
+func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstanceRequest) (info *provider.InstanceInfo, err error) {
+	startTime := time.Now()
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("CreateInstance", startTime, err)
+	}()
+
+	// Parse the offer ID to extract instance type and region
+	instanceType, region, err := parseOfferID(req.OfferID)
+	if err != nil {
+		return nil, fmt.Errorf("bluelobster: CreateInstance: %w", err)
+	}
+
+	// Build the launch request
+	launchReq := LaunchInstanceRequest{
+		Region:       region,
+		InstanceType: instanceType,
+		Username:     defaultSSHUser,
+		SSHKey:       req.SSHPublicKey,
+		Name:         req.Tags.ToLabel(),
+		TemplateName: c.defaultTemplate,
+		Metadata:     req.Tags.ToMap(),
+	}
+
+	body, err := json.Marshal(launchReq)
+	if err != nil {
+		return nil, fmt.Errorf("bluelobster: CreateInstance: marshal request: %w", err)
+	}
+
+	var launchResp LaunchInstanceResponse
+	if err = c.doRequest(ctx, http.MethodPost, "/instances/launch-instance", bytes.NewReader(body), &launchResp); err != nil {
+		return nil, fmt.Errorf("bluelobster: CreateInstance: %w", err)
+	}
+
+	taskID := launchResp.Data.TaskID
+	if taskID == "" {
+		return nil, fmt.Errorf("bluelobster: CreateInstance: no task_id in launch response")
+	}
+
+	c.logger.Info("instance launch initiated",
+		slog.String("provider", "bluelobster"),
+		slog.String("task_id", taskID),
+		slog.String("instance_type", instanceType),
+		slog.String("region", region),
+	)
+
+	// Poll the task until completion or timeout
+	pollDeadline := time.Now().Add(taskPollTimeout)
+	for {
+		if time.Now().After(pollDeadline) {
+			// Timeout - return partial info with provisioning status
+			instanceID := ""
+			if len(launchResp.Data.InstanceIDs) > 0 {
+				instanceID = launchResp.Data.InstanceIDs[0]
+			}
+			return &provider.InstanceInfo{
+				ProviderInstanceID: instanceID,
+				Status:             "provisioning",
+			}, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(taskPollInterval):
+		}
+
+		var taskResp TaskResponse
+		if err = c.doRequest(ctx, http.MethodGet, "/tasks/"+taskID, nil, &taskResp); err != nil {
+			c.logger.Warn("failed to poll task status",
+				slog.String("task_id", taskID),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+
+		switch taskResp.Status {
+		case "COMPLETED":
+			// Get the instance ID from the task params or launch response
+			instanceID := taskResp.Params.VMUUID
+			if instanceID == "" && len(launchResp.Data.InstanceIDs) > 0 {
+				instanceID = launchResp.Data.InstanceIDs[0]
+			}
+			if instanceID == "" {
+				return nil, fmt.Errorf("bluelobster: CreateInstance: task completed but no instance ID found")
+			}
+
+			// Fetch the full instance details
+			return c.getInstanceInfo(ctx, instanceID)
+
+		case "FAILED":
+			msg := taskResp.Message
+			if msg == "" {
+				msg = "task failed"
+			}
+			return nil, provider.NewProviderError("bluelobster", "CreateInstance", 0, msg, provider.ErrProviderError)
+		}
+		// Otherwise keep polling (PENDING, IN_PROGRESS, etc.)
+	}
+}
+
+// getInstanceInfo fetches VM details and returns provider.InstanceInfo
+func (c *Client) getInstanceInfo(ctx context.Context, instanceID string) (*provider.InstanceInfo, error) {
+	var vm VMInstance
+	if err := c.doRequest(ctx, http.MethodGet, "/instances/"+instanceID, nil, &vm); err != nil {
+		return nil, fmt.Errorf("bluelobster: getInstanceInfo: %w", err)
+	}
+
+	pricePerHour := float64(vm.PriceCentsPerHour) / 100.0
+
+	sshUser := vm.VMUsername
+	if sshUser == "" {
+		sshUser = defaultSSHUser
+	}
+
+	return &provider.InstanceInfo{
+		ProviderInstanceID: vm.UUID,
+		SSHHost:            vm.IPAddress,
+		SSHPort:            defaultSSHPort,
+		SSHUser:            sshUser,
+		Status:             vm.PowerStatus,
+		ActualPricePerHour: pricePerHour,
+	}, nil
 }
 
 // DestroyInstance tears down a GPU instance
-func (c *Client) DestroyInstance(ctx context.Context, instanceID string) error {
-	// Stub - will be implemented in Task 5
-	return fmt.Errorf("bluelobster: DestroyInstance not yet implemented")
+func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err error) {
+	startTime := time.Now()
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("DestroyInstance", startTime, err)
+	}()
+
+	if err = c.doRequest(ctx, http.MethodDelete, "/instances/"+instanceID, nil, nil); err != nil {
+		return fmt.Errorf("bluelobster: DestroyInstance: %w", err)
+	}
+
+	c.logger.Info("instance destroyed",
+		slog.String("provider", "bluelobster"),
+		slog.String("instance_id", instanceID),
+	)
+
+	return nil
 }
 
 // GetInstanceStatus returns current status of an instance
-func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
-	// Stub - will be implemented in Task 5
-	return nil, fmt.Errorf("bluelobster: GetInstanceStatus not yet implemented")
+func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (status *provider.InstanceStatus, err error) {
+	startTime := time.Now()
+	defer func() {
+		c.recordAPIResult(err)
+		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
+	}()
+
+	var vm VMInstance
+	if err = c.doRequest(ctx, http.MethodGet, "/instances/"+instanceID, nil, &vm); err != nil {
+		return nil, fmt.Errorf("bluelobster: GetInstanceStatus: %w", err)
+	}
+
+	running := vm.PowerStatus == "running"
+
+	sshUser := vm.VMUsername
+	if sshUser == "" {
+		sshUser = defaultSSHUser
+	}
+
+	status = &provider.InstanceStatus{
+		Status:   vm.PowerStatus,
+		Running:  running,
+		SSHHost:  vm.IPAddress,
+		SSHPort:  defaultSSHPort,
+		SSHUser:  sshUser,
+		PublicIP: vm.IPAddress,
+	}
+
+	// Parse created_at if present
+	if vm.CreatedAt != "" {
+		if t, parseErr := time.Parse(time.RFC3339, vm.CreatedAt); parseErr == nil {
+			status.StartedAt = t
+		}
+	}
+
+	return status, nil
 }
 
 // =============================================================================
@@ -481,4 +729,3 @@ func (c *Client) mapHTTPError(statusCode int, message, operation string) error {
 
 // Ensure Client implements provider.Provider at compile time
 var _ provider.Provider = (*Client)(nil)
-

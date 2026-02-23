@@ -41,11 +41,11 @@ type InstanceType struct {
 // InstanceSpec describes the hardware specifications of an instance type.
 // GPUModel is polymorphic: the API may return a string or []string.
 type InstanceSpec struct {
-	VCPUs     int              `json:"vcpus"`
-	MemoryGiB int              `json:"memory_gib"`
+	VCPUs      int             `json:"vcpus"`
+	MemoryGiB  int             `json:"memory_gib"`
 	StorageGiB int             `json:"storage_gib"`
-	GPUs      int              `json:"gpus"`
-	GPUModel  json.RawMessage  `json:"gpu_model"`
+	GPUs       int             `json:"gpus"`
+	GPUModel   json.RawMessage `json:"gpu_model"`
 }
 
 // ParseGPUModel extracts the GPU model name from the polymorphic GPUModel field.
