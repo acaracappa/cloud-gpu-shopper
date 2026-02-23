@@ -253,9 +253,19 @@ func (r *Runner) CancelRun(ctx context.Context, runID string) error {
 // processRun processes all manifest entries for a run.
 func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 	defer func() {
+		// Cancel the run context on exit (natural completion, budget exhaustion, etc.)
+		// so any in-flight operations (e.g., Blue Lobster task polling) abort promptly.
 		r.mu.Lock()
+		if cancel, ok := r.cancels[run.ID]; ok {
+			cancel()
+		}
 		delete(r.cancels, run.ID)
 		r.mu.Unlock()
+
+		// Sweep for orphaned sessions: destroy any sessions from this run's
+		// manifest entries that are still alive (e.g., worker provisioned an
+		// instance but was interrupted before cleanup).
+		r.cleanupRunSessions(run.ID)
 	}()
 
 	r.mu.Lock()
@@ -651,6 +661,38 @@ func (r *Runner) cleanupSession(ctx context.Context, sessionID string) {
 		r.logger.Error("failed to destroy benchmark session",
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()))
+	}
+}
+
+// cleanupRunSessions destroys any sessions still active from a completed/cancelled run.
+// This catches orphans left by workers that were interrupted mid-provisioning.
+func (r *Runner) cleanupRunSessions(runID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	entries, err := r.manifest.ListByRun(ctx, runID)
+	if err != nil {
+		r.logger.Error("failed to list run entries for cleanup", slog.String("run_id", runID), slog.String("error", err.Error()))
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.SessionID == "" {
+			continue
+		}
+		// Check if session is still active
+		s, err := r.provisioner.GetSession(ctx, entry.SessionID)
+		if err != nil {
+			continue // Session not found or already gone
+		}
+		if s.Status == models.StatusRunning || s.Status == models.StatusProvisioning {
+			r.logger.Warn("destroying orphaned benchmark session",
+				slog.String("run_id", runID),
+				slog.String("session_id", entry.SessionID),
+				slog.String("entry_id", entry.ID),
+				slog.String("status", string(s.Status)))
+			r.cleanupSession(ctx, entry.SessionID)
+		}
 	}
 }
 
