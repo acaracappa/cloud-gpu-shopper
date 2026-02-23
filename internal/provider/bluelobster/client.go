@@ -333,6 +333,14 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 			}
 		}
 
+		// BL-007: Blue Lobster doesn't persist metadata. Fall back to parsing
+		// the session ID from the instance name (format: "shopper-{session_id}").
+		if tags.ShopperSessionID == "" {
+			if sessionID, ok := models.ParseLabel(vm.Name); ok {
+				tags.ShopperSessionID = sessionID
+			}
+		}
+
 		// Parse started time
 		var startedAt time.Time
 		if vm.CreatedAt != "" {
@@ -391,10 +399,6 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	if err != nil {
 		return nil, fmt.Errorf("bluelobster: CreateInstance: marshal request: %w", err)
 	}
-
-	c.logger.Debug("CreateInstance request body",
-		slog.String("body", string(body)),
-	)
 
 	var launchResp LaunchInstanceResponse
 	if err = c.doRequest(ctx, http.MethodPost, "/instances/launch-instance", bytes.NewReader(body), &launchResp); err != nil {
@@ -478,12 +482,18 @@ func (c *Client) getInstanceInfo(ctx context.Context, instanceID string) (*provi
 		sshUser = defaultSSHUser
 	}
 
+	// BL-008: Handle null power_status from API
+	powerStatus := vm.PowerStatus
+	if powerStatus == "" && vm.IPAddress != "" {
+		powerStatus = "running"
+	}
+
 	return &provider.InstanceInfo{
 		ProviderInstanceID: vm.UUID,
 		SSHHost:            vm.IPAddress,
 		SSHPort:            defaultSSHPort,
 		SSHUser:            sshUser,
-		Status:             vm.PowerStatus,
+		Status:             powerStatus,
 		ActualPricePerHour: pricePerHour,
 	}, nil
 }
@@ -521,7 +531,13 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 		return nil, fmt.Errorf("bluelobster: GetInstanceStatus: %w", err)
 	}
 
-	running := vm.PowerStatus == "running"
+	// BL-008: Blue Lobster may return null power_status on GET /instances/{id}
+	// even when the instance is running. Infer "running" from IP presence.
+	powerStatus := vm.PowerStatus
+	if powerStatus == "" && vm.IPAddress != "" {
+		powerStatus = "running"
+	}
+	running := powerStatus == "running"
 
 	sshUser := vm.VMUsername
 	if sshUser == "" {
@@ -529,7 +545,7 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 	}
 
 	status = &provider.InstanceStatus{
-		Status:   vm.PowerStatus,
+		Status:   powerStatus,
 		Running:  running,
 		SSHHost:  vm.IPAddress,
 		SSHPort:  defaultSSHPort,

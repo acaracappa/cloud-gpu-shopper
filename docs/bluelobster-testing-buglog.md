@@ -37,8 +37,8 @@ All 3 instances provisioned successfully, CUDA verified, SSH reachable, cleanly 
 | BL-004 | High | SSH public key trailing newline rejected by API regex | **Fixed** | Added `strings.TrimSpace(req.SSHPublicKey)` before sending to Blue Lobster. `ssh.MarshalAuthorizedKey()` adds `\n` which fails their regex `$`. |
 | BL-005 | Low | Error responses missing field-level detail | **Fixed** | Added `FieldError` type and `Errors []FieldError` to `ErrorResponse`. Parser now appends `[field: message]` to error string. |
 | BL-006 | Info | POST /sessions response empty on client side (curl exit 52) | **Not a bug** | CreateInstance blocks for ~1-2 min during task polling. Long-lived HTTP request + curl default timeout = empty reply. This affects all providers equally. Use `--max-time 240` for curl. |
-| BL-007 | High | Metadata not persisted by Blue Lobster API | **Open** | We send `metadata` map in launch request, but GET /instances returns `metadata: null`. This breaks orphan detection and reconciliation tag matching. **Workaround**: Session ID is embedded in the instance `name` field (`shopper-{session_id}`), so we can parse that as a fallback for orphan matching. |
-| BL-008 | Medium | `power_status: null` on running instances | **Open** | GET /instances/{id} returns `power_status: null` even when instance is running. GET /instances (list) returns `power_status: "running"`. Our `GetInstanceStatus` should handle null gracefully. |
+| BL-007 | High | Metadata not persisted by Blue Lobster API | **Mitigated** | API doesn't persist metadata. `ListAllInstances` now falls back to parsing session ID from instance `name` field via `ParseLabel()`. Deployment ID matching still won't work (provider-side limitation), but orphan detection by provider ID is unaffected. |
+| BL-008 | Medium | `power_status: null` on running instances | **Fixed** | GET /instances/{id} returns null power_status. `GetInstanceStatus` and `getInstanceInfo` now infer "running" when IP is present and power_status is empty. |
 | BL-009 | Low | `phl` datacenter (Philadelphia) shows no capacity | **Not a bug** | The `phl` datacenter had RTX 2080 Ti availability at design time but was unavailable during testing. Normal capacity fluctuation for a development datacenter. |
 
 ---
@@ -55,11 +55,10 @@ All 3 instances provisioned successfully, CUDA verified, SSH reachable, cleanly 
 
 ---
 
-## Remediation Priority
+## Remediation Status
 
-### Must Fix Before Merge
-1. **BL-007** — Orphan detection via name field fallback (metadata not persisted)
-2. **BL-008** — Handle null power_status gracefully
-
-### Fixed During Testing
-- BL-001 through BL-005 all fixed and committed
+### All Issues Resolved
+- BL-001 through BL-005: Fixed during testing session
+- BL-007: Mitigated with name-based session ID fallback
+- BL-008: Fixed with IP-based status inference
+- BL-006, BL-009: Not bugs (pre-existing behavior / capacity fluctuation)
