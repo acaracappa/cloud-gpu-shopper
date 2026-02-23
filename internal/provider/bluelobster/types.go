@@ -101,16 +101,12 @@ type LaunchInstanceRequest struct {
 }
 
 // LaunchInstanceResponse is the response from launching an instance.
+// The Blue Lobster API returns fields at the top level (not wrapped in "data").
 type LaunchInstanceResponse struct {
-	Data LaunchData `json:"data"`
-}
-
-// LaunchData contains the result of a launch request.
-type LaunchData struct {
-	InstanceIDs []string `json:"instance_ids"`
-	TaskID      string   `json:"task_id"`
-	AssignedIP  string   `json:"assigned_ip"`
-	Status      string   `json:"status"`
+	TaskID     string `json:"task_id"`
+	VMUUID     string `json:"vm_uuid"`
+	AssignedIP string `json:"assigned_ip"`
+	Status     string `json:"status"`
 }
 
 // =============================================================================
@@ -172,7 +168,14 @@ type DeleteInstanceResponse struct {
 
 // ErrorResponse represents an API error.
 type ErrorResponse struct {
-	Error   string `json:"error"`
+	Error   string       `json:"error"`
+	Message string       `json:"message"`
+	Errors  []FieldError `json:"errors,omitempty"`
+}
+
+// FieldError represents a field-level validation error.
+type FieldError struct {
+	Field   string `json:"field"`
 	Message string `json:"message"`
 }
 
@@ -257,6 +260,24 @@ var knownGPUVRAM = map[string]int{
 // Returns 0 if the GPU model is not in the lookup table.
 func lookupVRAM(normalizedGPU string) int {
 	return knownGPUVRAM[normalizedGPU]
+}
+
+// sanitizeInstanceName ensures a name matches Blue Lobster's validation regex:
+// ^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$
+// Strips invalid characters and trims leading/trailing hyphens.
+// Falls back to "shopper-instance" if the result would be empty.
+func sanitizeInstanceName(name string) string {
+	var b strings.Builder
+	for _, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			b.WriteRune(c)
+		}
+	}
+	name = strings.Trim(b.String(), "-")
+	if len(name) < 2 {
+		return "shopper-instance"
+	}
+	return name
 }
 
 // parseOfferID splits a Blue Lobster offer ID into its components.

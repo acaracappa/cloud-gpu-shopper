@@ -177,11 +177,9 @@ func TestCreateInstance_HappyPath(t *testing.T) {
 				t.Errorf("expected username 'ubuntu', got '%s'", req.Username)
 			}
 			resp := LaunchInstanceResponse{
-				Data: LaunchData{
-					InstanceIDs: []string{"inst-123"},
-					TaskID:      "task-456",
-					Status:      "PENDING",
-				},
+				TaskID: "task-456",
+				VMUUID: "inst-123",
+				Status: "PENDING",
 			}
 			json.NewEncoder(w).Encode(resp)
 
@@ -255,10 +253,8 @@ func TestCreateInstance_TaskFailed(t *testing.T) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/instances/launch-instance":
 			resp := LaunchInstanceResponse{
-				Data: LaunchData{
-					TaskID: "task-fail",
-					Status: "PENDING",
-				},
+				TaskID: "task-fail",
+				Status: "PENDING",
 			}
 			json.NewEncoder(w).Encode(resp)
 

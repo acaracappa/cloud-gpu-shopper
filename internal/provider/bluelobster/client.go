@@ -374,12 +374,15 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	}
 
 	// Build the launch request
+	// Sanitize the name for Blue Lobster's regex: ^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$
+	name := sanitizeInstanceName(req.Tags.ToLabel())
+
 	launchReq := LaunchInstanceRequest{
 		Region:       region,
 		InstanceType: instanceType,
 		Username:     defaultSSHUser,
-		SSHKey:       req.SSHPublicKey,
-		Name:         req.Tags.ToLabel(),
+		SSHKey:       strings.TrimSpace(req.SSHPublicKey),
+		Name:         name,
 		TemplateName: c.defaultTemplate,
 		Metadata:     req.Tags.ToMap(),
 	}
@@ -389,12 +392,16 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		return nil, fmt.Errorf("bluelobster: CreateInstance: marshal request: %w", err)
 	}
 
+	c.logger.Debug("CreateInstance request body",
+		slog.String("body", string(body)),
+	)
+
 	var launchResp LaunchInstanceResponse
 	if err = c.doRequest(ctx, http.MethodPost, "/instances/launch-instance", bytes.NewReader(body), &launchResp); err != nil {
 		return nil, fmt.Errorf("bluelobster: CreateInstance: %w", err)
 	}
 
-	taskID := launchResp.Data.TaskID
+	taskID := launchResp.TaskID
 	if taskID == "" {
 		return nil, fmt.Errorf("bluelobster: CreateInstance: no task_id in launch response")
 	}
@@ -411,12 +418,8 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	for {
 		if time.Now().After(pollDeadline) {
 			// Timeout - return partial info with provisioning status
-			instanceID := ""
-			if len(launchResp.Data.InstanceIDs) > 0 {
-				instanceID = launchResp.Data.InstanceIDs[0]
-			}
 			return &provider.InstanceInfo{
-				ProviderInstanceID: instanceID,
+				ProviderInstanceID: launchResp.VMUUID,
 				Status:             "provisioning",
 			}, nil
 		}
@@ -440,8 +443,8 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		case "COMPLETED":
 			// Get the instance ID from the task params or launch response
 			instanceID := taskResp.Params.VMUUID
-			if instanceID == "" && len(launchResp.Data.InstanceIDs) > 0 {
-				instanceID = launchResp.Data.InstanceIDs[0]
+			if instanceID == "" {
+				instanceID = launchResp.VMUUID
 			}
 			if instanceID == "" {
 				return nil, fmt.Errorf("bluelobster: CreateInstance: task completed but no instance ID found")
@@ -688,7 +691,7 @@ func (c *Client) parseError(statusCode int, body []byte, operation string) error
 		return c.mapHTTPError(statusCode, message, operation)
 	}
 
-	// Try ErrorResponse ({"error": "...", "message": "..."})
+	// Try ErrorResponse ({"error": "...", "message": "...", "errors": [...]})
 	var errResp ErrorResponse
 	if err := json.Unmarshal(body, &errResp); err == nil && (errResp.Message != "" || errResp.Error != "") {
 		if errResp.Message != "" {
@@ -700,6 +703,10 @@ func (c *Client) parseError(statusCode int, body []byte, operation string) error
 			} else {
 				message = errResp.Error
 			}
+		}
+		// Append field-level validation errors if present
+		for _, fe := range errResp.Errors {
+			message += fmt.Sprintf(" [%s: %s]", fe.Field, fe.Message)
 		}
 		return c.mapHTTPError(statusCode, message, operation)
 	}
