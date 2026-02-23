@@ -27,8 +27,10 @@ const (
 	defaultSSHUser   = "ubuntu"
 	defaultSSHPort   = 22
 	taskPollInterval = 3 * time.Second
-	taskPollTimeout  = 3 * time.Minute
 )
+
+// taskPollTimeout is a var (not const) so tests can override it for fast unit tests.
+var taskPollTimeout = 5 * time.Minute
 
 // CircuitBreakerState represents the current state of the circuit breaker
 type CircuitBreakerState int
@@ -261,7 +263,7 @@ func (c *Client) Name() string {
 func (c *Client) SupportsFeature(feature provider.ProviderFeature) bool {
 	switch feature {
 	case provider.FeatureInstanceTags:
-		return true // Blue Lobster supports instance metadata tags
+		return false // BL-007: metadata not persisted by API
 	default:
 		return false
 	}
@@ -349,10 +351,16 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 			}
 		}
 
+		// BL-008: Infer "running" from IP presence when power_status is null
+		powerStatus := vm.PowerStatus
+		if powerStatus == "" && vm.IPAddress != "" {
+			powerStatus = "running"
+		}
+
 		instances = append(instances, provider.ProviderInstance{
 			ID:           vm.UUID,
 			Name:         vm.Name,
-			Status:       vm.PowerStatus,
+			Status:       powerStatus,
 			StartedAt:    startedAt,
 			Tags:         tags,
 			PricePerHour: pricePerHour,
@@ -421,11 +429,7 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	pollDeadline := time.Now().Add(taskPollTimeout)
 	for {
 		if time.Now().After(pollDeadline) {
-			// Timeout - return partial info with provisioning status
-			return &provider.InstanceInfo{
-				ProviderInstanceID: launchResp.VMUUID,
-				Status:             "provisioning",
-			}, nil
+			return nil, fmt.Errorf("bluelobster: CreateInstance: task poll timeout after %v (vm_uuid=%s)", taskPollTimeout, launchResp.VMUUID)
 		}
 
 		select {

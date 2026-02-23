@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
@@ -308,6 +310,39 @@ func TestCreateInstance_InvalidOfferID(t *testing.T) {
 	}
 }
 
+func TestCreateInstance_TaskPollTimeout(t *testing.T) {
+	// Override poll timeout for fast testing
+	origTimeout := taskPollTimeout
+	taskPollTimeout = 200 * time.Millisecond
+	defer func() { taskPollTimeout = origTimeout }()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/instances/launch-instance":
+			resp := LaunchInstanceResponse{TaskID: "task-timeout", VMUUID: "inst-timeout", Status: "PENDING"}
+			json.NewEncoder(w).Encode(resp)
+		case r.Method == "GET" && r.URL.Path == "/tasks/task-timeout":
+			resp := TaskResponse{TaskID: "task-timeout", Status: "IN_PROGRESS"}
+			json.NewEncoder(w).Encode(resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	client := newTestClient(t, handler)
+	_, err := client.CreateInstance(context.Background(), provider.CreateInstanceRequest{
+		OfferID: "bluelobster:gpu-a100:us-east-1",
+		Tags:    models.InstanceTags{ShopperSessionID: "sess-timeout"},
+	})
+	if err == nil {
+		t.Fatal("expected error for task poll timeout, got nil")
+	}
+	if !strings.Contains(err.Error(), "task poll timeout") {
+		t.Errorf("expected error to contain 'task poll timeout', got: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DestroyInstance tests
 // ---------------------------------------------------------------------------
@@ -502,6 +537,40 @@ func TestListAllInstances_FiltersByTags(t *testing.T) {
 	}
 }
 
+func TestListAllInstances_InfersRunningFromIP(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/instances" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		vms := []VMInstance{
+			{
+				UUID:              "inst-bl008",
+				Name:              "shopper-sess-bl008",
+				PowerStatus:       "", // BL-008: API returns null/empty power_status
+				IPAddress:         "10.0.0.5",
+				PriceCentsPerHour: 150,
+				CreatedAt:         "2026-02-23T09:00:00Z",
+			},
+		}
+		json.NewEncoder(w).Encode(vms)
+	})
+
+	client := newTestClient(t, handler)
+	instances, err := client.ListAllInstances(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllInstances returned error: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(instances))
+	}
+	if instances[0].Status != "running" {
+		t.Errorf("expected Status 'running' (inferred from IP presence), got '%s'", instances[0].Status)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Error handling tests
 // ---------------------------------------------------------------------------
@@ -568,6 +637,17 @@ func TestErrorHandling_ServerError_IsRetryable(t *testing.T) {
 	}
 	if !provider.IsRetryable(err) {
 		t.Errorf("expected IsRetryable to return true for 500 error, got false. err: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SupportsFeature tests
+// ---------------------------------------------------------------------------
+
+func TestSupportsFeature_ReturnsFalse(t *testing.T) {
+	client := NewClient("test-key")
+	if client.SupportsFeature(provider.FeatureInstanceTags) {
+		t.Error("expected SupportsFeature(FeatureInstanceTags) to return false (BL-007: metadata not persisted by API)")
 	}
 }
 
