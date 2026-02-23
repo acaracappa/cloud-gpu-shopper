@@ -107,7 +107,7 @@ func NewRunner(
 		scriptContent: scriptContent,
 		runs:          make(map[string]*BenchmarkRun),
 		cancels:       make(map[string]context.CancelFunc),
-		workerSem:     make(chan struct{}, 3), // Max 3 concurrent benchmarks
+		workerSem:     make(chan struct{}, 5), // Max 5 concurrent benchmarks
 	}
 }
 
@@ -148,7 +148,7 @@ func (r *Runner) StartRun(ctx context.Context, req BenchmarkRunRequest) (*Benchm
 	// Determine providers to use
 	providers := req.Providers
 	if len(providers) == 0 {
-		providers = []string{"vastai", "tensordock"}
+		providers = []string{"vastai", "bluelobster", "tensordock"}
 	}
 
 	// Create manifest entries: models x GPU types x providers
@@ -253,9 +253,19 @@ func (r *Runner) CancelRun(ctx context.Context, runID string) error {
 // processRun processes all manifest entries for a run.
 func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 	defer func() {
+		// Cancel the run context on exit (natural completion, budget exhaustion, etc.)
+		// so any in-flight operations (e.g., Blue Lobster task polling) abort promptly.
 		r.mu.Lock()
+		if cancel, ok := r.cancels[run.ID]; ok {
+			cancel()
+		}
 		delete(r.cancels, run.ID)
 		r.mu.Unlock()
+
+		// Sweep for orphaned sessions: destroy any sessions from this run's
+		// manifest entries that are still alive (e.g., worker provisioned an
+		// instance but was interrupted before cleanup).
+		r.cleanupRunSessions(run.ID)
 	}()
 
 	r.mu.Lock()
@@ -274,15 +284,24 @@ func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 		}
 
 		// Get next pending entries
-		entries, err := r.manifest.GetPendingByPriority(ctx, run.ID, 3)
+		entries, err := r.manifest.GetPendingByPriority(ctx, run.ID, cap(r.workerSem))
 		if err != nil {
 			r.logger.Error("failed to get pending entries", slog.String("error", err.Error()))
 			break
 		}
 		if len(entries) == 0 {
-			// Wait for running entries to complete
+			// All entries are either running or completed. Wait for current
+			// workers to finish, then re-check — there may be more pending
+			// entries beyond the initial batch (e.g., 5 total with batch size 3).
 			wg.Wait()
-			break
+
+			// Re-check after workers finish: if more entries became pending
+			// (or were never fetched), continue; otherwise we're done.
+			remaining, _ := r.manifest.GetPendingByPriority(ctx, run.ID, 1)
+			if len(remaining) == 0 {
+				break
+			}
+			continue
 		}
 
 		// Check budget
@@ -414,6 +433,9 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		createReq.TemplateHashID = "a8a44c7363cbca20056020397e3bf072"
 		createReq.DiskGB = 64
 	}
+	if entry.Provider == "bluelobster" {
+		createReq.DiskGB = 64
+	}
 	session, err := r.provisioner.CreateSession(ctx, createReq, offer)
 	if err != nil {
 		r.logger.Error("failed to provision session for benchmark",
@@ -469,6 +491,14 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		}
 	}
 
+	// Step 3.5: Wait for system readiness (Blue Lobster post-boot dist-upgrade)
+	if err := r.waitForSystemReady(ctx, sshHost, sshPort, sshUser, sshKey, entry.Provider); err != nil {
+		r.logger.Error("system readiness failed", slog.String("error", err.Error()))
+		_ = r.manifest.MarkFailed(ctx, entry.ID, "system not ready: "+err.Error(), "readiness")
+		r.cleanupSession(ctx, session.ID)
+		return false
+	}
+
 	// Step 4: Upload and run the benchmark script via SSH
 	if r.scriptContent == "" {
 		r.logger.Error("benchmark script not loaded, cannot deploy")
@@ -481,15 +511,36 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		slog.String("session_id", session.ID),
 		slog.String("ssh_host", sshHost))
 
-	if err := sshpkg.SCPWrite(ctx, sshHost, sshPort, sshUser, sshKey, "/tmp/gpu-benchmark.sh", r.scriptContent); err != nil {
-		r.logger.Error("failed to upload benchmark script", slog.String("error", err.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+err.Error(), "deploy")
-		r.cleanupSession(ctx, session.ID)
-		return false
+	// Retry SCP upload with backoff — SSH may be unstable during provider post-provisioning
+	maxUploadAttempts := 3
+	uploadBackoffSec := 10
+	if entry.Provider == "bluelobster" {
+		maxUploadAttempts = 5
+		uploadBackoffSec = 15
 	}
-	if _, err := sshpkg.RunCommand(ctx, sshHost, sshPort, sshUser, sshKey, "chmod +x /tmp/gpu-benchmark.sh"); err != nil {
-		r.logger.Error("failed to chmod benchmark script", slog.String("error", err.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "chmod failed: "+err.Error(), "deploy")
+
+	var uploadErr error
+	for uploadAttempt := 1; uploadAttempt <= maxUploadAttempts; uploadAttempt++ {
+		if uploadAttempt > 1 {
+			r.logger.Info("retrying script upload",
+				slog.String("session_id", session.ID),
+				slog.Int("attempt", uploadAttempt))
+			time.Sleep(time.Duration(uploadAttempt*uploadBackoffSec) * time.Second)
+		}
+		if err := sshpkg.SCPWrite(ctx, sshHost, sshPort, sshUser, sshKey, "/tmp/gpu-benchmark.sh", r.scriptContent); err != nil {
+			uploadErr = err
+			continue
+		}
+		if _, err := sshpkg.RunCommand(ctx, sshHost, sshPort, sshUser, sshKey, "chmod +x /tmp/gpu-benchmark.sh"); err != nil {
+			uploadErr = err
+			continue
+		}
+		uploadErr = nil
+		break
+	}
+	if uploadErr != nil {
+		r.logger.Error("failed to upload benchmark script after retries", slog.String("error", uploadErr.Error()))
+		_ = r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+uploadErr.Error(), "deploy")
 		r.cleanupSession(ctx, session.ID)
 		return false
 	}
@@ -510,7 +561,11 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 	}
 
 	// Step 5: Poll for results via SSH
-	resultCtx, resultCancel := context.WithTimeout(ctx, 30*time.Minute)
+	resultTimeout := 30 * time.Minute
+	if entry.Provider == "bluelobster" {
+		resultTimeout = 60 * time.Minute
+	}
+	resultCtx, resultCancel := context.WithTimeout(ctx, resultTimeout)
 	defer resultCancel()
 
 	resultTicker := time.NewTicker(30 * time.Second)
@@ -526,6 +581,16 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 			r.cleanupSession(ctx, session.ID)
 			return false
 		case <-resultTicker.C:
+			// Check for script crash marker
+			if failOut, failErr := sshpkg.RunCommand(resultCtx, sshHost, sshPort, sshUser, sshKey,
+				"test -f /tmp/benchmark_failed && cat /tmp/benchmark_failed"); failErr == nil && strings.TrimSpace(failOut) != "" {
+				reason := "script crashed: " + strings.TrimSpace(failOut)
+				r.logger.Error("benchmark script crashed", slog.String("session_id", session.ID), slog.String("reason", reason))
+				_ = r.manifest.MarkFailed(ctx, entry.ID, reason, "script_crash")
+				r.cleanupSession(ctx, session.ID)
+				return false
+			}
+
 			// Check if benchmark is complete
 			output, err := sshpkg.RunCommand(resultCtx, sshHost, sshPort, sshUser, sshKey,
 				"test -f /tmp/benchmark_complete && cat /tmp/benchmark_result.json")
@@ -596,6 +661,72 @@ func (r *Runner) cleanupSession(ctx context.Context, sessionID string) {
 		r.logger.Error("failed to destroy benchmark session",
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()))
+	}
+}
+
+// cleanupRunSessions destroys any sessions still active from a completed/cancelled run.
+// This catches orphans left by workers that were interrupted mid-provisioning.
+func (r *Runner) cleanupRunSessions(runID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	entries, err := r.manifest.ListByRun(ctx, runID)
+	if err != nil {
+		r.logger.Error("failed to list run entries for cleanup", slog.String("run_id", runID), slog.String("error", err.Error()))
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.SessionID == "" {
+			continue
+		}
+		// Check if session is still active
+		s, err := r.provisioner.GetSession(ctx, entry.SessionID)
+		if err != nil {
+			continue // Session not found or already gone
+		}
+		if s.Status == models.StatusRunning || s.Status == models.StatusProvisioning {
+			r.logger.Warn("destroying orphaned benchmark session",
+				slog.String("run_id", runID),
+				slog.String("session_id", entry.SessionID),
+				slog.String("entry_id", entry.ID),
+				slog.String("status", string(s.Status)))
+			r.cleanupSession(ctx, entry.SessionID)
+		}
+	}
+}
+
+// waitForSystemReady waits for dpkg locks to release and nvidia-smi to return
+// stable GPU names before allowing the benchmark to proceed. Only runs for
+// Blue Lobster provider, which has a post-boot dist-upgrade cycle.
+func (r *Runner) waitForSystemReady(ctx context.Context, host string, port int, user, key, provider string) error {
+	if provider != "bluelobster" {
+		return nil
+	}
+	r.logger.Info("waiting for system readiness (dpkg + nvidia-smi)", slog.String("host", host))
+	readyCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-readyCtx.Done():
+			return fmt.Errorf("system readiness timeout after 20 minutes")
+		case <-ticker.C:
+			output, err := sshpkg.RunCommand(readyCtx, host, port, user, key,
+				"fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && echo LOCKED || "+
+					"(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | grep -q '[A-Za-z]' && echo READY || echo NOT_READY)")
+			if err != nil {
+				r.logger.Debug("readiness check SSH error", slog.String("error", err.Error()))
+				continue
+			}
+			trimmed := strings.TrimSpace(output)
+			if trimmed == "READY" {
+				r.logger.Info("system ready (dpkg unlocked, nvidia-smi stable)")
+				return nil
+			}
+			r.logger.Info("system not ready", slog.String("status", trimmed))
+		}
 	}
 }
 

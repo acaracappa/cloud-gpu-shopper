@@ -2,7 +2,7 @@
 
 ## What Is This?
 
-A Go service that provides unified inventory and orchestration over commodity GPU providers (Vast.ai, TensorDock). Acts as a "menu and provisioner" - select, provision, hand off credentials, ensure cleanup.
+A Go service that provides unified inventory and orchestration over commodity GPU providers (Vast.ai, Blue Lobster, TensorDock). Acts as a "menu and provisioner" - select, provision, hand off credentials, ensure cleanup.
 
 ## Key Principle
 
@@ -14,7 +14,7 @@ A Go service that provides unified inventory and orchestration over commodity GP
 |-----------|---------|----------|
 | API Server | REST API for inventory, sessions, costs | `cmd/server/` |
 | CLI | Operator tool | `cmd/cli/` |
-| Providers | Vast.ai, TensorDock adapters | `internal/provider/` |
+| Providers | Vast.ai, Blue Lobster, TensorDock adapters | `internal/provider/` |
 
 ## Core Services
 
@@ -119,6 +119,7 @@ go build ./cmd/...
 ```bash
 # Set in .env file (auto-loaded) or export to environment
 VASTAI_API_KEY=xxx
+BLUELOBSTER_API_KEY=xxx
 TENSORDOCK_API_TOKEN=xxx
 TENSORDOCK_AUTH_ID=xxx
 DATABASE_PATH=./data/gpu-shopper.db

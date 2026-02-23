@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/config"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/bluelobster"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/tensordock"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/vastai"
 	"github.com/spf13/cobra"
@@ -29,7 +30,7 @@ var cleanupOrphansCmd = &cobra.Command{
 	Long: `Find and destroy orphan GPU instances across all configured providers.
 
 This command works WITHOUT the API server - it uses direct provider access
-via environment variables (VASTAI_API_KEY, TENSORDOCK_AUTH_ID, TENSORDOCK_API_TOKEN).
+via environment variables (VASTAI_API_KEY, BLUELOBSTER_API_KEY, TENSORDOCK_AUTH_ID, TENSORDOCK_API_TOKEN).
 
 By default, it runs in dry-run mode, showing what would be destroyed.
 Use --execute to actually destroy the instances.
@@ -54,7 +55,7 @@ func init() {
 
 	cleanupOrphansCmd.Flags().BoolVar(&cleanupExecute, "execute", false, "Actually destroy instances (default is dry-run)")
 	cleanupOrphansCmd.Flags().BoolVar(&cleanupForce, "force", false, "Skip confirmation prompt when destroying")
-	cleanupOrphansCmd.Flags().StringVarP(&cleanupProvider, "provider", "p", "", "Target specific provider (vastai, tensordock)")
+	cleanupOrphansCmd.Flags().StringVarP(&cleanupProvider, "provider", "p", "", "Target specific provider (vastai, bluelobster, tensordock)")
 }
 
 // OrphanInstance represents an instance found during cleanup scan
@@ -83,7 +84,7 @@ func runCleanupOrphans(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(providers) == 0 {
-		return fmt.Errorf("no providers configured; set VASTAI_API_KEY or TENSORDOCK_AUTH_ID/TENSORDOCK_API_TOKEN")
+		return fmt.Errorf("no providers configured; set VASTAI_API_KEY, BLUELOBSTER_API_KEY, or TENSORDOCK_AUTH_ID/TENSORDOCK_API_TOKEN")
 	}
 
 	// Collect all orphan instances from all providers
@@ -240,6 +241,14 @@ func initializeProviders(cfg *config.Config, providerFilter string) ([]provider.
 		}
 	}
 
+	// Blue Lobster
+	if cfg.Providers.BlueLobster.APIKey != "" {
+		if providerFilter == "" || providerFilter == "bluelobster" {
+			client := bluelobster.NewClient(cfg.Providers.BlueLobster.APIKey)
+			providers = append(providers, client)
+		}
+	}
+
 	// TensorDock
 	if cfg.Providers.TensorDock.AuthID != "" && cfg.Providers.TensorDock.APIToken != "" {
 		if providerFilter == "" || providerFilter == "tensordock" {
@@ -261,6 +270,9 @@ func initializeProviders(cfg *config.Config, providerFilter string) ([]provider.
 		validProviders := []string{}
 		if cfg.Providers.VastAI.APIKey != "" {
 			validProviders = append(validProviders, "vastai")
+		}
+		if cfg.Providers.BlueLobster.APIKey != "" {
+			validProviders = append(validProviders, "bluelobster")
 		}
 		if cfg.Providers.TensorDock.AuthID != "" && cfg.Providers.TensorDock.APIToken != "" {
 			validProviders = append(validProviders, "tensordock")
