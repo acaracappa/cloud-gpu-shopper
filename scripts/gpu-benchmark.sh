@@ -1,6 +1,6 @@
 #!/bin/bash
 # gpu-benchmark.sh — Self-contained GPU benchmark script for Ollama instances.
-# Zero dependencies beyond curl, jq, nvidia-smi.
+# Auto-installs curl and jq if missing. Requires nvidia-smi.
 #
 # Usage: ./gpu-benchmark.sh MODEL SESSION_ID PRICE_PER_HOUR PROVIDER LOCATION
 #
@@ -8,6 +8,42 @@
 # /tmp/benchmark_complete is created when finished. The server collects
 # results via SSH pull.
 set -euo pipefail
+
+# ── Ensure required tools are installed ──────────────────────────────────────
+# Some providers run post-provisioning apt-get that holds the dpkg lock.
+# Retry with backoff for up to ~3 minutes to wait it out.
+apt_install() {
+  local tool="$1"
+  local attempt=0
+  local max_attempts=60  # 60 * 10s = 10 minutes
+  while [ $attempt -lt $max_attempts ]; do
+    if [ $attempt -gt 0 ]; then
+      echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] apt lock busy, retrying in 10s (attempt $((attempt+1))/$max_attempts)..."
+      sleep 10
+    fi
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>&1 && \
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$tool" 2>&1 && \
+    return 0
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+for tool in curl jq; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Installing $tool..."
+    if command -v apt-get >/dev/null 2>&1; then
+      apt_install "$tool"
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y "$tool" 2>&1 || true
+    fi
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] FATAL: Cannot install $tool after retries"
+      exit 1
+    fi
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $tool installed successfully"
+  fi
+done
 
 # ── Args ────────────────────────────────────────────────────────────────────
 MODEL="${1:?Usage: gpu-benchmark.sh MODEL SESSION_ID PRICE_PER_HOUR PROVIDER LOCATION}"
@@ -29,6 +65,16 @@ rm -f "$MARKER_FILE" "$RESULT_FILE" "$RESULTS_JSONL" "$GPU_STATS_FILE"
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
 die() { log "FATAL: $*"; exit 1; }
+
+# Force a value to a valid number. Returns 0 for non-numeric input (e.g. "[Not Supported]").
+ensure_numeric() {
+  local val="$1"
+  if echo "$val" | grep -qE '^-?[0-9]+\.?[0-9]*$'; then
+    echo "$val"
+  else
+    echo "0"
+  fi
+}
 
 # ── Structured test prompts ─────────────────────────────────────────────────
 # Each prompt: ID|CATEGORY|PROMPT|EXPECTED_CONTAINS(comma-sep, empty=none)|MAX_TOKENS
@@ -116,20 +162,31 @@ CPU_CORES=0
 RAM_GIB=0
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || true
-  GPU_MEMORY_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || true
-  GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | xargs) || true
-  DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || true
+  # Wait for nvidia-smi to return stable values (DKMS rebuild may be in progress)
+  NVIDIA_WAIT=0
+  while [ $NVIDIA_WAIT -lt 120 ]; do
+    TEST_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || true
+    if echo "$TEST_MEM" | grep -qE '^[0-9]+$'; then
+      break
+    fi
+    log "nvidia-smi not stable yet (got: ${TEST_MEM:-empty}), waiting 10s..."
+    sleep 10
+    NVIDIA_WAIT=$((NVIDIA_WAIT + 10))
+  done
+  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || GPU_NAME="unknown"
+  GPU_MEMORY_MIB=$(ensure_numeric "$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)")
+  GPU_COUNT=$(ensure_numeric "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | xargs)")
+  DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || DRIVER_VERSION="unknown"
   CUDA_VERSION=$(nvidia-smi 2>/dev/null | awk '/CUDA Version:/{for(i=1;i<=NF;i++)if($i=="Version:")print $(i+1)}' || echo "unknown")
 fi
 
 if [ -f /proc/cpuinfo ]; then
-  CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs) || true
-  CPU_CORES=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null) || true
+  CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs) || CPU_MODEL="unknown"
+  CPU_CORES=$(ensure_numeric "$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)")
 fi
 
 if command -v free >/dev/null 2>&1; then
-  RAM_GIB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}') || true
+  RAM_GIB=$(ensure_numeric "$(free -g 2>/dev/null | awk '/^Mem:/{print $2}')")
 fi
 
 log "GPU: $GPU_NAME (${GPU_MEMORY_MIB}MiB x${GPU_COUNT}), Driver: $DRIVER_VERSION, CUDA: $CUDA_VERSION"
@@ -355,9 +412,18 @@ compute_stats() {
   '
 }
 
-TPS_STATS=$(compute_stats "$ALL_TPS")
-LATENCY_STATS=$(compute_stats "$ALL_LATENCY")
-TTFT_STATS=$(compute_stats "$ALL_TTFT_MS")
+DEFAULT_STATS='{"avg":0,"min":0,"max":0,"p50":0,"p95":0,"p99":0}'
+TPS_STATS=$(compute_stats "$ALL_TPS") || TPS_STATS="$DEFAULT_STATS"
+LATENCY_STATS=$(compute_stats "$ALL_LATENCY") || LATENCY_STATS="$DEFAULT_STATS"
+TTFT_STATS=$(compute_stats "$ALL_TTFT_MS") || TTFT_STATS="$DEFAULT_STATS"
+# Ensure stats are valid JSON
+for stat_var in TPS_STATS LATENCY_STATS TTFT_STATS; do
+  val="${!stat_var}"
+  if ! echo "$val" | jq . >/dev/null 2>&1; then
+    log "WARNING: $stat_var is not valid JSON, using defaults"
+    eval "$stat_var='$DEFAULT_STATS'"
+  fi
+done
 
 # Error rate
 ERROR_RATE=0
@@ -422,6 +488,34 @@ RUNTIME_VERSION=$(curl -sf "$OLLAMA_URL/api/version" 2>/dev/null | jq -r '.versi
 
 # ── Step 11: Build result JSON ──────────────────────────────────────────────
 log "Building result JSON..."
+
+# Ensure all numeric variables have valid defaults
+# Sanitize ALL numeric variables before passing to jq --argjson
+GPU_MEMORY_MIB=$(ensure_numeric "$GPU_MEMORY_MIB")
+GPU_COUNT=$(ensure_numeric "$GPU_COUNT")
+CPU_CORES=$(ensure_numeric "$CPU_CORES")
+RAM_GIB=$(ensure_numeric "$RAM_GIB")
+MODEL_SIZE_GB=$(ensure_numeric "$MODEL_SIZE_GB")
+REQUEST_NUM=$(ensure_numeric "$REQUEST_NUM")
+TOTAL_TOKENS=$(ensure_numeric "$TOTAL_TOKENS")
+TOTAL_ERRORS=$(ensure_numeric "$TOTAL_ERRORS")
+DURATION_SECONDS=$(ensure_numeric "$DURATION_SECONDS")
+RPM=$(ensure_numeric "$RPM")
+AVG_TOKENS_PER_REQ=$(ensure_numeric "$AVG_TOKENS_PER_REQ")
+ERROR_RATE=$(ensure_numeric "$ERROR_RATE")
+MATCH_RATE=$(ensure_numeric "$MATCH_RATE")
+PROMPTS_WITH_EXPECTED=$(ensure_numeric "$PROMPTS_WITH_EXPECTED")
+PROMPTS_MATCHING=$(ensure_numeric "$PROMPTS_MATCHING")
+GPU_AVG_UTIL=$(ensure_numeric "$GPU_AVG_UTIL")
+GPU_MAX_UTIL=$(ensure_numeric "$GPU_MAX_UTIL")
+GPU_AVG_MEM=$(ensure_numeric "$GPU_AVG_MEM")
+GPU_MAX_MEM=$(ensure_numeric "$GPU_MAX_MEM")
+GPU_AVG_TEMP=$(ensure_numeric "$GPU_AVG_TEMP")
+GPU_MAX_TEMP=$(ensure_numeric "$GPU_MAX_TEMP")
+GPU_AVG_POWER=$(ensure_numeric "$GPU_AVG_POWER")
+GPU_MAX_POWER=$(ensure_numeric "$GPU_MAX_POWER")
+: "${QUALITY_RESULTS:=[]}"
+: "${THROUGHPUT_DURATION:=0}" "${THROUGHPUT_MAX_TOKENS:=500}"
 
 jq -n \
   --arg session_id "$SESSION_ID" \

@@ -107,7 +107,7 @@ func NewRunner(
 		scriptContent: scriptContent,
 		runs:          make(map[string]*BenchmarkRun),
 		cancels:       make(map[string]context.CancelFunc),
-		workerSem:     make(chan struct{}, 3), // Max 3 concurrent benchmarks
+		workerSem:     make(chan struct{}, 5), // Max 5 concurrent benchmarks
 	}
 }
 
@@ -274,15 +274,24 @@ func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 		}
 
 		// Get next pending entries
-		entries, err := r.manifest.GetPendingByPriority(ctx, run.ID, 3)
+		entries, err := r.manifest.GetPendingByPriority(ctx, run.ID, cap(r.workerSem))
 		if err != nil {
 			r.logger.Error("failed to get pending entries", slog.String("error", err.Error()))
 			break
 		}
 		if len(entries) == 0 {
-			// Wait for running entries to complete
+			// All entries are either running or completed. Wait for current
+			// workers to finish, then re-check — there may be more pending
+			// entries beyond the initial batch (e.g., 5 total with batch size 3).
 			wg.Wait()
-			break
+
+			// Re-check after workers finish: if more entries became pending
+			// (or were never fetched), continue; otherwise we're done.
+			remaining, _ := r.manifest.GetPendingByPriority(ctx, run.ID, 1)
+			if len(remaining) == 0 {
+				break
+			}
+			continue
 		}
 
 		// Check budget
@@ -481,15 +490,29 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		slog.String("session_id", session.ID),
 		slog.String("ssh_host", sshHost))
 
-	if err := sshpkg.SCPWrite(ctx, sshHost, sshPort, sshUser, sshKey, "/tmp/gpu-benchmark.sh", r.scriptContent); err != nil {
-		r.logger.Error("failed to upload benchmark script", slog.String("error", err.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+err.Error(), "deploy")
-		r.cleanupSession(ctx, session.ID)
-		return false
+	// Retry SCP upload with backoff — SSH may be unstable during provider post-provisioning
+	var uploadErr error
+	for uploadAttempt := 1; uploadAttempt <= 3; uploadAttempt++ {
+		if uploadAttempt > 1 {
+			r.logger.Info("retrying script upload",
+				slog.String("session_id", session.ID),
+				slog.Int("attempt", uploadAttempt))
+			time.Sleep(time.Duration(uploadAttempt*10) * time.Second)
+		}
+		if err := sshpkg.SCPWrite(ctx, sshHost, sshPort, sshUser, sshKey, "/tmp/gpu-benchmark.sh", r.scriptContent); err != nil {
+			uploadErr = err
+			continue
+		}
+		if _, err := sshpkg.RunCommand(ctx, sshHost, sshPort, sshUser, sshKey, "chmod +x /tmp/gpu-benchmark.sh"); err != nil {
+			uploadErr = err
+			continue
+		}
+		uploadErr = nil
+		break
 	}
-	if _, err := sshpkg.RunCommand(ctx, sshHost, sshPort, sshUser, sshKey, "chmod +x /tmp/gpu-benchmark.sh"); err != nil {
-		r.logger.Error("failed to chmod benchmark script", slog.String("error", err.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "chmod failed: "+err.Error(), "deploy")
+	if uploadErr != nil {
+		r.logger.Error("failed to upload benchmark script after retries", slog.String("error", uploadErr.Error()))
+		_ = r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+uploadErr.Error(), "deploy")
 		r.cleanupSession(ctx, session.ID)
 		return false
 	}
