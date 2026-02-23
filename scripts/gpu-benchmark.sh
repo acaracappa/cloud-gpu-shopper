@@ -7,43 +7,53 @@
 # Results are written to /tmp/benchmark_result.json and a marker file
 # /tmp/benchmark_complete is created when finished. The server collects
 # results via SSH pull.
-set -euo pipefail
+set -uo pipefail
+
+log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
+
+die() { log "FATAL: $*"; exit 1; }
 
 # ── Ensure required tools are installed ──────────────────────────────────────
 # Some providers run post-provisioning apt-get that holds the dpkg lock.
-# Retry with backoff for up to ~3 minutes to wait it out.
+# Retry with backoff for up to ~20 minutes to wait it out.
 apt_install() {
-  local tool="$1"
   local attempt=0
-  local max_attempts=60  # 60 * 10s = 10 minutes
+  local max_attempts=120  # 120 * 10s = 20 minutes
   while [ $attempt -lt $max_attempts ]; do
     if [ $attempt -gt 0 ]; then
       echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] apt lock busy, retrying in 10s (attempt $((attempt+1))/$max_attempts)..."
       sleep 10
     fi
     sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>&1 && \
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$tool" 2>&1 && \
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" 2>&1 && \
     return 0
     attempt=$((attempt + 1))
   done
   return 1
 }
 
+MISSING_TOOLS=""
 for tool in curl jq; do
   if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Installing $tool..."
-    if command -v apt-get >/dev/null 2>&1; then
-      apt_install "$tool"
-    elif command -v yum >/dev/null 2>&1; then
-      sudo yum install -y "$tool" 2>&1 || true
-    fi
+    MISSING_TOOLS="$MISSING_TOOLS $tool"
+  fi
+done
+
+if [ -n "$MISSING_TOOLS" ]; then
+  log "Installing missing tools:$MISSING_TOOLS"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install $MISSING_TOOLS
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y $MISSING_TOOLS 2>&1 || true
+  fi
+  for tool in $MISSING_TOOLS; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] FATAL: Cannot install $tool after retries"
       exit 1
     fi
-    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $tool installed successfully"
-  fi
-done
+  done
+  log "All tools installed successfully"
+fi
 
 # ── Args ────────────────────────────────────────────────────────────────────
 MODEL="${1:?Usage: gpu-benchmark.sh MODEL SESSION_ID PRICE_PER_HOUR PROVIDER LOCATION}"
@@ -62,9 +72,14 @@ THROUGHPUT_DURATION=300  # 5 minutes
 # Remove stale marker
 rm -f "$MARKER_FILE" "$RESULT_FILE" "$RESULTS_JSONL" "$GPU_STATS_FILE"
 
-log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
-
-die() { log "FATAL: $*"; exit 1; }
+cleanup_on_failure() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ] && [ ! -f "$MARKER_FILE" ]; then
+        log "FATAL exit (code=$exit_code), writing failure marker"
+        echo "exit_code=$exit_code" > /tmp/benchmark_failed
+    fi
+}
+trap cleanup_on_failure EXIT
 
 # Force a value to a valid number. Returns 0 for non-numeric input (e.g. "[Not Supported]").
 ensure_numeric() {
@@ -126,31 +141,7 @@ while true; do
   sleep 5
 done
 
-# ── Step 2: Pull model if not present ───────────────────────────────────────
-log "Checking if model '$MODEL' is available..."
-if ! curl -sf "$OLLAMA_URL/api/tags" | jq -e ".models[] | select(.name == \"$MODEL\")" >/dev/null 2>&1; then
-  log "Model not found locally, pulling '$MODEL'..."
-  PULL_START=$(date +%s)
-  curl -sf -X POST "$OLLAMA_URL/api/pull" -d "$(jq -n --arg name "$MODEL" '{name:$name}')" >/dev/null 2>&1 &
-  PULL_PID=$!
-  PULL_TIMEOUT=900  # 15 min
-  while kill -0 "$PULL_PID" 2>/dev/null; do
-    ELAPSED=$(( $(date +%s) - PULL_START ))
-    if [ "$ELAPSED" -ge "$PULL_TIMEOUT" ]; then
-      kill "$PULL_PID" 2>/dev/null || true
-      die "Model pull timed out after ${PULL_TIMEOUT}s"
-    fi
-    sleep 10
-    log "  Still pulling... (${ELAPSED}s)"
-  done
-  wait "$PULL_PID" || die "Model pull failed"
-  PULL_ELAPSED=$(( $(date +%s) - PULL_START ))
-  log "Model pulled in ${PULL_ELAPSED}s"
-else
-  log "Model '$MODEL' already available."
-fi
-
-# ── Step 3: Collect hardware info ───────────────────────────────────────────
+# ── Step 2: Collect hardware info ─────────────────────────────────────────
 log "Collecting hardware info..."
 GPU_NAME="unknown"
 GPU_MEMORY_MIB=0
@@ -164,7 +155,7 @@ RAM_GIB=0
 if command -v nvidia-smi >/dev/null 2>&1; then
   # Wait for nvidia-smi to return stable values (DKMS rebuild may be in progress)
   NVIDIA_WAIT=0
-  while [ $NVIDIA_WAIT -lt 120 ]; do
+  while [ $NVIDIA_WAIT -lt 600 ]; do
     TEST_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || true
     if echo "$TEST_MEM" | grep -qE '^[0-9]+$'; then
       break
@@ -191,6 +182,30 @@ fi
 
 log "GPU: $GPU_NAME (${GPU_MEMORY_MIB}MiB x${GPU_COUNT}), Driver: $DRIVER_VERSION, CUDA: $CUDA_VERSION"
 log "CPU: $CPU_MODEL (${CPU_CORES} cores), RAM: ${RAM_GIB}GiB"
+
+# ── Step 3: Pull model if not present ───────────────────────────────────────
+log "Checking if model '$MODEL' is available..."
+if ! curl -sf "$OLLAMA_URL/api/tags" | jq -e ".models[] | select(.name == \"$MODEL\")" >/dev/null 2>&1; then
+  log "Model not found locally, pulling '$MODEL'..."
+  PULL_START=$(date +%s)
+  curl -sf -X POST "$OLLAMA_URL/api/pull" -d "$(jq -n --arg name "$MODEL" '{name:$name}')" >/dev/null 2>&1 &
+  PULL_PID=$!
+  PULL_TIMEOUT=900  # 15 min
+  while kill -0 "$PULL_PID" 2>/dev/null; do
+    ELAPSED=$(( $(date +%s) - PULL_START ))
+    if [ "$ELAPSED" -ge "$PULL_TIMEOUT" ]; then
+      kill "$PULL_PID" 2>/dev/null || true
+      die "Model pull timed out after ${PULL_TIMEOUT}s"
+    fi
+    sleep 10
+    log "  Still pulling... (${ELAPSED}s)"
+  done
+  wait "$PULL_PID" || die "Model pull failed"
+  PULL_ELAPSED=$(( $(date +%s) - PULL_START ))
+  log "Model pulled in ${PULL_ELAPSED}s"
+else
+  log "Model '$MODEL' already available."
+fi
 
 # ── Helper: Make a request and measure TTFT ─────────────────────────────────
 # Returns JSON with response text, tokens, tps, ttft_ms, latency_ms, error
