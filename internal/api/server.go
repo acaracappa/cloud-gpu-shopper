@@ -207,8 +207,8 @@ func (s *Server) Start() error {
 	s.httpServer = &http.Server{
 		Addr:              addr,
 		Handler:           s.router,
-		ReadTimeout:       60 * time.Second,   // Bug #25: Increased from 30s
-		WriteTimeout:      300 * time.Second,  // BL-006: Session creation polls provider tasks for up to 3min
+		ReadTimeout:       60 * time.Second,  // Bug #25: Increased from 30s
+		WriteTimeout:      300 * time.Second, // BL-006: Session creation polls provider tasks for up to 3min
 		IdleTimeout:       120 * time.Second, // Bug #25: Increased from 60s
 		ReadHeaderTimeout: 10 * time.Second,  // Bug #25: Add header read timeout
 		MaxHeaderBytes:    1 << 20,           // Bug #25: 1MB max header size
