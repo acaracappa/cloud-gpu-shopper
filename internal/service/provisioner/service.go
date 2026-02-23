@@ -65,6 +65,9 @@ const (
 	// 3. TensorDock's scripts to restart the SSH service
 	// Based on live testing, 90 seconds is sufficient.
 	TensorDockCloudInitDelay = 90 * time.Second
+
+	// BlueLobsterBootDelay waits for post-boot dist-upgrade SSH instability.
+	BlueLobsterBootDelay = 60 * time.Second
 )
 
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
@@ -808,6 +811,16 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 		}
 	}
 
+	if err == nil && session.Provider == "bluelobster" {
+		logger.Info("Blue Lobster: waiting for post-boot stabilization before SSH polling",
+			slog.Duration("delay", BlueLobsterBootDelay))
+		select {
+		case <-time.After(BlueLobsterBootDelay):
+		case <-ctx.Done():
+			return
+		}
+	}
+
 	// Log warning about insecure host key verification once per session
 	// This is intentional for commodity GPU instances where host keys are unknown
 	logger.Warn("using insecure host key verification for commodity GPU instance",
@@ -829,6 +842,11 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 	lastErrorType := "none"
 	lastError := ""
 	consecutivePermanentErrors := 0
+	consecutiveNeeded := 1
+	if session != nil && session.Provider == "bluelobster" {
+		consecutiveNeeded = 2
+	}
+	consecutiveOK := 0
 	for {
 		select {
 		case <-timeout.C:
@@ -955,6 +973,16 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 				// Try a single connection attempt using the private key passed to this function
 				err := s.sshVerifier.VerifyOnce(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
 				if err == nil {
+					consecutiveOK++
+					if consecutiveOK < consecutiveNeeded {
+						logger.Info("SSH succeeded, verifying stability",
+							slog.Int("consecutive", consecutiveOK),
+							slog.Int("needed", consecutiveNeeded))
+						// Quick re-check after 5 seconds
+						nextInterval = 5 * time.Second
+						pollTimer.Reset(nextInterval)
+						continue
+					}
 					// SSH verified successfully
 					duration := time.Since(start)
 					logger.Info("SSH verification successful",
@@ -985,6 +1013,7 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 				}
 
 				lastErrorType = classifySSHError(err)
+				consecutiveOK = 0
 				lastError = err.Error()
 				logger.Info("SSH verification attempt failed",
 					slog.Int("attempt", attemptCount),
@@ -1655,6 +1684,10 @@ func classifySSHError(err error) string {
 	if strings.Contains(errStr, "failed to create session") ||
 		strings.Contains(errStr, "verify command failed") {
 		return "command_failed"
+	}
+
+	if strings.Contains(errStr, "unexpected packet") {
+		return "connection_closed"
 	}
 
 	// EOF typically means the connection was closed
