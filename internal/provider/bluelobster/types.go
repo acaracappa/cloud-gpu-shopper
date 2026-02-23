@@ -190,7 +190,7 @@ type ErrorDetailResponse struct {
 func (a AvailableInstance) ToGPUOffer(region Region) models.GPUOffer {
 	gpuModel := a.InstanceType.Specs.ParseGPUModel()
 	gpuName := normalizeGPUName(gpuModel)
-	vram := parseVRAMFromDescription(a.InstanceType.GPUDescription)
+	vram := lookupVRAM(gpuName)
 
 	// Build location string from region location
 	location := region.Location.City
@@ -241,36 +241,22 @@ func normalizeGPUName(name string) string {
 	return name
 }
 
-// parseVRAMFromDescription extracts VRAM in GB from a GPU description string.
-// It looks for a number immediately before " GB)" in strings like "1x RTX A5000 (24 GB)".
-// Returns 0 if no VRAM can be determined.
-func parseVRAMFromDescription(desc string) int {
-	// Look for pattern: number followed by " GB)"
-	idx := strings.Index(desc, " GB)")
-	if idx < 0 {
-		return 0
-	}
+// knownGPUVRAM maps normalized GPU model names to their VRAM in GB.
+// Blue Lobster's API does not expose VRAM directly (gpu_description is "N/A"
+// and memory_gib is system RAM, not VRAM), so we use known hardware specs.
+var knownGPUVRAM = map[string]int{
+	"RTX 2080 Ti": 11,
+	"RTX A4000":   16,
+	"RTX A5000":   24,
+	"RTX A6000":   48,
+	"RTX 8000":    48,
+	"RTX 5090":    32,
+}
 
-	// Walk backwards from the space before "GB)" to find the number
-	numStr := ""
-	for i := idx - 1; i >= 0; i-- {
-		c := desc[i]
-		if c >= '0' && c <= '9' {
-			numStr = string(c) + numStr
-		} else {
-			break
-		}
-	}
-
-	if numStr == "" {
-		return 0
-	}
-
-	vram := 0
-	for _, c := range numStr {
-		vram = vram*10 + int(c-'0')
-	}
-	return vram
+// lookupVRAM returns the VRAM in GB for a normalized GPU model name.
+// Returns 0 if the GPU model is not in the lookup table.
+func lookupVRAM(normalizedGPU string) int {
+	return knownGPUVRAM[normalizedGPU]
 }
 
 // parseOfferID splits a Blue Lobster offer ID into its components.
