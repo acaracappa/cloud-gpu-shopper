@@ -14,6 +14,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/bluelobster"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/tensordock"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/vastai"
 	benchsvc "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/benchmark"
@@ -87,6 +88,16 @@ func main() {
 		providers = append(providers, tensordockClient)
 		logger.Info("initialized TensorDock provider",
 			slog.String("default_image", cfg.Providers.TensorDock.DefaultImage))
+	}
+
+	if cfg.Providers.BlueLobster.APIKey != "" {
+		bluelobsterClient := bluelobster.NewClient(
+			cfg.Providers.BlueLobster.APIKey,
+			bluelobster.WithDefaultTemplate(cfg.Providers.BlueLobster.DefaultTemplate),
+		)
+		providers = append(providers, bluelobsterClient)
+		logger.Info("initialized Blue Lobster provider",
+			slog.String("default_template", cfg.Providers.BlueLobster.DefaultTemplate))
 	}
 
 	if len(providers) == 0 {
