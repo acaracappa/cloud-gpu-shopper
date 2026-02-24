@@ -68,6 +68,9 @@ const (
 
 	// BlueLobsterBootDelay waits for post-boot dist-upgrade SSH instability.
 	BlueLobsterBootDelay = 60 * time.Second
+
+	// DefaultLowBalanceThreshold is the balance below which a warning is logged
+	DefaultLowBalanceThreshold = 5.00
 )
 
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
@@ -189,6 +192,9 @@ type Service struct {
 	destroyTimeout time.Duration
 	destroyRetries int
 	sshKeyBits     int
+
+	// Balance warning
+	lowBalanceThreshold float64
 
 	// For time mocking in tests
 	now func() time.Time
@@ -318,6 +324,7 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 		destroyTimeout:       DefaultDestroyTimeout,
 		destroyRetries:       DefaultDestroyRetries,
 		sshKeyBits:           DefaultSSHKeyBits,
+		lowBalanceThreshold: DefaultLowBalanceThreshold,
 		now:                  time.Now,
 		destroyLocks:         make(map[string]*sync.Mutex),
 	}
@@ -368,6 +375,25 @@ func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateS
 		slog.String("offer_id", req.OfferID),
 		slog.String("provider", offer.Provider),
 		slog.Int("retry_count", retryCount))
+
+	// Check provider balance (warn-only)
+	if prov, err := s.providers.Get(offer.Provider); err == nil {
+		if bp, ok := prov.(provider.BalanceProvider); ok {
+			if balance, err := bp.GetAccountBalance(ctx); err == nil {
+				if balance.Balance < s.lowBalanceThreshold {
+					s.logger.Warn("LOW BALANCE: provider account balance is below threshold",
+						slog.String("provider", offer.Provider),
+						slog.Float64("balance", balance.Balance),
+						slog.Float64("threshold", s.lowBalanceThreshold),
+						slog.String("currency", balance.Currency))
+				}
+			} else {
+				s.logger.Debug("could not check provider balance",
+					slog.String("provider", offer.Provider),
+					slog.String("error", err.Error()))
+			}
+		}
+	}
 
 	// Check for existing active session for this consumer and offer
 	// Skip this check for retry attempts (the consumer already has a failed session for a different offer)
