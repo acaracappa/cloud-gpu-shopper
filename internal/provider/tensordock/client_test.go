@@ -1,8 +1,10 @@
 package tensordock
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -855,4 +857,54 @@ func TestLocationGPUToOffer(t *testing.T) {
 	assert.Equal(t, 0.40, offer.PricePerHour)
 	assert.Contains(t, offer.Location, "TestCity")
 	assert.InDelta(t, 0.67, offer.Reliability, 0.01) // Tier 2/3
+}
+
+func TestInstancesToProviderInstances_LogsUnknownInstances(t *testing.T) {
+	// Create a logger that writes to a buffer so we can inspect log output
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	client := NewClient("test-key", "test-token", WithLogger(logger))
+
+	instances := []Instance{
+		{
+			ID:           "inst-001",
+			Name:         "shopper-session-abc",
+			Status:       "running",
+			PricePerHour: 0.50,
+		},
+		{
+			ID:     "inst-002",
+			Name:   "my-personal-vm",
+			Status: "running",
+		},
+		{
+			ID:           "inst-003",
+			Name:         "shopper-session-def",
+			Status:       "stopped",
+			PricePerHour: 0.30,
+		},
+		{
+			ID:     "inst-004",
+			Name:   "test-instance",
+			Status: "creating",
+		},
+	}
+
+	result := client.instancesToProviderInstances(instances)
+
+	// Only shopper-prefixed instances should be returned
+	require.Len(t, result, 2)
+	assert.Equal(t, "inst-001", result[0].ID)
+	assert.Equal(t, "session-abc", result[0].Tags.ShopperSessionID)
+	assert.Equal(t, "inst-003", result[1].ID)
+	assert.Equal(t, "session-def", result[1].Tags.ShopperSessionID)
+
+	// Verify warning logs contain the unknown instance details
+	logOutput := logBuf.String()
+	assert.Contains(t, logOutput, "inst-002")
+	assert.Contains(t, logOutput, "my-personal-vm")
+	assert.Contains(t, logOutput, "inst-004")
+	assert.Contains(t, logOutput, "test-instance")
+	assert.Contains(t, logOutput, "TensorDock instance without shopper prefix detected")
 }

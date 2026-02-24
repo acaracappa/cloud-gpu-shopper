@@ -915,6 +915,11 @@ func (c *Client) instancesToProviderInstances(instances []Instance) []provider.P
 				},
 				PricePerHour: inst.PricePerHour,
 			})
+		} else {
+			c.logger.Warn("TensorDock instance without shopper prefix detected",
+				slog.String("instance_id", inst.ID),
+				slog.String("instance_name", inst.Name),
+				slog.String("status", inst.Status))
 		}
 	}
 	return result
