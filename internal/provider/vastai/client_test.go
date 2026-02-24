@@ -1034,3 +1034,41 @@ func TestTemplate_ToModel(t *testing.T) {
 	// CreatedAt should be converted from Unix timestamp
 	assert.False(t, model.CreatedAt.IsZero())
 }
+
+func TestClient_GetAccountBalance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/users/current/", r.URL.Path)
+		assert.Contains(t, r.Header.Get("Authorization"), "Bearer")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"credit": 42.50,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	balance, err := client.GetAccountBalance(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 42.50, balance.Balance)
+	assert.Equal(t, "USD", balance.Currency)
+}
+
+func TestClient_GetAccountBalance_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("unauthorized"))
+	}))
+	defer server.Close()
+
+	client := NewClient("bad-key", WithBaseURL(server.URL), WithMinInterval(0))
+
+	balance, err := client.GetAccountBalance(context.Background())
+
+	require.Error(t, err)
+	assert.Nil(t, balance)
+	assert.Contains(t, err.Error(), "balance check failed: status 401")
+}

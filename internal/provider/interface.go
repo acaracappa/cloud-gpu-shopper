@@ -84,6 +84,20 @@ type Provider interface {
 	SupportsFeature(feature ProviderFeature) bool
 }
 
+// BalanceProvider is an optional interface for providers that support account balance checking.
+type BalanceProvider interface {
+	GetAccountBalance(ctx context.Context) (*AccountBalance, error)
+}
+
+// AccountBalance represents a provider account's current balance.
+type AccountBalance struct {
+	Balance  float64 // Current balance in provider's currency
+	Currency string  // Currency code (e.g., "USD")
+}
+
+// ErrBalanceNotSupported indicates a provider doesn't support balance checking.
+var ErrBalanceNotSupported = errors.New("balance checking not supported by this provider")
+
 // TemplateProvider extends Provider with template management capabilities.
 // Only providers that support templates (e.g., Vast.ai) implement this interface.
 type TemplateProvider interface {
