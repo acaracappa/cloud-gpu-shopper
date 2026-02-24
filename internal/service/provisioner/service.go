@@ -324,7 +324,7 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 		destroyTimeout:       DefaultDestroyTimeout,
 		destroyRetries:       DefaultDestroyRetries,
 		sshKeyBits:           DefaultSSHKeyBits,
-		lowBalanceThreshold: DefaultLowBalanceThreshold,
+		lowBalanceThreshold:  DefaultLowBalanceThreshold,
 		now:                  time.Now,
 		destroyLocks:         make(map[string]*sync.Mutex),
 	}
