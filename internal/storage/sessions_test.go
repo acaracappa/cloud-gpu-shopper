@@ -595,6 +595,94 @@ func TestSessionStore_CountSessionsByProviderAndStatus(t *testing.T) {
 	assert.Equal(t, 0, countMap["vastai:failed"])
 }
 
+func TestSessionStore_GetFailedSessionsWithInstances(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+
+	// Case 1: Failed session WITH provider ID — should be returned
+	failedWithProvider := &models.Session{
+		ID:             "sess-failed-with-provider",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		ProviderID:     "provider-instance-999",
+		OfferID:        "offer-1",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusFailed,
+		Error:          "destroy failed: connection timeout",
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now.Add(-time.Hour),
+		ExpiresAt:      now,
+	}
+	err := store.Create(ctx, failedWithProvider)
+	require.NoError(t, err)
+
+	// Case 2: Failed session WITHOUT provider ID — should NOT be returned
+	failedWithoutProvider := &models.Session{
+		ID:             "sess-failed-no-provider",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		OfferID:        "offer-2",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusFailed,
+		Error:          "provisioning failed: no capacity",
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now.Add(-time.Hour),
+		ExpiresAt:      now,
+	}
+	err = store.Create(ctx, failedWithoutProvider)
+	require.NoError(t, err)
+
+	// Case 3: Running session WITH provider ID — should NOT be returned (wrong status)
+	runningWithProvider := &models.Session{
+		ID:             "sess-running-with-provider",
+		ConsumerID:     "consumer-001",
+		Provider:       "vastai",
+		ProviderID:     "provider-instance-888",
+		OfferID:        "offer-3",
+		GPUType:        "RTX4090",
+		GPUCount:       1,
+		Status:         models.StatusRunning,
+		WorkloadType:   "ml-training",
+		ReservationHrs: 4,
+		StoragePolicy:  "destroy",
+		PricePerHour:   0.50,
+		CreatedAt:      now,
+		ExpiresAt:      now.Add(4 * time.Hour),
+	}
+	err = store.Create(ctx, runningWithProvider)
+	require.NoError(t, err)
+
+	// Query: should return only the failed session with a provider ID
+	results, err := store.GetFailedSessionsWithInstances(ctx)
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "sess-failed-with-provider", results[0].ID)
+	assert.Equal(t, models.StatusFailed, results[0].Status)
+	assert.Equal(t, "provider-instance-999", results[0].ProviderID)
+}
+
+func TestSessionStore_GetFailedSessionsWithInstances_Empty(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSessionStore(db)
+	ctx := context.Background()
+
+	// No sessions at all — should return empty slice, no error
+	results, err := store.GetFailedSessionsWithInstances(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 func TestSessionStore_CountSessionsByProviderAndStatus_Empty(t *testing.T) {
 	db := newTestDB(t)
 	store := NewSessionStore(db)

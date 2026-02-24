@@ -223,6 +223,10 @@ func (s *SessionStore) ListInternal(ctx context.Context, filter SessionFilter) (
 		args = append(args, filter.ExpiresBeforeTime)
 	}
 
+	if filter.HasProviderID {
+		query += " AND provider_instance_id != ''"
+	}
+
 	query += " ORDER BY created_at DESC"
 
 	if filter.Limit > 0 {
@@ -283,6 +287,15 @@ func (s *SessionStore) GetExpiredSessions(ctx context.Context) ([]*models.Sessio
 	})
 }
 
+// GetFailedSessionsWithInstances returns failed sessions that still have a provider instance ID.
+// These are sessions where destruction may have failed, leaving a provider instance potentially running.
+func (s *SessionStore) GetFailedSessionsWithInstances(ctx context.Context) ([]*models.Session, error) {
+	return s.ListInternal(ctx, SessionFilter{
+		Statuses:      []models.SessionStatus{models.StatusFailed},
+		HasProviderID: true,
+	})
+}
+
 // GetSessionsByStatus returns sessions with specific statuses
 func (s *SessionStore) GetSessionsByStatus(ctx context.Context, statuses ...models.SessionStatus) ([]*models.Session, error) {
 	return s.ListInternal(ctx, SessionFilter{
@@ -308,6 +321,7 @@ type SessionFilter struct {
 	Status            models.SessionStatus
 	Statuses          []models.SessionStatus
 	ExpiresBeforeTime time.Time
+	HasProviderID     bool
 	Limit             int
 }
 
