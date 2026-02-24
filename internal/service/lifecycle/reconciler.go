@@ -14,7 +14,7 @@ import (
 
 const (
 	// DefaultReconcileInterval is how often to run reconciliation
-	DefaultReconcileInterval = 5 * time.Minute
+	DefaultReconcileInterval = 2 * time.Minute
 )
 
 // ProviderRegistry provides access to provider clients
@@ -475,6 +475,57 @@ func (r *Reconciler) RecoverStuckSessions(ctx context.Context) error {
 			session.Status = models.StatusStopped
 			session.StoppedAt = r.now()
 			r.store.Update(ctx, session)
+		}
+	}
+
+	// Also recover failed sessions that still have provider instances
+	failedSessions, err := r.store.GetSessionsByStatus(ctx, models.StatusFailed)
+	if err != nil {
+		r.logger.Error("failed to get failed sessions for recovery",
+			slog.String("error", err.Error()))
+	} else {
+		for _, session := range failedSessions {
+			if session.ProviderID == "" {
+				continue
+			}
+			r.logger.Warn("found failed session with provider instance",
+				slog.String("session_id", session.ID),
+				slog.String("provider_id", session.ProviderID),
+				slog.String("provider", session.Provider))
+
+			prov, err := r.providers.Get(session.Provider)
+			if err != nil {
+				r.logger.Error("provider not found for failed session",
+					slog.String("session_id", session.ID),
+					slog.String("provider", session.Provider))
+				continue
+			}
+
+			status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
+			if err != nil {
+				session.ProviderID = ""
+				r.store.Update(ctx, session)
+				continue
+			}
+
+			if status.Running {
+				r.logger.Info("destroying leaked instance from failed session",
+					slog.String("session_id", session.ID),
+					slog.String("provider_id", session.ProviderID))
+				if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+					r.logger.Error("failed to destroy leaked instance",
+						slog.String("session_id", session.ID),
+						slog.String("error", err.Error()))
+				} else {
+					session.ProviderID = ""
+					session.Status = models.StatusStopped
+					session.StoppedAt = r.now()
+					r.store.Update(ctx, session)
+				}
+			} else {
+				session.ProviderID = ""
+				r.store.Update(ctx, session)
+			}
 		}
 	}
 

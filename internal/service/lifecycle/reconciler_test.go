@@ -574,6 +574,154 @@ func TestReconciler_RecoverStuckStopping(t *testing.T) {
 	assert.Equal(t, []string{"still-running"}, prov.getDestroyCalls())
 }
 
+func TestRecoverStuckSessions_IncludesFailedWithProviderID(t *testing.T) {
+	store := newMockReconcileStore()
+	registry := newMockProviderRegistry()
+
+	fixedTime := time.Date(2026, 2, 23, 12, 0, 0, 0, time.UTC)
+
+	// Failed session that still has a provider instance running
+	failedSession := &models.Session{
+		ID:         "failed-session",
+		Provider:   "vastai",
+		ProviderID: "leaked-instance",
+		Status:     models.StatusFailed,
+		Error:      "some provisioning error",
+	}
+	store.add(failedSession)
+
+	prov := newMockReconcileProvider("vastai")
+	prov.statusFn = func(id string) (*provider.InstanceStatus, error) {
+		return &provider.InstanceStatus{
+			Status:  "running",
+			Running: true,
+		}, nil
+	}
+	registry.Add(prov)
+
+	r := NewReconciler(store, registry,
+		WithReconcileLogger(newTestLogger()),
+		WithReconcileTimeFunc(func() time.Time { return fixedTime }))
+
+	ctx := context.Background()
+	err := r.RecoverStuckSessions(ctx)
+	require.NoError(t, err)
+
+	// DestroyInstance should have been called for the leaked instance
+	assert.Equal(t, []string{"leaked-instance"}, prov.getDestroyCalls())
+
+	// Session should be updated: provider ID cleared, status stopped
+	updated, err := store.Get(ctx, "failed-session")
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusStopped, updated.Status)
+	assert.Empty(t, updated.ProviderID)
+	assert.Equal(t, fixedTime, updated.StoppedAt)
+}
+
+func TestRecoverStuckSessions_FailedWithProviderID_InstanceNotFound(t *testing.T) {
+	store := newMockReconcileStore()
+	registry := newMockProviderRegistry()
+
+	// Failed session whose provider instance no longer exists
+	failedSession := &models.Session{
+		ID:         "failed-session",
+		Provider:   "vastai",
+		ProviderID: "gone-instance",
+		Status:     models.StatusFailed,
+	}
+	store.add(failedSession)
+
+	prov := newMockReconcileProvider("vastai")
+	// Default statusFn returns ErrInstanceNotFound
+	registry.Add(prov)
+
+	r := NewReconciler(store, registry,
+		WithReconcileLogger(newTestLogger()))
+
+	ctx := context.Background()
+	err := r.RecoverStuckSessions(ctx)
+	require.NoError(t, err)
+
+	// No destroy call needed - instance already gone
+	assert.Empty(t, prov.getDestroyCalls())
+
+	// Provider ID should be cleared
+	updated, err := store.Get(ctx, "failed-session")
+	require.NoError(t, err)
+	assert.Empty(t, updated.ProviderID)
+	// Status stays failed since instance wasn't running
+	assert.Equal(t, models.StatusFailed, updated.Status)
+}
+
+func TestRecoverStuckSessions_FailedWithProviderID_InstanceStopped(t *testing.T) {
+	store := newMockReconcileStore()
+	registry := newMockProviderRegistry()
+
+	// Failed session whose provider instance exists but is not running
+	failedSession := &models.Session{
+		ID:         "failed-session",
+		Provider:   "vastai",
+		ProviderID: "stopped-instance",
+		Status:     models.StatusFailed,
+	}
+	store.add(failedSession)
+
+	prov := newMockReconcileProvider("vastai")
+	prov.statusFn = func(id string) (*provider.InstanceStatus, error) {
+		return &provider.InstanceStatus{
+			Status:  "exited",
+			Running: false,
+		}, nil
+	}
+	registry.Add(prov)
+
+	r := NewReconciler(store, registry,
+		WithReconcileLogger(newTestLogger()))
+
+	ctx := context.Background()
+	err := r.RecoverStuckSessions(ctx)
+	require.NoError(t, err)
+
+	// No destroy needed
+	assert.Empty(t, prov.getDestroyCalls())
+
+	// Provider ID should be cleared
+	updated, err := store.Get(ctx, "failed-session")
+	require.NoError(t, err)
+	assert.Empty(t, updated.ProviderID)
+}
+
+func TestRecoverStuckSessions_FailedWithNoProviderID_Skipped(t *testing.T) {
+	store := newMockReconcileStore()
+	registry := newMockProviderRegistry()
+
+	// Failed session with no provider ID should be skipped
+	failedSession := &models.Session{
+		ID:       "failed-no-provider",
+		Provider: "vastai",
+		Status:   models.StatusFailed,
+	}
+	store.add(failedSession)
+
+	prov := newMockReconcileProvider("vastai")
+	registry.Add(prov)
+
+	r := NewReconciler(store, registry,
+		WithReconcileLogger(newTestLogger()))
+
+	ctx := context.Background()
+	err := r.RecoverStuckSessions(ctx)
+	require.NoError(t, err)
+
+	// No destroy calls
+	assert.Empty(t, prov.getDestroyCalls())
+
+	// Session unchanged
+	updated, err := store.Get(ctx, "failed-no-provider")
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusFailed, updated.Status)
+}
+
 func TestReconciler_MultipleProviders(t *testing.T) {
 	store := newMockReconcileStore()
 	registry := newMockProviderRegistry()
