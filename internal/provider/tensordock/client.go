@@ -58,6 +58,7 @@ import (
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -377,10 +378,8 @@ type Client struct {
 	timeouts       OperationTimeouts
 	circuitBreaker *circuitBreaker
 
-	// Rate limiting to avoid 429 errors
-	mu          sync.Mutex
-	lastRequest time.Time
-	minInterval time.Duration
+	// Rate limiting to avoid 429 errors (token bucket)
+	limiter *rate.Limiter
 
 	// Debug mode for troubleshooting API issues
 	debugEnabled bool
@@ -409,11 +408,24 @@ func WithHTTPClient(client *http.Client) ClientOption {
 	}
 }
 
+// WithRateLimit sets the token bucket rate limiter parameters.
+// rps is requests per second, burst is the maximum burst size.
+func WithRateLimit(rps float64, burst int) ClientOption {
+	return func(c *Client) {
+		c.limiter = rate.NewLimiter(rate.Limit(rps), burst)
+	}
+}
+
 // WithMinInterval sets the minimum interval between API requests.
-// TensorDock has rate limits; default is 1 second between requests.
+// Kept for backward compatibility — converts to token bucket rate.
+// A zero duration sets rate.Inf (unlimited).
 func WithMinInterval(d time.Duration) ClientOption {
 	return func(c *Client) {
-		c.minInterval = d
+		if d <= 0 {
+			c.limiter = rate.NewLimiter(rate.Inf, 1)
+		} else {
+			c.limiter = rate.NewLimiter(rate.Every(d), 1)
+		}
 	}
 }
 
@@ -680,7 +692,7 @@ func NewClient(apiKey, apiToken string, opts ...ClientOption) *Client {
 		defaultImage:   defaultImageName,
 		timeouts:       DefaultTimeouts(),
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()),
-		minInterval:    time.Second, // Conservative rate limit
+		limiter:        rate.NewLimiter(rate.Limit(2), 3), // 2 req/s, burst 3
 		logger:         slog.Default(),
 		locationStats:  newLocationStats(), // Dynamic availability tracking
 	}
@@ -730,7 +742,9 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 		c.recordAPIMetrics("ListOffers", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Apply operation-specific timeout
 	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.ListOffers)
@@ -804,7 +818,9 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 		c.recordAPIMetrics("ListAllInstances", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Apply operation-specific timeout
 	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.ListInstances)
@@ -951,7 +967,9 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		c.recordAPIMetrics("CreateInstance", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Apply operation-specific timeout (create operations may take longer)
 	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.CreateInstance)
@@ -1117,7 +1135,9 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err er
 		c.recordAPIMetrics("DestroyInstance", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Apply operation-specific timeout
 	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.Destroy)
@@ -1201,7 +1221,9 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 		c.recordAPIMetrics("GetInstanceStatus", startTime, err)
 	}()
 
-	c.rateLimit()
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 
 	// Apply operation-specific timeout
 	ctx, cancel := c.contextWithTimeout(ctx, c.timeouts.GetStatus)
@@ -1292,16 +1314,10 @@ func (c *Client) setAuthHeader(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.apiToken)
 }
 
-// rateLimit enforces minimum interval between API requests
-func (c *Client) rateLimit() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	elapsed := time.Since(c.lastRequest)
-	if elapsed < c.minInterval {
-		time.Sleep(c.minInterval - elapsed)
-	}
-	c.lastRequest = time.Now()
+// rateLimit waits for a token from the rate limiter.
+// Returns an error if the context is cancelled while waiting.
+func (c *Client) rateLimit(ctx context.Context) error {
+	return c.limiter.Wait(ctx)
 }
 
 // contextWithTimeout creates a context with an operation-specific timeout.

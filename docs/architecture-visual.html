@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cloud GPU Shopper - Architecture Overview</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 40px 60px;
+  }
+  h1 {
+    font-size: 2.4em;
+    color: #58a6ff;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    font-size: 1.1em;
+    color: #8b949e;
+    margin-bottom: 48px;
+    border-bottom: 1px solid #21262d;
+    padding-bottom: 20px;
+  }
+  h2 {
+    font-size: 1.6em;
+    color: #f0f6fc;
+    margin: 48px 0 12px;
+  }
+  h2 .num {
+    color: #58a6ff;
+    font-weight: 400;
+  }
+  .desc {
+    color: #8b949e;
+    font-size: 0.95em;
+    margin-bottom: 20px;
+    max-width: 800px;
+  }
+  .mermaid {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 12px;
+    padding: 30px;
+    margin: 16px 0 40px;
+    text-align: center;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin: 16px 0 40px;
+  }
+  .card {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .card h3 {
+    color: #58a6ff;
+    font-size: 1.1em;
+    margin-bottom: 12px;
+  }
+  .card ul { list-style: none; }
+  .card li {
+    padding: 4px 0;
+    font-size: 0.9em;
+    color: #c9d1d9;
+  }
+  .card li::before {
+    content: ">";
+    color: #3fb950;
+    font-weight: bold;
+    margin-right: 8px;
+    font-family: monospace;
+  }
+  .safety li::before { content: "!"; color: #f85149; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75em;
+    font-weight: 600;
+    margin-left: 6px;
+  }
+  .tag-go { background: #00ADD822; color: #00ADD8; }
+  .tag-sqlite { background: #003B5722; color: #58a6ff; }
+  .tag-rest { background: #3fb95022; color: #3fb950; }
+  .stats {
+    display: flex;
+    gap: 24px;
+    margin: 16px 0 40px;
+    flex-wrap: wrap;
+  }
+  .stat {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 12px;
+    padding: 20px 28px;
+    text-align: center;
+    min-width: 150px;
+  }
+  .stat .num { font-size: 2em; color: #58a6ff; font-weight: 700; }
+  .stat .label { font-size: 0.85em; color: #8b949e; margin-top: 4px; }
+  .endpoint-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    margin: 16px 0 40px;
+  }
+  .endpoint-group {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .endpoint-group h3 {
+    color: #f0f6fc;
+    font-size: 0.95em;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #21262d;
+  }
+  .ep {
+    font-family: monospace;
+    font-size: 0.8em;
+    padding: 3px 0;
+    color: #c9d1d9;
+  }
+  .method {
+    display: inline-block;
+    width: 42px;
+    font-weight: 700;
+    font-size: 0.75em;
+  }
+  .method-get { color: #3fb950; }
+  .method-post { color: #58a6ff; }
+  .method-put { color: #d29922; }
+  .method-del { color: #f85149; }
+</style>
+</head>
+<body>
+
+<h1>Cloud GPU Shopper</h1>
+<div class="subtitle">Unified GPU inventory & orchestration across Vast.ai and TensorDock &mdash; <em>"Menu, not middleman"</em></div>
+
+<!-- Stats bar -->
+<div class="stats">
+  <div class="stat"><div class="num">2</div><div class="label">GPU Providers</div></div>
+  <div class="stat"><div class="num">33</div><div class="label">API Endpoints</div></div>
+  <div class="stat"><div class="num">50</div><div class="label">Benchmark Results</div></div>
+  <div class="stat"><div class="num">7</div><div class="label">Safety Systems</div></div>
+  <div class="stat"><div class="num">Go</div><div class="label">Gin + Cobra + SQLite</div></div>
+</div>
+
+<!-- 1. High-Level Architecture -->
+<h2><span class="num">01</span> System Architecture</h2>
+<p class="desc">Three entry points (API, CLI, background jobs) share core services that talk to provider adapters. We provision and hand off SSH credentials &mdash; never proxy traffic.</p>
+
+<div class="mermaid">
+graph TB
+    subgraph CLIENTS["&nbsp;&nbsp;Clients&nbsp;&nbsp;"]
+        API["REST API<br/><small>Gin &bull; port 8080</small>"]
+        CLI["CLI Tool<br/><small>Cobra &bull; gpu-shopper</small>"]
+        BG["Background Jobs<br/><small>Goroutines</small>"]
+    end
+
+    subgraph CORE["&nbsp;&nbsp;Core Services&nbsp;&nbsp;"]
+        INV["Inventory<br/><small>Cache &bull; Filter &bull; Rate Limit</small>"]
+        PROV["Provisioner<br/><small>2-Phase &bull; SSH Verify</small>"]
+        LIFE["Lifecycle<br/><small>Timers &bull; Orphans &bull; 12h Max</small>"]
+        COST["Cost Tracker<br/><small>Hourly &bull; Budget Alerts</small>"]
+        BENCH["Benchmark<br/><small>Runner &bull; Scheduler</small>"]
+    end
+
+    subgraph PROVIDERS["&nbsp;&nbsp;Provider Adapters&nbsp;&nbsp;"]
+        VAST["Vast.ai<br/><small>Spot &bull; Templates &bull; Tags</small>"]
+        TD["TensorDock<br/><small>On-Demand &bull; Dedicated IP</small>"]
+    end
+
+    DB[("SQLite<br/><small>Sessions &bull; Costs &bull; Cache &bull; Benchmarks</small>")]
+
+    subgraph GPU["&nbsp;&nbsp;Remote GPU Node&nbsp;&nbsp;"]
+        WORK["Consumer Workload<br/><small>vLLM &bull; Ollama &bull; Training &bull; Batch</small>"]
+    end
+
+    API --> CORE
+    CLI --> CORE
+    BG --> CORE
+
+    INV --> PROVIDERS
+    PROV --> PROVIDERS
+    LIFE --> PROVIDERS
+    BENCH --> PROVIDERS
+
+    CORE --> DB
+    PROVIDERS -->|"SSH Verify + Credentials"| GPU
+
+    style CLIENTS fill:#1a2332,stroke:#30363d,color:#c9d1d9
+    style CORE fill:#1a2332,stroke:#30363d,color:#c9d1d9
+    style PROVIDERS fill:#1a2332,stroke:#30363d,color:#c9d1d9
+    style GPU fill:#1c2a1c,stroke:#3fb950,color:#c9d1d9
+    style DB fill:#1a2332,stroke:#58a6ff,color:#c9d1d9
+</div>
+
+<!-- 2. Provisioning Flow -->
+<h2><span class="num">02</span> Provisioning Flow (The Core Loop)</h2>
+<p class="desc">Two-phase provisioning ensures crash safety. Database record created <em>before</em> calling the provider. SSH verified before marking "running". Destruction is retried and verified.</p>
+
+<div class="mermaid">
+sequenceDiagram
+    participant U as User / API
+    participant S as Shopper Service
+    participant DB as SQLite
+    participant P as Provider (Vast.ai)
+    participant G as GPU Node
+
+    U->>S: POST /sessions {offer_id, hours}
+    S->>S: Generate SSH keypair
+    S->>DB: Phase 1: Create session (status=pending)
+    S->>P: Phase 2: CreateInstance(offer, ssh_key, tags)
+    P-->>S: instance_id, ssh_host, ssh_port
+    S->>DB: Phase 3: Update session (status=provisioning)
+    S-->>U: Session + SSH private key (shown ONCE)
+
+    loop SSH Verification (up to 5 min)
+        S->>G: SSH connect attempt
+        G-->>S: Connection OK
+    end
+    S->>DB: status = running
+
+    Note over U,G: User connects directly via SSH
+
+    U->>S: POST /sessions/:id/done
+    S->>P: DestroyInstance(id)
+    loop Verify Destruction
+        S->>P: GetInstanceStatus(id)
+        P-->>S: not found / stopped
+    end
+    S->>DB: status = stopped
+</div>
+
+<!-- 3. Safety Systems -->
+<h2><span class="num">03</span> Safety Systems &mdash; "Zero Orphaned Instances"</h2>
+<p class="desc">Seven interlocking safety systems ensure no GPU instance is ever left running unattended.</p>
+
+<div class="mermaid">
+graph LR
+    subgraph PREVENT["&nbsp;&nbsp;Prevention&nbsp;&nbsp;"]
+        A["Two-Phase<br/>Provisioning<br/><small>DB before provider call</small>"]
+        B["Instance<br/>Tagging<br/><small>Session ID on every instance</small>"]
+    end
+
+    subgraph DETECT["&nbsp;&nbsp;Detection&nbsp;&nbsp;"]
+        C["Provider<br/>Reconciliation<br/><small>DB vs Provider every 5min</small>"]
+        D["Orphan<br/>Detection<br/><small>15min grace period</small>"]
+        E["SSH<br/>Verification<br/><small>Validates readiness</small>"]
+    end
+
+    subgraph ENFORCE["&nbsp;&nbsp;Enforcement&nbsp;&nbsp;"]
+        F["12-Hour<br/>Hard Max<br/><small>Auto-shutdown</small>"]
+        G["Verified<br/>Destruction<br/><small>Retry loop until confirmed</small>"]
+    end
+
+    A --> C
+    B --> C
+    C --> D
+    D --> G
+    E --> F
+    F --> G
+
+    style PREVENT fill:#1c2a1c,stroke:#3fb950,color:#c9d1d9
+    style DETECT fill:#2a2a1c,stroke:#d29922,color:#c9d1d9
+    style ENFORCE fill:#2a1c1c,stroke:#f85149,color:#c9d1d9
+</div>
+
+<!-- 4. Background Jobs -->
+<h2><span class="num">04</span> Background Jobs</h2>
+<p class="desc">Autonomous goroutines that run continuously to keep the system healthy.</p>
+
+<div class="mermaid">
+graph TB
+    subgraph JOBS["&nbsp;&nbsp;Background Goroutines&nbsp;&nbsp;"]
+        direction LR
+        J1["Inventory Refresh<br/><small>Every 60s per provider</small>"]
+        J2["Lifecycle Check<br/><small>Every 60s &bull; expirations + hard max</small>"]
+        J3["Reconciliation<br/><small>Every 5min &bull; DB vs provider</small>"]
+        J4["Cost Aggregation<br/><small>Every hour &bull; per-session costs</small>"]
+        J5["Startup Recovery<br/><small>Once &bull; resume stuck sessions</small>"]
+    end
+
+    J1 -->|Fetches offers| VAST["Vast.ai API"]
+    J1 -->|Fetches offers| TD["TensorDock API"]
+    J2 -->|Force shutdown| DESTROY["DestroyInstance()"]
+    J3 -->|"Orphan? Auto-destroy"| DESTROY
+    J4 -->|Records| DB[("SQLite")]
+    J5 -->|"Checks stuck sessions"| DB
+
+    style JOBS fill:#1a2332,stroke:#30363d,color:#c9d1d9
+</div>
+
+<!-- 5. API Surface -->
+<h2><span class="num">05</span> API Surface (33 Endpoints)</h2>
+<p class="desc">RESTful API organized into 7 resource groups.</p>
+
+<div class="endpoint-grid">
+  <div class="endpoint-group">
+    <h3>Health & Metrics</h3>
+    <div class="ep"><span class="method method-get">GET</span> /health</div>
+    <div class="ep"><span class="method method-get">GET</span> /ready</div>
+    <div class="ep"><span class="method method-get">GET</span> /metrics</div>
+  </div>
+  <div class="endpoint-group">
+    <h3>Inventory</h3>
+    <div class="ep"><span class="method method-get">GET</span> /inventory</div>
+    <div class="ep"><span class="method method-get">GET</span> /inventory/:id</div>
+    <div class="ep"><span class="method method-get">GET</span> /inventory/:id/compatible-templates</div>
+    <div class="ep"><span class="method method-get">GET</span> /templates</div>
+    <div class="ep"><span class="method method-get">GET</span> /templates/:hash_id</div>
+  </div>
+  <div class="endpoint-group">
+    <h3>Sessions</h3>
+    <div class="ep"><span class="method method-post">POST</span> /sessions</div>
+    <div class="ep"><span class="method method-get">GET</span> /sessions</div>
+    <div class="ep"><span class="method method-get">GET</span> /sessions/:id</div>
+    <div class="ep"><span class="method method-get">GET</span> /sessions/:id/diagnostics</div>
+    <div class="ep"><span class="method method-post">POST</span> /sessions/:id/done</div>
+    <div class="ep"><span class="method method-post">POST</span> /sessions/:id/extend</div>
+    <div class="ep"><span class="method method-del">DEL</span> /sessions/:id</div>
+  </div>
+  <div class="endpoint-group">
+    <h3>Costs</h3>
+    <div class="ep"><span class="method method-get">GET</span> /costs</div>
+    <div class="ep"><span class="method method-get">GET</span> /costs/summary</div>
+    <div class="ep"><span class="method method-get">GET</span> /offer-health</div>
+  </div>
+  <div class="endpoint-group">
+    <h3>Benchmarks</h3>
+    <div class="ep"><span class="method method-get">GET</span> /benchmarks</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmarks/:id</div>
+    <div class="ep"><span class="method method-post">POST</span> /benchmarks</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmarks/best</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmarks/cheapest</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmarks/compare</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmarks/recommendations</div>
+  </div>
+  <div class="endpoint-group">
+    <h3>Benchmark Automation</h3>
+    <div class="ep"><span class="method method-post">POST</span> /benchmark-runs</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmark-runs/:id</div>
+    <div class="ep"><span class="method method-del">DEL</span> /benchmark-runs/:id</div>
+    <div class="ep"><span class="method method-post">POST</span> /benchmark-schedules</div>
+    <div class="ep"><span class="method method-get">GET</span> /benchmark-schedules</div>
+    <div class="ep"><span class="method method-put">PUT</span> /benchmark-schedules/:id</div>
+    <div class="ep"><span class="method method-del">DEL</span> /benchmark-schedules/:id</div>
+  </div>
+</div>
+
+<!-- 6. Data Flow -->
+<h2><span class="num">06</span> Session Lifecycle States</h2>
+<p class="desc">Every session moves through these states. Failed and stopped are terminal.</p>
+
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> pending: POST /sessions
+    pending --> provisioning: Provider call succeeds
+    pending --> failed: Provider call fails
+
+    provisioning --> running: SSH verified
+    provisioning --> failed: SSH timeout / error
+
+    running --> stopping: done / expire / 12h max
+    running --> running: extend
+
+    stopping --> stopped: Destruction verified
+    stopping --> stopping: Retry destroy
+
+    failed --> [*]
+    stopped --> [*]
+</div>
+
+<!-- 7. Package Map -->
+<h2><span class="num">07</span> Codebase Map</h2>
+<p class="desc">Go packages organized by layer. ~15k lines of Go across 40+ files.</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>cmd/ &mdash; Entry Points</h3>
+    <ul>
+      <li><code>server/</code> &mdash; API server (Gin)</li>
+      <li><code>cli/</code> &mdash; CLI tool (Cobra)</li>
+      <li><code>benchmark-loader/</code> &mdash; Bulk result importer</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>internal/api/ &mdash; HTTP Layer</h3>
+    <ul>
+      <li>Route registration & middleware</li>
+      <li>Request validation & error handling</li>
+      <li>JSON serialization</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>internal/service/ &mdash; Business Logic</h3>
+    <ul>
+      <li><code>inventory/</code> &mdash; Cache, filter, adaptive rate limit</li>
+      <li><code>provisioner/</code> &mdash; 2-phase create, verified destroy</li>
+      <li><code>lifecycle/</code> &mdash; Timers, reconciliation, recovery</li>
+      <li><code>cost/</code> &mdash; Hourly tracking, budget alerts</li>
+      <li><code>benchmark/</code> &mdash; Runner, scheduler, SCP upload</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>internal/provider/ &mdash; Adapters</h3>
+    <ul>
+      <li><code>interface.go</code> &mdash; Provider contract</li>
+      <li><code>vastai/</code> &mdash; Vast.ai (spot, templates, tags)</li>
+      <li><code>tensordock/</code> &mdash; TensorDock (dedicated IP)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>internal/ssh/ &mdash; Verification</h3>
+    <ul>
+      <li>SSH connectivity verification</li>
+      <li>nvidia-smi GPU status checks</li>
+      <li>Disk space & OOM detection</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>internal/storage/ &mdash; Persistence</h3>
+    <ul>
+      <li>SQLite with migrations</li>
+      <li>Sessions, costs, consumers, cache</li>
+      <li>Benchmark results storage</li>
+    </ul>
+  </div>
+  <div class="card safety">
+    <h3>Safety-Critical Paths</h3>
+    <ul>
+      <li><code>provisioner/service.go</code> &mdash; 2-phase provisioning</li>
+      <li><code>lifecycle/reconciler.go</code> &mdash; orphan/ghost detection</li>
+      <li><code>lifecycle/startup.go</code> &mdash; crash recovery</li>
+      <li><code>lifecycle/manager.go</code> &mdash; 12h hard max</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Observability</h3>
+    <ul>
+      <li>Prometheus metrics at <code>/metrics</code></li>
+      <li>Structured logging (slog)</li>
+      <li>Critical alerts: orphans, destroy failures</li>
+      <li>Docker + Grafana dashboards</li>
+    </ul>
+  </div>
+</div>
+
+<div style="text-align:center; color:#484f58; padding: 40px 0 20px; font-size: 0.85em;">
+  Cloud GPU Shopper &mdash; Go + Gin + SQLite &mdash; github.com/cloud-gpu-shopper
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1a2332',
+      primaryTextColor: '#c9d1d9',
+      primaryBorderColor: '#30363d',
+      lineColor: '#58a6ff',
+      secondaryColor: '#161b22',
+      tertiaryColor: '#21262d',
+      noteBkgColor: '#161b22',
+      noteTextColor: '#c9d1d9',
+      noteBorderColor: '#30363d'
+    },
+    flowchart: { curve: 'basis', padding: 20 },
+    sequence: { mirrorActors: false }
+  });
+</script>
+</body>
+</html>

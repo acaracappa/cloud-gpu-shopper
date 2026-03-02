@@ -30,7 +30,7 @@ var inventoryCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(inventoryCmd)
 
-	inventoryCmd.Flags().StringVarP(&inventoryProvider, "provider", "p", "", "Filter by provider (vastai, tensordock)")
+	inventoryCmd.Flags().StringVarP(&inventoryProvider, "provider", "p", "", "Filter by provider (vastai, bluelobster, tensordock)")
 	inventoryCmd.Flags().StringVarP(&inventoryGPUType, "gpu", "g", "", "Filter by GPU type (e.g., RTX4090, A100)")
 	inventoryCmd.Flags().Float64Var(&inventoryMaxPrice, "max-price", 0, "Maximum price per hour (USD)")
 	inventoryCmd.Flags().IntVar(&inventoryMinVRAM, "min-vram", 0, "Minimum VRAM in GB")

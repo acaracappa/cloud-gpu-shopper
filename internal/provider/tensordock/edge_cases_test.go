@@ -842,7 +842,7 @@ func TestClient_RateLimiting(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Use a longer interval to test rate limiting
+	// Token bucket: 10 req/s (every 100ms), burst 1
 	client := NewClient("test-key", "test-token",
 		WithBaseURL(server.URL),
 		WithMinInterval(100*time.Millisecond),
@@ -855,7 +855,7 @@ func TestClient_RateLimiting(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// Should take at least 200ms (2 intervals between 3 requests)
+	// First request uses burst token (immediate), next 2 wait ~100ms each
 	assert.GreaterOrEqual(t, elapsed.Milliseconds(), int64(180), "Rate limiting should enforce delays")
 	assert.Equal(t, 3, requestCount, "All requests should complete")
 }

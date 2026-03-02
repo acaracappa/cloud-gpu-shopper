@@ -43,13 +43,13 @@ Cloud GPU Shopper is a Go service that provides unified inventory and orchestrat
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                      PROVIDER ADAPTERS                            │   │
 │  ├──────────────────────────────────────────────────────────────────┤   │
-│  │  ┌─────────────────────────┐  ┌─────────────────────────────────┐│   │
-│  │  │       Vast.ai           │  │         TensorDock              ││   │
-│  │  │  - ListOffers()         │  │  - ListOffers()                 ││   │
-│  │  │  - CreateInstance()     │  │  - CreateInstance()             ││   │
-│  │  │  - DestroyInstance()    │  │  - DestroyInstance()            ││   │
-│  │  │  - GetInstanceStatus()  │  │  - GetInstanceStatus()          ││   │
-│  │  └─────────────────────────┘  └─────────────────────────────────┘│   │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐│   │
+│  │  │     Vast.ai      │  │   Blue Lobster   │  │    TensorDock    ││   │
+│  │  │ - ListOffers()   │  │ - ListOffers()   │  │ - ListOffers()   ││   │
+│  │  │ - CreateInstance()│  │ - CreateInstance()│  │ - CreateInstance()││   │
+│  │  │ - DestroyInstance │  │ - DestroyInstance │  │ - DestroyInstance ││   │
+│  │  │ - GetInstStatus() │  │ - GetInstStatus() │  │ - GetInstStatus() ││   │
+│  │  └──────────────────┘  └──────────────────┘  └──────────────────┘│   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
@@ -88,74 +88,43 @@ Cloud GPU Shopper is a Go service that provides unified inventory and orchestrat
 ```
 cloud-gpu-shopper/
 ├── cmd/
-│   ├── server/           # Main API server
-│   │   └── main.go
-│   └── cli/              # CLI tool
-│       └── main.go
+│   ├── server/               # Main API server
+│   ├── cli/                  # CLI tool (gpu-shopper)
+│   └── benchmark-loader/     # Bulk benchmark result importer
 │
 ├── internal/
-│   ├── api/              # REST API handlers
-│   │   ├── handlers.go
-│   │   ├── middleware.go
-│   │   └── routes.go
-│   │
-│   ├── inventory/        # Inventory service
-│   │   ├── service.go
-│   │   ├── cache.go
-│   │   └── types.go
-│   │
-│   ├── provisioner/      # Provisioning service
-│   │   ├── service.go
-│   │   └── types.go
-│   │
-│   ├── lifecycle/        # Lifecycle management
-│   │   ├── manager.go
-│   │   ├── timer.go
-│   │   ├── orphan.go
-│   │   └── reconciler.go
-│   │
-│   ├── ssh/              # SSH verification
-│   │   └── verifier.go
-│   │
-│   ├── cost/             # Cost tracking
-│   │   ├── tracker.go
-│   │   ├── aggregator.go
-│   │   └── alerts.go
-│   │
-│   ├── provider/         # Provider adapters
-│   │   ├── interface.go  # Common interface
-│   │   ├── vastai/
-│   │   │   ├── client.go
-│   │   │   └── types.go
-│   │   └── tensordock/
-│   │       ├── client.go
-│   │       └── types.go
-│   │
-│   └── storage/          # SQLite storage
-│       ├── db.go
-│       ├── sessions.go
-│       ├── costs.go
-│       └── migrations.go
+│   ├── api/                  # REST API handlers & server setup
+│   ├── benchmark/            # Benchmark models, store, parser, manifest
+│   ├── config/               # Configuration (Viper)
+│   ├── filetransfer/         # SCP/SFTP file transfer
+│   ├── logging/              # Structured logging (slog)
+│   ├── metrics/              # Prometheus metrics
+│   ├── provider/             # Provider adapters
+│   │   ├── interface.go      #   Common interface + error types
+│   │   ├── vastai/           #   Vast.ai adapter
+│   │   ├── bluelobster/      #   Blue Lobster adapter
+│   │   └── tensordock/       #   TensorDock adapter
+│   ├── service/              # Business logic
+│   │   ├── benchmark/        #   Benchmark runner & scheduler
+│   │   ├── cost/             #   Cost tracking & aggregation
+│   │   ├── inventory/        #   Inventory cache & failure tracking
+│   │   ├── lifecycle/        #   Lifecycle manager, reconciliation, startup recovery
+│   │   └── provisioner/      #   Two-phase provisioning, SSH verification, disk estimation
+│   ├── ssh/                  # SSH verifier, GPU/disk/OOM status checks
+│   └── storage/              # SQLite persistence & migrations
 │
-├── pkg/                  # Public packages
-│   ├── models/           # Shared data models
-│   │   ├── gpu.go
-│   │   ├── session.go
-│   │   └── cost.go
-│   └── client/           # Go client for the API
-│       └── client.go
+├── pkg/
+│   ├── models/               # Shared data models
+│   └── client/               # Go client library
 │
-├── deploy/
-│   ├── Dockerfile.server
-│   └── docker-compose.yml
+├── test/
+│   ├── e2e/                  # End-to-end API tests
+│   ├── live/                 # Live provider tests (real instances)
+│   └── mockprovider/         # Mock provider for testing
 │
-├── scripts/
-│   └── test.sh
-│
-├── prompts/              # Agent prompts
-│   ├── PRODUCT_DESIGNER_AGENT.md
-│   ├── ARCHITECT_AGENT.md
-│   └── README.md
+├── deploy/                   # Dockerfiles, docker-compose, Prometheus config
+├── scripts/                  # Benchmark & test runner scripts
+├── docs/                     # API, benchmarking, provider, troubleshooting docs
 │
 ├── go.mod
 ├── go.sum
@@ -172,7 +141,7 @@ cloud-gpu-shopper/
 ```go
 type GPUOffer struct {
     ID           string    `json:"id"`
-    Provider     string    `json:"provider"`      // "vastai" | "tensordock"
+    Provider     string    `json:"provider"`      // "vastai" | "bluelobster" | "tensordock"
     ProviderID   string    `json:"provider_id"`   // Provider's ID for this offer
     GPUType      string    `json:"gpu_type"`      // "RTX 4090", "A100", etc.
     GPUCount     int       `json:"gpu_count"`
@@ -250,7 +219,7 @@ All providers implement this interface:
 
 ```go
 type Provider interface {
-    // Name returns the provider identifier ("vastai", "tensordock")
+    // Name returns the provider identifier ("vastai", "bluelobster", "tensordock")
     Name() string
 
     // ListOffers returns available GPU offers
@@ -402,6 +371,9 @@ database:
 providers:
   vastai:
     api_key: "${VASTAI_API_KEY}"
+    enabled: true
+  bluelobster:
+    api_key: "${BLUELOBSTER_API_KEY}"
     enabled: true
   tensordock:
     auth_id: "${TENSORDOCK_AUTH_ID}"
@@ -685,24 +657,33 @@ func (s *Server) Start(ctx context.Context) error {
 }
 ```
 
-### 6. Enhanced Directory Structure
+### 6. Key Service Locations
 
-Updated to include reconciliation and safety systems:
+Safety-critical code lives in `internal/service/`:
 
 ```
-internal/
+internal/service/
 ├── lifecycle/
-│   ├── manager.go           # Main lifecycle manager
-│   ├── timer.go             # Timer-based checks
-│   ├── orphan.go            # Orphan detection (DB-based)
-│   ├── reconciler.go        # Provider reconciliation
-│   └── recovery.go          # Startup recovery
+│   ├── manager.go           # Main lifecycle manager (timers, hard max, idle)
+│   ├── reconciler.go        # Provider reconciliation & orphan/ghost detection
+│   └── startup.go           # Startup recovery for stuck sessions
 ├── provisioner/
-│   ├── service.go           # Two-phase provisioning
-│   ├── destroyer.go         # Verified destruction
-│   └── types.go
-├── ssh/
-│   └── verifier.go          # SSH verification
+│   ├── service.go           # Two-phase provisioning & verified destruction
+│   └── disk.go              # Disk estimation
+├── inventory/
+│   ├── service.go           # Inventory cache & adaptive rate limiting
+│   └── failure_tracker.go   # Offer failure tracking & confidence scoring
+├── cost/
+│   └── tracker.go           # Hourly cost recording & budget alerts
+└── benchmark/
+    ├── runner.go             # Automated benchmark runner
+    └── scheduler.go          # Benchmark scheduling
+
+internal/ssh/
+├── verifier.go              # SSH connectivity verification
+├── gpu_status.go            # nvidia-smi GPU status checks
+├── disk_status.go           # Disk space checks
+└── oom_status.go            # OOM detection
 ```
 
 ### 7. Observability Requirements

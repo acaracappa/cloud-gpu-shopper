@@ -339,7 +339,7 @@ func TestRateLimitingPreventsRapidRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Set a 100ms minimum interval
+	// Token bucket: 10 req/s (every 100ms), burst 1
 	client := NewClient("key", "token",
 		WithBaseURL(server.URL),
 		WithMinInterval(100*time.Millisecond),
@@ -353,8 +353,8 @@ func TestRateLimitingPreventsRapidRequests(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// Should have taken at least 200ms (2 intervals between 3 requests)
-	assert.GreaterOrEqual(t, elapsed.Milliseconds(), int64(200),
+	// First request uses burst token, next 2 wait ~100ms each
+	assert.GreaterOrEqual(t, elapsed.Milliseconds(), int64(180),
 		"Rate limiting should enforce minimum interval between requests")
 
 	mu.Lock()
@@ -363,7 +363,7 @@ func TestRateLimitingPreventsRapidRequests(t *testing.T) {
 	// Verify intervals between requests
 	for i := 1; i < len(requestTimes); i++ {
 		interval := requestTimes[i].Sub(requestTimes[i-1])
-		assert.GreaterOrEqual(t, interval.Milliseconds(), int64(95), // Allow 5ms tolerance
+		assert.GreaterOrEqual(t, interval.Milliseconds(), int64(85), // Allow 15ms tolerance for token bucket
 			"Each request should be at least minInterval apart")
 	}
 }
