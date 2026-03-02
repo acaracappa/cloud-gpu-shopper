@@ -1,0 +1,30 @@
+# Dockerfile for Mock Provider
+# Simulates Vast.ai API for E2E testing
+
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source
+COPY . .
+
+# Build mock provider binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o /mockprovider ./cmd/mockprovider
+
+# Final image
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates wget
+
+WORKDIR /app
+
+COPY --from=builder /mockprovider /app/mockprovider
+
+EXPOSE 8888
+
+ENTRYPOINT ["/app/mockprovider"]
+CMD ["-addr", ":8888"]
