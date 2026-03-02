@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/api"
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/config"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/logging"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/tensordock"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider/vastai"
+	benchsvc "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
@@ -58,6 +60,15 @@ func main() {
 	sessionStore := storage.NewSessionStore(db)
 	costStore := storage.NewCostStore(db)
 
+	// Initialize benchmark store
+	benchmarkStore, err := benchmark.NewStore(db.DB)
+	if err != nil {
+		logger.Warn("failed to initialize benchmark store", slog.String("error", err.Error()))
+		// Continue without benchmarks - not critical
+	} else {
+		logger.Info("initialized benchmark store")
+	}
+
 	// Initialize providers
 	var providers []provider.Provider
 
@@ -82,14 +93,75 @@ func main() {
 		logger.Warn("no providers configured, running in demo mode")
 	}
 
-	// Initialize services
-	invService := inventory.New(providers, inventory.WithLogger(logger))
+	// Initialize offer failure store for persistent failure tracking
+	offerFailureStore := storage.NewOfferFailureStore(db)
+
+	// Initialize services with provider-specific cache TTLs
+	invOpts := []inventory.Option{
+		inventory.WithLogger(logger),
+		inventory.WithCacheTTL(cfg.Inventory.DefaultCacheTTL),
+		inventory.WithBackoffTTL(cfg.Inventory.BackoffCacheTTL),
+		inventory.WithFailureStore(offerFailureStore),
+	}
+	// TensorDock has volatile inventory, use shorter cache TTL
+	if cfg.Inventory.TensorDockCacheTTL > 0 {
+		invOpts = append(invOpts, inventory.WithProviderCacheTTL("tensordock", cfg.Inventory.TensorDockCacheTTL))
+		logger.Info("using shorter cache TTL for TensorDock",
+			slog.Duration("ttl", cfg.Inventory.TensorDockCacheTTL))
+	}
+	invService := inventory.New(providers, invOpts...)
+
+	// Load persisted failure tracking data from DB
+	{
+		since := time.Now().Add(-inventory.FailureDecayPeriod)
+		dbFailures, err := offerFailureStore.LoadRecentFailures(ctx, since)
+		if err != nil {
+			logger.Warn("failed to load persisted failure data", slog.String("error", err.Error()))
+		} else {
+			// Convert storage records to inventory types
+			failures := make([]inventory.StoredFailure, len(dbFailures))
+			for i, f := range dbFailures {
+				failures[i] = inventory.StoredFailure{
+					OfferID:     f.OfferID,
+					Provider:    f.Provider,
+					GPUType:     f.GPUType,
+					FailureType: f.FailureType,
+					Reason:      f.Reason,
+					CreatedAt:   f.CreatedAt,
+				}
+			}
+
+			cooldownExpiry := time.Now().Add(-inventory.SuppressionCooldown)
+			dbSuppressions, err := offerFailureStore.LoadActiveSuppressions(ctx, cooldownExpiry)
+			var suppressions []inventory.StoredSuppression
+			if err != nil {
+				logger.Warn("failed to load persisted suppression data", slog.String("error", err.Error()))
+			} else {
+				suppressions = make([]inventory.StoredSuppression, len(dbSuppressions))
+				for i, s := range dbSuppressions {
+					suppressions[i] = inventory.StoredSuppression{
+						OfferID:      s.OfferID,
+						Provider:     s.Provider,
+						GPUType:      s.GPUType,
+						SuppressedAt: s.SuppressedAt,
+					}
+				}
+			}
+
+			invService.LoadFailureData(ctx, failures, suppressions)
+		}
+	}
 
 	registry := provisioner.NewSimpleProviderRegistry(providers)
+	costTracker := cost.New(costStore, sessionStore, nil,
+		cost.WithLogger(logger))
+
 	provOpts := []provisioner.Option{
 		provisioner.WithLogger(logger),
 		provisioner.WithSSHVerifyTimeout(cfg.SSH.VerifyTimeout),
 		provisioner.WithSSHCheckInterval(cfg.SSH.CheckInterval),
+		provisioner.WithInventory(invService),
+		provisioner.WithCostRecorder(costTracker),
 	}
 	if cfg.Lifecycle.DeploymentID != "" {
 		provOpts = append(provOpts, provisioner.WithDeploymentID(cfg.Lifecycle.DeploymentID))
@@ -101,9 +173,6 @@ func main() {
 		lifecycle.WithCheckInterval(cfg.Lifecycle.CheckInterval),
 		lifecycle.WithHardMaxHours(cfg.Lifecycle.HardMaxHours),
 		lifecycle.WithOrphanGracePeriod(cfg.Lifecycle.OrphanGracePeriod))
-
-	costTracker := cost.New(costStore, sessionStore, nil,
-		cost.WithLogger(logger))
 
 	// Create reconciler with auto-destroy orphans enabled
 	reconcileOpts := []lifecycle.ReconcilerOption{
@@ -129,9 +198,24 @@ func main() {
 		lifecycle.WithShutdownTimeout(cfg.Lifecycle.ShutdownTimeout))
 
 	// Initialize API server (not ready yet)
-	server := api.New(invService, provService, lifecycleManager, costTracker,
+	apiOpts := []api.Option{
 		api.WithLogger(logger),
-		api.WithPort(cfg.Server.Port))
+		api.WithPort(cfg.Server.Port),
+	}
+	if benchmarkStore != nil {
+		apiOpts = append(apiOpts, api.WithBenchmarkStore(benchmarkStore))
+
+		// Initialize benchmark runner with manifest store
+		manifestStore, err := benchmark.NewManifestStore(db.DB)
+		if err != nil {
+			logger.Warn("failed to initialize benchmark manifest store", slog.String("error", err.Error()))
+		} else {
+			benchRunner := benchsvc.NewRunner(provService, invService, benchmarkStore, manifestStore, logger, "scripts/gpu-benchmark.sh")
+			apiOpts = append(apiOpts, api.WithBenchmarkRunner(benchRunner))
+			logger.Info("initialized benchmark runner")
+		}
+	}
+	server := api.New(invService, provService, lifecycleManager, costTracker, apiOpts...)
 
 	// Initialize metrics from database state BEFORE startup sweep
 	// This ensures gauges reflect reality before any reconciliation runs

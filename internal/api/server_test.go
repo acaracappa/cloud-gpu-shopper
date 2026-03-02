@@ -52,6 +52,47 @@ func (m *mockProvider) SupportsFeature(feature provider.ProviderFeature) bool {
 	return false
 }
 
+// mockTemplateProvider extends mockProvider with template support
+type mockTemplateProvider struct {
+	mockProvider
+	templates []models.VastTemplate
+}
+
+func (m *mockTemplateProvider) ListTemplates(ctx context.Context, filter models.TemplateFilter) ([]models.VastTemplate, error) {
+	// Apply filter
+	var result []models.VastTemplate
+	for _, t := range m.templates {
+		if t.MatchesFilter(filter) {
+			result = append(result, t)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockTemplateProvider) GetTemplate(ctx context.Context, hashID string) (*models.VastTemplate, error) {
+	for _, t := range m.templates {
+		if t.HashID == hashID {
+			return &t, nil
+		}
+	}
+	return nil, provider.ErrTemplateNotFound
+}
+
+func (m *mockTemplateProvider) GetCompatibleTemplates(ctx context.Context, offerID string) ([]models.CompatibleTemplate, error) {
+	// For testing, return recommended templates (matching real implementation behavior)
+	var result []models.CompatibleTemplate
+	for _, t := range m.templates {
+		if t.Recommended {
+			result = append(result, models.CompatibleTemplate{
+				HashID: t.HashID,
+				Name:   t.Name,
+				Image:  t.Image,
+			})
+		}
+	}
+	return result, nil
+}
+
 type mockSessionStore struct {
 	sessions map[string]*models.Session
 }
@@ -174,29 +215,57 @@ func (m *mockDestroyer) DestroySession(ctx context.Context, sessionID string) er
 }
 
 func setupTestServer() *Server {
-	// Create mock provider
-	mockProv := &mockProvider{
-		name: "vastai",
-		offers: []models.GPUOffer{
+	// Create mock provider with template support
+	mockProv := &mockTemplateProvider{
+		mockProvider: mockProvider{
+			name: "vastai",
+			offers: []models.GPUOffer{
+				{
+					ID:           "offer-1",
+					Provider:     "vastai",
+					ProviderID:   "prov-1",
+					GPUType:      "RTX4090",
+					GPUCount:     1,
+					VRAM:         24,
+					PricePerHour: 0.50,
+					Available:    true,
+				},
+				{
+					ID:           "offer-2",
+					Provider:     "vastai",
+					ProviderID:   "prov-2",
+					GPUType:      "A100",
+					GPUCount:     1,
+					VRAM:         80,
+					PricePerHour: 1.50,
+					Available:    true,
+				},
+			},
+		},
+		templates: []models.VastTemplate{
 			{
-				ID:           "offer-1",
-				Provider:     "vastai",
-				ProviderID:   "prov-1",
-				GPUType:      "RTX4090",
-				GPUCount:     1,
-				VRAM:         24,
-				PricePerHour: 0.50,
-				Available:    true,
+				ID:          1,
+				HashID:      "template-hash-1",
+				Name:        "vLLM Template",
+				Image:       "vllm/vllm-openai",
+				UseSSH:      true,
+				Recommended: true,
 			},
 			{
-				ID:           "offer-2",
-				Provider:     "vastai",
-				ProviderID:   "prov-2",
-				GPUType:      "A100",
-				GPUCount:     1,
-				VRAM:         80,
-				PricePerHour: 1.50,
-				Available:    true,
+				ID:          2,
+				HashID:      "template-hash-2",
+				Name:        "Ollama Template",
+				Image:       "ollama/ollama",
+				UseSSH:      true,
+				Recommended: true,
+			},
+			{
+				ID:          3,
+				HashID:      "template-hash-3",
+				Name:        "Custom Template",
+				Image:       "custom/image",
+				UseSSH:      false,
+				Recommended: false,
 			},
 		},
 	}
@@ -582,4 +651,168 @@ func TestExtendSession(t *testing.T) {
 	server.Router().ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// Template endpoint tests
+
+func TestListTemplates(t *testing.T) {
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/templates", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	count := int(response["count"].(float64))
+	assert.Equal(t, 3, count) // All 3 templates returned
+}
+
+func TestListTemplatesWithRecommendedFilter(t *testing.T) {
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/templates?recommended=true", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	count := int(response["count"].(float64))
+	assert.Equal(t, 2, count) // Only 2 recommended templates
+}
+
+func TestListTemplatesWithNameFilter(t *testing.T) {
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/templates?name=vllm", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	count := int(response["count"].(float64))
+	assert.Equal(t, 1, count)
+
+	templates := response["templates"].([]interface{})
+	firstTemplate := templates[0].(map[string]interface{})
+	assert.Equal(t, "vLLM Template", firstTemplate["name"])
+}
+
+func TestGetTemplate(t *testing.T) {
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/templates/template-hash-1", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var template models.VastTemplate
+	err := json.Unmarshal(w.Body.Bytes(), &template)
+	require.NoError(t, err)
+	assert.Equal(t, "template-hash-1", template.HashID)
+	assert.Equal(t, "vLLM Template", template.Name)
+}
+
+func TestGetTemplateNotFound(t *testing.T) {
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/templates/nonexistent-hash", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var response ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.Contains(t, response.Error, "template not found")
+}
+
+func TestGetCompatibleTemplatesVastai(t *testing.T) {
+	server := setupTestServer()
+
+	// First populate inventory cache
+	req := httptest.NewRequest("GET", "/api/v1/inventory", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	// Get compatible templates for a Vast.ai offer
+	req = httptest.NewRequest("GET", "/api/v1/inventory/offer-1/compatible-templates", nil)
+	w = httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+
+	// Should return templates (filtered by recommended=true, use_ssh=true by default)
+	count := int(response["count"].(float64))
+	assert.Equal(t, 2, count) // Only 2 recommended+SSH templates
+
+	// Verify offer info is included
+	assert.Equal(t, "offer-1", response["offer_id"])
+	assert.Equal(t, "RTX4090", response["gpu_type"])
+}
+
+func TestGetCompatibleTemplatesOfferNotFound(t *testing.T) {
+	server := setupTestServer()
+
+	req := httptest.NewRequest("GET", "/api/v1/inventory/nonexistent/compatible-templates", nil)
+	w := httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestCreateSessionWithTemplateHashID(t *testing.T) {
+	server := setupTestServer()
+
+	// First populate inventory cache
+	req := httptest.NewRequest("GET", "/api/v1/inventory", nil)
+	w := httptest.NewRecorder()
+	server.Router().ServeHTTP(w, req)
+
+	// Create session with template_hash_id
+	body := `{
+		"consumer_id": "consumer-001",
+		"offer_id": "offer-1",
+		"workload_type": "llm",
+		"reservation_hours": 2,
+		"template_hash_id": "template-hash-1"
+	}`
+	req = httptest.NewRequest("POST", "/api/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+
+	server.Router().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	var response CreateSessionResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(t, err)
+	assert.NotEmpty(t, response.Session.ID)
+	assert.Equal(t, "template-hash-1", response.Session.TemplateHashID)
 }

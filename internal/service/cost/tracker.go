@@ -2,6 +2,7 @@ package cost
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -275,6 +276,49 @@ func (t *Tracker) recordCostsForRunningSessions(ctx context.Context) {
 		t.metrics.CostsRecorded++
 		t.metrics.mu.Unlock()
 	}
+}
+
+// RecordFinalCost records cost for a session that has terminated.
+// It calculates cost for each hour (or partial hour) the session was alive
+// and records entries, ensuring short-lived sessions are not missed.
+func (t *Tracker) RecordFinalCost(ctx context.Context, session *models.Session) error {
+	if session.PricePerHour <= 0 {
+		return nil
+	}
+
+	endTime := session.StoppedAt
+	if endTime.IsZero() {
+		endTime = t.now()
+	}
+	startTime := session.CreatedAt
+	if startTime.IsZero() || !endTime.After(startTime) {
+		return nil
+	}
+
+	currentHour := startTime.Truncate(time.Hour)
+	for !currentHour.After(endTime) {
+		record := &models.CostRecord{
+			SessionID:  session.ID,
+			ConsumerID: session.ConsumerID,
+			Provider:   session.Provider,
+			GPUType:    session.GPUType,
+			Hour:       currentHour,
+			Amount:     session.PricePerHour,
+			Currency:   "USD",
+		}
+		if err := t.costStore.Record(ctx, record); err != nil {
+			return fmt.Errorf("failed to record cost for hour %s: %w", currentHour, err)
+		}
+		metrics.RecordCost(session.Provider, session.PricePerHour)
+		currentHour = currentHour.Add(time.Hour)
+	}
+
+	t.logger.Info("recorded final cost for session",
+		slog.String("session_id", session.ID),
+		slog.Float64("price_per_hour", session.PricePerHour),
+		slog.Duration("duration", endTime.Sub(startTime)))
+
+	return nil
 }
 
 // checkBudgetThresholds checks if any consumers have exceeded their budget

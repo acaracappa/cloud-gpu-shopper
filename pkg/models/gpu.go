@@ -2,6 +2,14 @@ package models
 
 import "time"
 
+// CompatibleTemplate represents a template that can run on a specific GPU offer.
+// Used to show users which templates are compatible with each offer.
+type CompatibleTemplate struct {
+	HashID string `json:"hash_id"`
+	Name   string `json:"name"`
+	Image  string `json:"image,omitempty"`
+}
+
 // GPUOffer represents an available GPU instance for rent
 type GPUOffer struct {
 	ID                     string    `json:"id"`
@@ -17,18 +25,24 @@ type GPUOffer struct {
 	MaxDuration            int       `json:"max_duration_hours"`      // 0 = unlimited
 	FetchedAt              time.Time `json:"fetched_at"`              // When this offer was fetched
 	AvailabilityConfidence float64   `json:"availability_confidence"` // 0-1 confidence that offer is actually available (default 1.0)
+	CUDAVersion            float64   `json:"cuda_version,omitempty"`  // Max supported CUDA version (e.g., 12.9). Only for Vast.ai.
+
+	// CompatibleTemplates lists templates that can run on this offer.
+	// Only populated when include_templates=true is requested, and only for Vast.ai offers.
+	CompatibleTemplates []CompatibleTemplate `json:"compatible_templates,omitempty"`
 }
 
 // OfferFilter defines criteria for filtering GPU offers
 type OfferFilter struct {
-	Provider                  string  `json:"provider,omitempty"`                   // Filter by provider
-	GPUType                   string  `json:"gpu_type,omitempty"`                   // Filter by GPU type
-	MinVRAM                   int     `json:"min_vram,omitempty"`                   // Minimum VRAM in GB
-	MaxPrice                  float64 `json:"max_price,omitempty"`                  // Maximum price per hour
-	Location                  string  `json:"location,omitempty"`                   // Region/location filter
-	MinReliability            float64 `json:"min_reliability,omitempty"`            // Minimum reliability score
-	MinGPUCount               int     `json:"min_gpu_count,omitempty"`              // Minimum GPU count
+	Provider                  string  `json:"provider,omitempty"`                    // Filter by provider
+	GPUType                   string  `json:"gpu_type,omitempty"`                    // Filter by GPU type
+	MinVRAM                   int     `json:"min_vram,omitempty"`                    // Minimum VRAM in GB
+	MaxPrice                  float64 `json:"max_price,omitempty"`                   // Maximum price per hour
+	Location                  string  `json:"location,omitempty"`                    // Region/location filter
+	MinReliability            float64 `json:"min_reliability,omitempty"`             // Minimum reliability score
+	MinGPUCount               int     `json:"min_gpu_count,omitempty"`               // Minimum GPU count
 	MinAvailabilityConfidence float64 `json:"min_availability_confidence,omitempty"` // Minimum availability confidence (0-1)
+	MinCUDAVersion            float64 `json:"min_cuda_version,omitempty"`            // Minimum CUDA version (e.g., 12.9)
 }
 
 // MatchesFilter checks if the offer matches the given filter
@@ -55,6 +69,9 @@ func (o *GPUOffer) MatchesFilter(f OfferFilter) bool {
 		return false
 	}
 	if f.MinAvailabilityConfidence > 0 && o.AvailabilityConfidence < f.MinAvailabilityConfidence {
+		return false
+	}
+	if f.MinCUDAVersion > 0 && o.CUDAVersion < f.MinCUDAVersion {
 		return false
 	}
 	return true

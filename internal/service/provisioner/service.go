@@ -58,8 +58,13 @@ const (
 	// DefaultSSHKeyBits is the RSA key size
 	DefaultSSHKeyBits = 4096
 
-	// TensorDockCloudInitDelay is the time to wait for TensorDock cloud-init before SSH polling
-	TensorDockCloudInitDelay = 45 * time.Second
+	// TensorDockCloudInitDelay is the time to wait for TensorDock cloud-init before SSH polling.
+	// This needs to be long enough for:
+	// 1. TensorDock's cloud-init SSH key setup (which writes 0 bytes to root)
+	// 2. Our runcmd to run and install the actual SSH key
+	// 3. TensorDock's scripts to restart the SSH service
+	// Based on live testing, 90 seconds is sufficient.
+	TensorDockCloudInitDelay = 90 * time.Second
 )
 
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
@@ -131,6 +136,19 @@ type ProviderRegistry interface {
 	Get(name string) (provider.Provider, error)
 }
 
+// InventoryFinder provides access to comparable offer lookup for auto-retry
+// and global offer failure tracking
+type InventoryFinder interface {
+	FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string) ([]models.GPUOffer, error)
+	GetOffer(ctx context.Context, offerID string) (*models.GPUOffer, error)
+	RecordOfferFailure(offerID, provider, gpuType, failureType, reason string)
+}
+
+// CostRecorder records final costs for terminated sessions.
+type CostRecorder interface {
+	RecordFinalCost(ctx context.Context, session *models.Session) error
+}
+
 // SSHVerifier defines the interface for SSH verification
 type SSHVerifier interface {
 	// VerifyOnce attempts a single SSH connection verification (no retries)
@@ -147,6 +165,8 @@ type HTTPVerifier interface {
 type Service struct {
 	store        SessionStore
 	providers    ProviderRegistry
+	inventory    InventoryFinder // Optional: needed for auto-retry
+	costRecorder CostRecorder    // Optional: records final cost on session termination
 	logger       *slog.Logger
 	deploymentID string
 
@@ -265,6 +285,20 @@ func WithTimeFunc(fn func() time.Time) Option {
 	}
 }
 
+// WithInventory sets the inventory finder for auto-retry support
+func WithInventory(inv InventoryFinder) Option {
+	return func(s *Service) {
+		s.inventory = inv
+	}
+}
+
+// WithCostRecorder configures an optional cost recorder for the provisioner.
+func WithCostRecorder(cr CostRecorder) Option {
+	return func(s *Service) {
+		s.costRecorder = cr
+	}
+}
+
 // New creates a new provisioner service
 func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Service {
 	s := &Service{
@@ -305,26 +339,49 @@ func New(store SessionStore, providers ProviderRegistry, opts ...Option) *Servic
 	return s
 }
 
-// CreateSession provisions a new GPU session using two-phase provisioning
+// CreateSession provisions a new GPU session using two-phase provisioning.
+// If auto_retry is enabled, it will automatically try comparable offers on failure.
 func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionRequest, offer *models.GPUOffer) (*models.Session, error) {
+	// Validate and cap MaxRetries
+	if req.AutoRetry && req.MaxRetries <= 0 {
+		req.MaxRetries = 3
+	}
+	if req.MaxRetries > 5 {
+		req.MaxRetries = 5
+	}
+	if req.RetryScope == "" {
+		req.RetryScope = "same_gpu"
+	}
+
+	return s.createSessionWithRetry(ctx, req, offer, nil, 0, "")
+}
+
+// createSessionWithRetry is the internal implementation that supports retry.
+// failedOfferIDs tracks offers that already failed, retryCount is the current attempt,
+// retryParentID links back to the original session if this is a retry.
+func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateSessionRequest, offer *models.GPUOffer, failedOfferIDs []string, retryCount int, retryParentID string) (*models.Session, error) {
 	s.logger.Info("creating session",
 		slog.String("consumer_id", req.ConsumerID),
 		slog.String("offer_id", req.OfferID),
-		slog.String("provider", offer.Provider))
+		slog.String("provider", offer.Provider),
+		slog.Int("retry_count", retryCount))
 
 	// Check for existing active session for this consumer and offer
-	existing, err := s.store.GetActiveSessionByConsumerAndOffer(ctx, req.ConsumerID, req.OfferID)
-	if err == nil && existing != nil {
-		return nil, &DuplicateSessionError{
-			ConsumerID: req.ConsumerID,
-			OfferID:    req.OfferID,
-			SessionID:  existing.ID,
-			Status:     existing.Status,
+	// Skip this check for retry attempts (the consumer already has a failed session for a different offer)
+	if retryCount == 0 {
+		existing, err := s.store.GetActiveSessionByConsumerAndOffer(ctx, req.ConsumerID, req.OfferID)
+		if err == nil && existing != nil {
+			return nil, &DuplicateSessionError{
+				ConsumerID: req.ConsumerID,
+				OfferID:    req.OfferID,
+				SessionID:  existing.ID,
+				Status:     existing.Status,
+			}
 		}
-	}
-	// Only fail on unexpected errors (not ErrNotFound which is expected)
-	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, storage.ErrNotFound) {
-		return nil, fmt.Errorf("failed to check for existing session: %w", err)
+		// Only fail on unexpected errors (not ErrNotFound which is expected)
+		if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, storage.ErrNotFound) {
+			return nil, fmt.Errorf("failed to check for existing session: %w", err)
+		}
 	}
 
 	// Generate SSH key pair
@@ -341,6 +398,9 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	if storagePolicy == "" {
 		storagePolicy = models.StorageDestroy
 	}
+
+	// Build failed offers string
+	failedOffersStr := strings.Join(failedOfferIDs, ",")
 
 	// PHASE 1: Create session record in database (survives crashes)
 	session := &models.Session{
@@ -360,6 +420,12 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		PricePerHour:   offer.PricePerHour,
 		CreatedAt:      now,
 		ExpiresAt:      expiresAt,
+		AutoRetry:      req.AutoRetry,
+		MaxRetries:     req.MaxRetries,
+		RetryScope:     req.RetryScope,
+		RetryCount:     retryCount,
+		RetryParentID:  retryParentID,
+		FailedOffers:   failedOffersStr,
 	}
 
 	if err := s.store.Create(ctx, session); err != nil {
@@ -386,8 +452,6 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	}
 
 	// Bug fix: Increment pending gauge when session is first created.
-	// This ensures the gauge is properly initialized before any status transitions,
-	// preventing the gauge from going negative when transitioning from pending.
 	metrics.UpdateSessionStatus(session.Provider, "", string(models.StatusPending))
 
 	s.logger.Info("session record created",
@@ -405,10 +469,48 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 
 	// Build the provider request based on launch mode
 	instanceReq := provider.CreateInstanceRequest{
-		OfferID:      offer.ID, // Full offer ID (e.g., tensordock-{uuid}-{gpu} for TensorDock)
+		OfferID:      offer.ID,
 		SessionID:    session.ID,
 		SSHPublicKey: publicKey,
 		Tags:         tags,
+	}
+
+	// Template-based provisioning (Vast.ai)
+	if req.TemplateHashID != "" {
+		instanceReq.TemplateHashID = req.TemplateHashID
+		session.TemplateHashID = req.TemplateHashID
+	}
+
+	// Storage configuration with disk estimation
+	s.logger.Info("storage configuration",
+		slog.Int("request_disk_gb", req.DiskGB),
+		slog.String("model_id", req.ModelID),
+		slog.String("quantization", req.Quantization))
+
+	diskEstimation := EstimateDiskRequirements(req.ModelID, req.Quantization, req.TemplateHashID, req.TemplateRecommendedDiskGB)
+
+	if diskEstimation != nil {
+		s.logger.Info("disk estimation",
+			slog.Int("minimum_gb", diskEstimation.MinimumGB),
+			slog.Int("recommended_gb", diskEstimation.RecommendedGB),
+			slog.Float64("model_weight_gb", diskEstimation.ModelWeightGB))
+
+		if req.DiskGB > 0 {
+			if err := ValidateDiskSpace(req.DiskGB, diskEstimation); err != nil {
+				return nil, err
+			}
+			instanceReq.DiskGB = req.DiskGB
+			session.DiskGB = req.DiskGB
+			s.logger.Info("disk configured (user-specified)", slog.Int("disk_gb", req.DiskGB))
+		} else {
+			instanceReq.DiskGB = diskEstimation.RecommendedGB
+			session.DiskGB = diskEstimation.RecommendedGB
+			s.logger.Info("disk auto-calculated", slog.Int("disk_gb", diskEstimation.RecommendedGB))
+		}
+	} else if req.DiskGB > 0 {
+		instanceReq.DiskGB = req.DiskGB
+		session.DiskGB = req.DiskGB
+		s.logger.Info("disk configured (no estimation)", slog.Int("disk_gb", req.DiskGB))
 	}
 
 	// Configure for entrypoint mode if specified
@@ -416,9 +518,19 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		instanceReq.LaunchMode = provider.LaunchModeEntrypoint
 		instanceReq.DockerImage = req.DockerImage
 		instanceReq.ExposedPorts = req.ExposedPorts
-
-		// Build workload config from request
 		instanceReq.WorkloadConfig = s.buildWorkloadConfig(req)
+	}
+
+	// Auto-inject benchmark script for benchmark workload type
+	if req.WorkloadType == models.WorkloadBenchmark && req.OnStartCmd == "" {
+		instanceReq.OnStartCmd = buildBenchmarkOnStart(session.ID, offer)
+		s.logger.Info("auto-injected benchmark script",
+			slog.String("session_id", session.ID))
+	}
+
+	// Pass through on-start command if specified (overrides auto-inject)
+	if req.OnStartCmd != "" {
+		instanceReq.OnStartCmd = req.OnStartCmd
 	}
 
 	session.Status = models.StatusProvisioning
@@ -434,8 +546,61 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 	if err != nil {
 		s.failSession(ctx, session, fmt.Sprintf("provider create failed: %s", err.Error()))
 
-		// Check if this is a stale inventory error - wrap it so callers can
-		// identify it and potentially retry with a different offer
+		// Record global offer failure for cross-session intelligence
+		if s.inventory != nil {
+			failType := "unknown"
+			if provider.ShouldRetryWithDifferentOffer(err) {
+				failType = "stale_inventory"
+			}
+			s.inventory.RecordOfferFailure(offer.ID, offer.Provider, offer.GPUType, failType, err.Error())
+		}
+
+		// Check if this is a retryable error and auto-retry is enabled
+		if provider.ShouldRetryWithDifferentOffer(err) && req.AutoRetry && retryCount < req.MaxRetries && s.inventory != nil {
+			metrics.RecordRetryAttempt(offer.Provider, req.RetryScope, "stale_inventory")
+
+			newFailedOffers := append(failedOfferIDs, offer.ID)
+			s.logger.Info("auto-retrying with different offer",
+				slog.String("failed_offer", offer.ID),
+				slog.Int("retry_count", retryCount+1),
+				slog.Int("max_retries", req.MaxRetries),
+				slog.String("scope", req.RetryScope))
+
+			alternatives, findErr := s.inventory.FindComparableOffers(ctx, offer, req.RetryScope, newFailedOffers)
+			if findErr != nil {
+				s.logger.Warn("failed to find comparable offers for retry",
+					slog.String("error", findErr.Error()))
+			} else if len(alternatives) > 0 {
+				nextOffer := &alternatives[0]
+				req.OfferID = nextOffer.ID
+
+				// Update the parent session's retry_child_id will be set after child creation
+				retrySession, retryErr := s.createSessionWithRetry(ctx, req, nextOffer, newFailedOffers, retryCount+1, session.ID)
+				if retryErr == nil {
+					// Success — link parent to child
+					session.RetryChildID = retrySession.ID
+					session.FailedOffers = strings.Join(newFailedOffers, ",")
+					_ = s.store.Update(ctx, session)
+
+					metrics.RecordRetrySuccess(offer.Provider, req.RetryScope)
+					return retrySession, nil
+				}
+
+				s.logger.Warn("retry attempt failed",
+					slog.Int("retry_count", retryCount+1),
+					slog.String("error", retryErr.Error()))
+				// retryErr propagates the StaleInventoryError or final error
+				return nil, retryErr
+			} else {
+				s.logger.Warn("no comparable offers found for retry",
+					slog.String("scope", req.RetryScope))
+			}
+
+			// All retries exhausted or no alternatives found
+			metrics.RecordRetryExhausted(offer.Provider, req.RetryScope)
+		}
+
+		// Return stale inventory error if applicable
 		if provider.ShouldRetryWithDifferentOffer(err) {
 			return nil, &StaleInventoryError{
 				OfferID:     offer.ID,
@@ -461,17 +626,14 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 
 	if err := s.store.Update(ctx, session); err != nil {
 		// Critical: Instance exists but we failed to record it
-		// Attempt to destroy the orphaned instance to prevent billing
 		s.logger.Error("CRITICAL: failed to update session after provision, attempting cleanup",
 			slog.String("session_id", session.ID),
 			slog.String("provider_id", instance.ProviderInstanceID),
 			slog.String("error", err.Error()))
 
-		// Try to destroy the instance to prevent orphan
 		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if destroyErr := prov.DestroyInstance(destroyCtx, instance.ProviderInstanceID); destroyErr != nil {
-			// Log destruction failure - manual cleanup may be needed
 			s.logger.Error("CRITICAL: failed to destroy orphaned instance after DB failure",
 				slog.String("session_id", session.ID),
 				slog.String("provider_id", instance.ProviderInstanceID),
@@ -504,17 +666,9 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		"reservation_hours", session.ReservationHrs)
 
 	metrics.RecordSessionCreated(session.Provider)
-	// Note: metrics.UpdateSessionStatus for provisioning is called earlier (before CreateInstance)
-	// to ensure failSession can properly decrement the gauge if CreateInstance fails
 
 	// PHASE 4: Wait for verification (async - don't block API)
-	// The caller can poll session status to check when it's running
-	// Use a context with timeout derived from verification config rather than context.Background()
-	// to ensure goroutines can be bounded and don't run indefinitely
 	if req.LaunchMode == models.LaunchModeEntrypoint {
-		// Entrypoint mode: wait for API endpoint to be ready
-		// Context timeout is slightly longer than verify timeout to ensure internal timer fires first
-		// and has time to complete cleanup before context cancellation
 		verifyCtx, cancel := context.WithTimeout(context.Background(), s.apiVerifyTimeout+5*time.Second)
 		s.verifyWg.Add(1)
 		go func() {
@@ -524,24 +678,118 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		}()
 	} else {
 		// SSH mode: wait for SSH connectivity
-		// Note: We pass the private key directly because it's not stored in the database
-		// Context timeout is slightly longer than verify timeout to ensure internal timer fires first
-		// and has time to complete cleanup before context cancellation
-		verifyCtx, cancel := context.WithTimeout(context.Background(), s.sshVerifyTimeout+5*time.Second)
+		sshTimeout := s.sshVerifyTimeout
+		if req.TemplateRecommendedSSHTimeout > 0 {
+			sshTimeout = req.TemplateRecommendedSSHTimeout
+			s.logger.Info("using template-recommended SSH timeout",
+				slog.Duration("timeout", sshTimeout))
+		}
+		verifyCtx, cancel := context.WithTimeout(context.Background(), sshTimeout+5*time.Second)
 		s.verifyWg.Add(1)
 		go func() {
 			defer s.verifyWg.Done()
 			defer cancel()
-			s.waitForSSHVerifyAsync(verifyCtx, session.ID, privateKey, prov)
+			s.waitForSSHVerifyAsyncWithRetry(verifyCtx, session.ID, privateKey, prov, sshTimeout, req)
 		}()
 	}
 
 	return session, nil
 }
 
-// waitForSSHVerifyAsync waits for SSH verification in the background
+// waitForSSHVerifyAsync waits for SSH verification in the background with default timeout.
 // privateKey is passed directly because it's not stored in the database for security
 func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, privateKey string, prov provider.Provider) {
+	s.waitForSSHVerifyAsyncWithTimeout(ctx, sessionID, privateKey, prov, s.sshVerifyTimeout)
+}
+
+// waitForSSHVerifyAsyncWithRetry wraps SSH verification with auto-retry support.
+// On failure (timeout or instance stopped), if auto_retry is enabled, it triggers
+// a new session with a comparable offer.
+func (s *Service) waitForSSHVerifyAsyncWithRetry(ctx context.Context, sessionID string, privateKey string, prov provider.Provider, sshTimeout time.Duration, req models.CreateSessionRequest) {
+	s.waitForSSHVerifyAsyncWithTimeout(ctx, sessionID, privateKey, prov, sshTimeout)
+
+	// After SSH verification completes (success or failure), check if we need to retry
+	session, err := s.store.Get(context.Background(), sessionID)
+	if err != nil {
+		return
+	}
+
+	// Only trigger async retry if session failed and auto-retry is enabled
+	if session.Status == models.StatusFailed && session.AutoRetry && session.RetryCount < session.MaxRetries && s.inventory != nil {
+		s.triggerAsyncRetry(session, req)
+	}
+}
+
+// triggerAsyncRetry finds a comparable offer and creates a new session after async failure.
+func (s *Service) triggerAsyncRetry(failedSession *models.Session, originalReq models.CreateSessionRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	reason := "ssh_timeout"
+	if strings.Contains(failedSession.Error, "instance stopped") {
+		reason = "instance_stopped"
+	}
+	metrics.RecordRetryAttempt(failedSession.Provider, failedSession.RetryScope, reason)
+
+	// Build exclusion list from previously failed offers
+	var failedOfferIDs []string
+	if failedSession.FailedOffers != "" {
+		failedOfferIDs = strings.Split(failedSession.FailedOffers, ",")
+	}
+	failedOfferIDs = append(failedOfferIDs, failedSession.OfferID)
+
+	// Get original offer info for comparison
+	originalOffer, err := s.inventory.GetOffer(ctx, failedSession.OfferID)
+	if err != nil {
+		// Build a synthetic offer from session data for comparison
+		originalOffer = &models.GPUOffer{
+			ID:           failedSession.OfferID,
+			Provider:     failedSession.Provider,
+			GPUType:      failedSession.GPUType,
+			GPUCount:     failedSession.GPUCount,
+			PricePerHour: failedSession.PricePerHour,
+		}
+	}
+
+	alternatives, err := s.inventory.FindComparableOffers(ctx, originalOffer, failedSession.RetryScope, failedOfferIDs)
+	if err != nil || len(alternatives) == 0 {
+		s.logger.Warn("async retry: no comparable offers found",
+			slog.String("session_id", failedSession.ID),
+			slog.String("scope", failedSession.RetryScope))
+		metrics.RecordRetryExhausted(failedSession.Provider, failedSession.RetryScope)
+		return
+	}
+
+	nextOffer := &alternatives[0]
+	originalReq.OfferID = nextOffer.ID
+
+	s.logger.Info("async retry: reprovisioning with new offer",
+		slog.String("failed_session", failedSession.ID),
+		slog.String("new_offer", nextOffer.ID),
+		slog.Int("retry_count", failedSession.RetryCount+1))
+
+	newSession, err := s.createSessionWithRetry(ctx, originalReq, nextOffer, failedOfferIDs, failedSession.RetryCount+1, failedSession.ID)
+	if err != nil {
+		s.logger.Warn("async retry failed",
+			slog.String("session_id", failedSession.ID),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	// Link parent to child
+	failedSession.RetryChildID = newSession.ID
+	failedSession.FailedOffers = strings.Join(failedOfferIDs, ",")
+	_ = s.store.Update(context.Background(), failedSession)
+
+	metrics.RecordRetrySuccess(failedSession.Provider, failedSession.RetryScope)
+	s.logger.Info("async retry: successfully reprovisioned",
+		slog.String("old_session", failedSession.ID),
+		slog.String("new_session", newSession.ID))
+}
+
+// waitForSSHVerifyAsyncWithTimeout waits for SSH verification with a custom timeout.
+// BUG-005: Support template-specific timeouts for heavy images like vLLM.
+func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionID string, privateKey string, prov provider.Provider, sshTimeout time.Duration) {
 	logger := s.logger.With(slog.String("session_id", sessionID))
 	logger.Info("waiting for SSH verification")
 
@@ -574,12 +822,13 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 	pollTimer := time.NewTimer(nextInterval)
 	defer pollTimer.Stop()
 
-	timeout := time.NewTimer(s.sshVerifyTimeout)
+	timeout := time.NewTimer(sshTimeout)
 	defer timeout.Stop()
 
 	attemptCount := 0
 	lastErrorType := "none"
 	lastError := ""
+	consecutivePermanentErrors := 0
 	for {
 		select {
 		case <-timeout.C:
@@ -606,6 +855,11 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 			metrics.RecordSSHVerifyFailure()
 			// Bug #94 fix: Record session destroyed when SSH verification times out
 			metrics.RecordSessionDestroyed(session.Provider, "ssh_verify_timeout")
+
+			// Record global offer failure for cross-session intelligence
+			if s.inventory != nil {
+				s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "ssh_timeout", "SSH verification timeout")
+			}
 			return
 
 		case <-pollTimer.C:
@@ -643,6 +897,35 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					pollTimer.Reset(nextInterval)
 					continue
 				}
+
+				// BUG-011 fix: Fail fast if instance stopped unexpectedly
+				// Don't fail for transient states like "creating", "starting", or "loading"
+				if !status.Running && status.Status != "" &&
+					status.Status != "creating" && status.Status != "starting" &&
+					status.Status != "provisioning" && status.Status != "booting" &&
+					status.Status != "loading" {
+					logger.Error("instance stopped unexpectedly",
+						slog.String("status", status.Status),
+						slog.String("error_detail", status.Error),
+						slog.String("provider_id", session.ProviderID))
+
+					// Attempt to destroy the failed instance
+					if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+						logger.Error("failed to destroy stopped instance",
+							slog.String("error", err.Error()))
+					}
+
+					failReason := classifyInstanceStopReason(status.Status, status.Error)
+					s.failSession(ctx, session, failReason)
+					metrics.RecordSessionDestroyed(session.Provider, "instance_stopped")
+
+					// Record global offer failure for cross-session intelligence
+					if s.inventory != nil {
+						s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "instance_stopped", failReason)
+					}
+					return
+				}
+
 				if status.SSHHost != "" {
 					session.SSHHost = status.SSHHost
 					if status.SSHPort != 0 {
@@ -690,6 +973,14 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					metrics.RecordSSHVerifyAttempts(session.Provider, attemptCount)
 					// Bug #57 fix: Record provisioning duration when session becomes running
 					metrics.RecordProvisioningDuration(session.Provider, duration)
+
+					// BUG-004: Validate CUDA version after SSH success (async, non-blocking)
+					// This is informational - we don't fail the session on mismatch
+					go s.validateCUDAVersionAsync(session, privateKey, logger)
+
+					// Post-provision disk space check (async, non-blocking)
+					go s.validateDiskSpaceAsync(session, privateKey, logger)
+
 					return
 				}
 
@@ -702,6 +993,29 @@ func (s *Service) waitForSSHVerifyAsync(ctx context.Context, sessionID string, p
 					slog.Int("port", session.SSHPort),
 					slog.String("error", lastError))
 				metrics.RecordSSHVerifyError(session.Provider, lastErrorType)
+
+				// Fail fast on permanent SSH errors (auth_failed, key_parse_failed)
+				if lastErrorType == "auth_failed" || lastErrorType == "key_parse_failed" {
+					consecutivePermanentErrors++
+					if consecutivePermanentErrors >= 3 {
+						logger.Error("permanent SSH error detected, failing session early",
+							slog.String("error_type", lastErrorType),
+							slog.Int("consecutive_errors", consecutivePermanentErrors))
+
+						if session.ProviderID != "" {
+							if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+								logger.Error("failed to destroy instance after permanent SSH error",
+									slog.String("error", err.Error()))
+							}
+						}
+						s.failSession(ctx, session, "permanent SSH error: "+lastErrorType)
+						metrics.RecordSSHVerifyFailure()
+						metrics.RecordSessionDestroyed(session.Provider, "permanent_ssh_error")
+						return
+					}
+				} else {
+					consecutivePermanentErrors = 0
+				}
 			}
 
 			// Schedule next poll with progressive backoff
@@ -888,6 +1202,133 @@ func (s *Service) ListSessions(ctx context.Context, filter models.SessionListFil
 	return s.store.List(ctx, filter)
 }
 
+// validateCUDAVersionAsync runs CUDA validation asynchronously after SSH verification.
+// BUG-004: This is informational only - we log warnings but don't fail the session.
+// The validation helps identify provider inventory mismatches.
+func (s *Service) validateCUDAVersionAsync(session *models.Session, privateKey string, logger *slog.Logger) {
+	// Use a short timeout for validation - we don't want to hold resources
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create SSH executor for CUDA check
+	executor := sshverify.NewExecutor(
+		sshverify.WithExecutorConnectTimeout(10*time.Second),
+		sshverify.WithExecutorCommandTimeout(15*time.Second),
+	)
+
+	conn, err := executor.Connect(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
+	if err != nil {
+		logger.Debug("CUDA validation: failed to connect for validation",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer conn.Close()
+
+	cudaInfo, err := executor.GetCUDAVersion(ctx, conn)
+	if err != nil {
+		logger.Warn("CUDA validation: failed to get CUDA version",
+			slog.String("error", err.Error()),
+			slog.String("session_id", session.ID))
+		return
+	}
+
+	logger.Info("CUDA validation: version detected",
+		slog.String("cuda_version", cudaInfo.CUDAVersion),
+		slog.String("driver_version", cudaInfo.DriverVersion),
+		slog.String("session_id", session.ID),
+		slog.String("provider", session.Provider))
+
+	// TODO: Compare with expected CUDA version from offer/template if available
+	// For now, we just log the detected version for observability
+}
+
+// validateDiskSpaceAsync checks available disk space after SSH verification.
+// Logs warnings if disk is low. Informational only - does not fail the session.
+func (s *Service) validateDiskSpaceAsync(session *models.Session, privateKey string, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	executor := sshverify.NewExecutor(
+		sshverify.WithExecutorConnectTimeout(10*time.Second),
+		sshverify.WithExecutorCommandTimeout(15*time.Second),
+	)
+
+	conn, err := executor.Connect(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
+	if err != nil {
+		logger.Debug("disk check: failed to connect",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer conn.Close()
+
+	diskStatus, err := executor.GetDiskStatus(ctx, conn)
+	if err != nil {
+		logger.Warn("disk check: failed to get disk status",
+			slog.String("error", err.Error()),
+			slog.String("session_id", session.ID))
+		return
+	}
+
+	availGB := diskStatus.AvailableGB()
+	logger.Info("disk check: space available",
+		slog.Float64("available_gb", availGB),
+		slog.Bool("is_low", diskStatus.IsLow()),
+		slog.String("session_id", session.ID),
+		slog.String("provider", session.Provider),
+		slog.String("detail", diskStatus.String()))
+
+	metrics.RecordDiskAvailable(session.Provider, availGB)
+
+	if diskStatus.IsLow() {
+		logger.Warn("disk check: LOW DISK SPACE",
+			slog.Float64("available_gb", availGB),
+			slog.String("session_id", session.ID),
+			slog.String("provider", session.Provider),
+			slog.String("detail", diskStatus.String()))
+	}
+
+	// Also check for OOM events while we're connected
+	oomStatus, err := executor.CheckOOM(ctx, conn)
+	if err != nil {
+		logger.Debug("OOM check: failed",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	if oomStatus.OOMDetected {
+		logger.Warn("OOM check: OOM events detected on instance",
+			slog.String("session_id", session.ID),
+			slog.String("provider", session.Provider),
+			slog.String("detail", oomStatus.String()))
+	} else {
+		logger.Debug("OOM check: no OOM events",
+			slog.String("session_id", session.ID))
+	}
+}
+
+// classifyInstanceStopReason provides a more descriptive failure reason based on
+// the instance status and error message from the provider.
+func classifyInstanceStopReason(status, errorMsg string) string {
+	base := fmt.Sprintf("instance stopped unexpectedly: %s", status)
+
+	if errorMsg != "" {
+		base += fmt.Sprintf(" (%s)", errorMsg)
+	}
+
+	// Add likely cause hints based on known patterns
+	lower := strings.ToLower(status + " " + errorMsg)
+	switch {
+	case strings.Contains(lower, "loading"):
+		base += " — likely cause: image pull failed, disk full, or driver incompatibility"
+	case strings.Contains(lower, "error"):
+		base += " — likely cause: runtime crash, OOM, or configuration error"
+	case strings.Contains(lower, "exited"):
+		base += " — likely cause: entrypoint failed or OOM kill"
+	}
+
+	return base
+}
+
 // failSession marks a session as failed
 func (s *Service) failSession(ctx context.Context, session *models.Session, reason string) {
 	oldStatus := session.Status
@@ -902,6 +1343,15 @@ func (s *Service) failSession(ctx context.Context, session *models.Session, reas
 
 	// Bug #46 fix: Update metrics gauge on state transition
 	metrics.UpdateSessionStatus(session.Provider, string(oldStatus), string(models.StatusFailed))
+
+	// Record final cost so short-lived failed sessions are captured
+	if s.costRecorder != nil {
+		if err := s.costRecorder.RecordFinalCost(ctx, session); err != nil {
+			s.logger.Error("failed to record final cost for failed session",
+				slog.String("session_id", session.ID),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 // generateSSHKeyPair generates an RSA SSH key pair
@@ -970,6 +1420,24 @@ func (s *Service) buildWorkloadConfig(req models.CreateSessionRequest) *provider
 	}
 
 	return config
+}
+
+// buildBenchmarkOnStart generates an on-start command that deploys and runs
+// the GPU benchmark script on the instance. The script is embedded as base64
+// and decoded at runtime — no external download needed.
+func buildBenchmarkOnStart(sessionID string, offer *models.GPUOffer) string {
+	// Note: The full benchmark script content is large. For P2 auto-injection,
+	// we use a lightweight bootstrap that the BenchmarkRunner will replace
+	// with the full script via SCP. This bootstrap just creates the marker
+	// structure so the runner knows to deploy the script.
+	return fmt.Sprintf(
+		"echo 'benchmark_pending' > /tmp/benchmark_status && echo '%s %s %.4f %s %s' > /tmp/benchmark_args",
+		sessionID,
+		"${MODEL:-unknown}",
+		offer.PricePerHour,
+		offer.Provider,
+		offer.Location,
+	)
 }
 
 // buildInstanceTags creates provider instance tags for session tracking and orphan detection

@@ -10,13 +10,14 @@ import (
 
 // Common errors returned by providers
 var (
-	ErrProviderRateLimit    = errors.New("provider rate limit exceeded")
-	ErrProviderAuth         = errors.New("provider authentication failed")
-	ErrInstanceNotFound     = errors.New("instance not found")
-	ErrOfferUnavailable     = errors.New("offer no longer available")
-	ErrOfferStaleInventory  = errors.New("offer unavailable due to stale inventory - retry with different offer recommended")
-	ErrProviderError        = errors.New("provider API error")
-	ErrInvalidResponse      = errors.New("invalid provider response")
+	ErrProviderRateLimit   = errors.New("provider rate limit exceeded")
+	ErrProviderAuth        = errors.New("provider authentication failed")
+	ErrInstanceNotFound    = errors.New("instance not found")
+	ErrTemplateNotFound    = errors.New("template not found")
+	ErrOfferUnavailable    = errors.New("offer no longer available")
+	ErrOfferStaleInventory = errors.New("offer unavailable due to stale inventory - retry with different offer recommended")
+	ErrProviderError       = errors.New("provider API error")
+	ErrInvalidResponse     = errors.New("invalid provider response")
 )
 
 // ProviderFeature represents optional features a provider may support
@@ -50,12 +51,12 @@ const (
 
 // WorkloadConfig contains configuration for entrypoint-mode workloads
 type WorkloadConfig struct {
-	Type          WorkloadType // "vllm", "tgi", "custom"
-	ModelID       string       // HuggingFace model ID (e.g., "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-	GPUMemoryUtil float64      // GPU memory utilization (0.0-1.0, default 0.9)
-	Quantization  string       // Quantization method (e.g., "awq", "gptq", "")
-	MaxModelLen   int          // Maximum model context length
-	TensorParallel int         // Number of GPUs for tensor parallelism
+	Type           WorkloadType // "vllm", "tgi", "custom"
+	ModelID        string       // HuggingFace model ID (e.g., "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+	GPUMemoryUtil  float64      // GPU memory utilization (0.0-1.0, default 0.9)
+	Quantization   string       // Quantization method (e.g., "awq", "gptq", "")
+	MaxModelLen    int          // Maximum model context length
+	TensorParallel int          // Number of GPUs for tensor parallelism
 }
 
 // Provider defines the interface for GPU cloud providers
@@ -83,6 +84,22 @@ type Provider interface {
 	SupportsFeature(feature ProviderFeature) bool
 }
 
+// TemplateProvider extends Provider with template management capabilities.
+// Only providers that support templates (e.g., Vast.ai) implement this interface.
+type TemplateProvider interface {
+	Provider
+
+	// ListTemplates returns available templates from the provider
+	ListTemplates(ctx context.Context, filter models.TemplateFilter) ([]models.VastTemplate, error)
+
+	// GetTemplate returns a specific template by hash_id
+	GetTemplate(ctx context.Context, hashID string) (*models.VastTemplate, error)
+
+	// GetCompatibleTemplates returns templates compatible with the given offer ID.
+	// Compatibility is determined by matching template extra_filters against host properties.
+	GetCompatibleTemplates(ctx context.Context, offerID string) ([]models.CompatibleTemplate, error)
+}
+
 // CreateInstanceRequest contains all data needed to provision an instance
 type CreateInstanceRequest struct {
 	OfferID      string            // Provider's offer/bundle ID
@@ -98,6 +115,13 @@ type CreateInstanceRequest struct {
 	Entrypoint     []string        // Container entrypoint args (for entrypoint mode)
 	ExposedPorts   []int           // Ports to expose (e.g., 8000 for vLLM)
 	WorkloadConfig *WorkloadConfig // Structured workload config (vllm, tgi, etc.)
+
+	// Template-based provisioning (Vast.ai)
+	// If TemplateHashID is set, use the template instead of building config from DockerImage/EnvVars
+	TemplateHashID string // Vast.ai template hash_id (e.g., "4e17788f74f075dd9aab7d0d4427968f")
+
+	// Storage configuration
+	DiskGB int // Disk space in GB (cannot be changed after creation)
 }
 
 // InstanceInfo contains details about a provisioned instance
@@ -110,8 +134,8 @@ type InstanceInfo struct {
 	ActualPricePerHour float64 // Actual price (may differ from offer)
 
 	// API endpoint info (for entrypoint mode)
-	APIHost  string // Public host for API access
-	APIPort  int    // Port for API access (e.g., 8000 for vLLM)
+	APIHost  string      // Public host for API access
+	APIPort  int         // Port for API access (e.g., 8000 for vLLM)
 	APIPorts map[int]int // Mapping of container port -> public port
 }
 
@@ -126,8 +150,8 @@ type InstanceStatus struct {
 	SSHUser   string    // SSH user (populated when running)
 
 	// Port mappings for HTTP API access (entrypoint mode workloads)
-	PublicIP string         // Public IP address of the instance
-	Ports    map[int]int    // Container port -> external port mapping (e.g., 8000 -> 33526)
+	PublicIP string      // Public IP address of the instance
+	Ports    map[int]int // Container port -> external port mapping (e.g., 8000 -> 33526)
 }
 
 // ProviderInstance represents an instance discovered during reconciliation

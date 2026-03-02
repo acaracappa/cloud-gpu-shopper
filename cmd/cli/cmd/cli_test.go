@@ -267,16 +267,16 @@ func captureOutput(f func()) string {
 
 // Sample mock data
 var mockOffer = map[string]interface{}{
-	"id":            "offer-456",
-	"provider":      "vastai",
-	"provider_id":   "v-12345",
-	"gpu_type":      "RTX4090",
-	"gpu_count":     1,
-	"vram_gb":       24,
+	"id":             "offer-456",
+	"provider":       "vastai",
+	"provider_id":    "v-12345",
+	"gpu_type":       "RTX4090",
+	"gpu_count":      1,
+	"vram_gb":        24,
 	"price_per_hour": 0.45,
-	"location":      "US",
-	"reliability":   0.95,
-	"available":     true,
+	"location":       "US",
+	"reliability":    0.95,
+	"available":      true,
 }
 
 var mockSession = map[string]interface{}{

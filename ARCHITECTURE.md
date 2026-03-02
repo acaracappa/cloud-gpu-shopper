@@ -183,6 +183,7 @@ type GPUOffer struct {
     Available    bool      `json:"available"`
     MaxDuration  int       `json:"max_duration_hours"` // 0 = unlimited
     FetchedAt    time.Time `json:"fetched_at"`
+    CUDAVersion  float64   `json:"cuda_version"`      // Max CUDA version (Vast.ai only)
 }
 ```
 

@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/provisioner"
@@ -49,12 +52,35 @@ type CreateSessionRequest struct {
 	ModelID      string `json:"model_id,omitempty"`      // HuggingFace model ID
 	ExposedPorts []int  `json:"exposed_ports,omitempty"` // Ports to expose (e.g., 8000)
 	Quantization string `json:"quantization,omitempty"`  // Quantization method
+
+	// Template-based provisioning (Vast.ai)
+	TemplateHashID string `json:"template_hash_id,omitempty"` // Vast.ai template hash_id
+
+	// Storage configuration
+	DiskGB int `json:"disk_gb,omitempty"` // Disk space in GB (cannot be changed after creation)
+
+	// Auto-retry configuration
+	AutoRetry  bool   `json:"auto_retry,omitempty"`  // Enable auto-reprovision on failure
+	MaxRetries int    `json:"max_retries,omitempty"` // Max alternative offers to try (default 3, max 5)
+	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
+
+	// SSH timeout override
+	SSHTimeoutMinutes int `json:"ssh_timeout_minutes,omitempty"` // SSH verify timeout (1-30 min)
+}
+
+// ListTemplatesQuery defines query parameters for listing templates
+type ListTemplatesQuery struct {
+	Recommended bool   `form:"recommended"`
+	UseSSH      bool   `form:"use_ssh"`
+	Name        string `form:"name"`
+	Image       string `form:"image"`
 }
 
 // CreateSessionResponse is the response after creating a session
 type CreateSessionResponse struct {
-	Session       models.SessionResponse `json:"session"`
-	SSHPrivateKey string                 `json:"ssh_private_key,omitempty"`
+	Session          models.SessionResponse `json:"session"`
+	SSHPrivateKey    string                 `json:"ssh_private_key,omitempty"`
+	RetriesAttempted int                    `json:"retries_attempted,omitempty"` // Number of retries before success
 }
 
 // ExtendSessionRequest is the request to extend a session
@@ -81,22 +107,22 @@ type CostQueryParams struct {
 
 // SessionDiagnosticsResponse contains diagnostic information for a session
 type SessionDiagnosticsResponse struct {
-	SessionID    string                 `json:"session_id"`
-	Status       models.SessionStatus   `json:"status"`
-	Provider     string                 `json:"provider"`
-	GPUType      string                 `json:"gpu_type"`
-	GPUCount     int                    `json:"gpu_count"`
-	SSHHost      string                 `json:"ssh_host,omitempty"`
-	SSHPort      int                    `json:"ssh_port,omitempty"`
-	SSHUser      string                 `json:"ssh_user,omitempty"`
-	LaunchMode   string                 `json:"launch_mode,omitempty"`
-	APIEndpoint  string                 `json:"api_endpoint,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	ExpiresAt    time.Time              `json:"expires_at"`
-	Uptime       string                 `json:"uptime"`
-	TimeToExpiry string                 `json:"time_to_expiry"`
-	SSHAvailable bool                   `json:"ssh_available"`
-	Note         string                 `json:"note"`
+	SessionID    string               `json:"session_id"`
+	Status       models.SessionStatus `json:"status"`
+	Provider     string               `json:"provider"`
+	GPUType      string               `json:"gpu_type"`
+	GPUCount     int                  `json:"gpu_count"`
+	SSHHost      string               `json:"ssh_host,omitempty"`
+	SSHPort      int                  `json:"ssh_port,omitempty"`
+	SSHUser      string               `json:"ssh_user,omitempty"`
+	LaunchMode   string               `json:"launch_mode,omitempty"`
+	APIEndpoint  string               `json:"api_endpoint,omitempty"`
+	CreatedAt    time.Time            `json:"created_at"`
+	ExpiresAt    time.Time            `json:"expires_at"`
+	Uptime       string               `json:"uptime"`
+	TimeToExpiry string               `json:"time_to_expiry"`
+	SSHAvailable bool                 `json:"ssh_available"`
+	Note         string               `json:"note"`
 }
 
 // Handlers
@@ -279,6 +305,78 @@ func (s *Server) handleListInventory(c *gin.Context) {
 		filter.MinAvailabilityConfidence = v
 	}
 
+	if minCUDA := c.Query("min_cuda"); minCUDA != "" {
+		v, err := strconv.ParseFloat(minCUDA, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_cuda: must be a valid number, got %q", minCUDA),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		if v < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     fmt.Sprintf("invalid min_cuda: must be non-negative, got %v", v),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		filter.MinCUDAVersion = v
+	}
+
+	// Template-aware filtering: apply template's extra_filters as offer constraints
+	if templateHashID := c.Query("template_hash_id"); templateHashID != "" {
+		templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:     "template filtering requires Vast.ai provider: " + err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
+		tmpl, err := templateProvider.GetTemplate(ctx, templateHashID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:     "template not found: " + sanitizeInput(templateHashID, 128),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
+		// Parse template extra_filters and apply as offer constraints
+		extraFilters, err := tmpl.ParseExtraFilters()
+		if err != nil {
+			log.Printf("[API] WARNING: template %q has malformed extra_filters: %v", tmpl.Name, err)
+		} else if extraFilters != nil {
+			if cudaFilter, ok := extraFilters["cuda_max_good"]; ok {
+				if cudaFilter.Gte != nil && filter.MinCUDAVersion < *cudaFilter.Gte {
+					filter.MinCUDAVersion = *cudaFilter.Gte
+				}
+				if cudaFilter.Gt != nil && filter.MinCUDAVersion < *cudaFilter.Gt+0.1 {
+					filter.MinCUDAVersion = *cudaFilter.Gt + 0.1
+				}
+			}
+			if vramFilter, ok := extraFilters["gpu_total_ram"]; ok {
+				vramGB := 0
+				if vramFilter.Gte != nil {
+					vramGB = int(math.Ceil(*vramFilter.Gte / 1024))
+				}
+				if vramFilter.Gt != nil {
+					vramGB = int(math.Ceil(*vramFilter.Gt/1024)) + 1
+				}
+				if vramGB > filter.MinVRAM {
+					filter.MinVRAM = vramGB
+				}
+			}
+		}
+
+		// Template filtering implies Vast.ai provider
+		if filter.Provider == "" {
+			filter.Provider = "vastai"
+		}
+	}
+
 	// Bug #11, #72: Parse and validate pagination params
 	var limit, offset int
 	if limitStr := c.Query("limit"); limitStr != "" {
@@ -388,11 +486,29 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		return
 	}
 
+	// Validate workload_type
+	if wt := models.WorkloadType(req.WorkloadType); !wt.IsValid() {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid workload_type: must be one of: llm, llm_vllm, llm_tgi, training, batch, interactive, inference, ssh, benchmark",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Validate retry_scope if auto_retry is enabled
+	if req.AutoRetry && req.RetryScope != "" && !models.IsValidRetryScope(req.RetryScope) {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     "invalid retry_scope: must be one of: same_gpu, same_vram, any",
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
 	// Get the offer from cache (spot market is fast - don't invalidate)
 	offer, err := s.inventory.GetOffer(ctx, req.OfferID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:     "offer not found: " + req.OfferID,
+			Error:     "offer not found: " + sanitizeInput(req.OfferID, 128),
 			RequestID: c.GetString("request_id"),
 		})
 		return
@@ -418,17 +534,46 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 
 	// Create session
 	createReq := models.CreateSessionRequest{
-		ConsumerID:     req.ConsumerID,
-		OfferID:        req.OfferID,
-		WorkloadType:   models.WorkloadType(req.WorkloadType),
-		ReservationHrs: req.ReservationHrs,
-		IdleThreshold:  req.IdleThreshold,
-		StoragePolicy:  storagePolicy,
-		LaunchMode:     launchMode,
-		DockerImage:    req.DockerImage,
-		ModelID:        req.ModelID,
-		ExposedPorts:   req.ExposedPorts,
-		Quantization:   req.Quantization,
+		ConsumerID:        req.ConsumerID,
+		OfferID:           req.OfferID,
+		WorkloadType:      models.WorkloadType(req.WorkloadType),
+		ReservationHrs:    req.ReservationHrs,
+		IdleThreshold:     req.IdleThreshold,
+		StoragePolicy:     storagePolicy,
+		LaunchMode:        launchMode,
+		DockerImage:       req.DockerImage,
+		ModelID:           req.ModelID,
+		ExposedPorts:      req.ExposedPorts,
+		Quantization:      req.Quantization,
+		TemplateHashID:    req.TemplateHashID,
+		DiskGB:            req.DiskGB,
+		AutoRetry:         req.AutoRetry,
+		MaxRetries:        req.MaxRetries,
+		RetryScope:        req.RetryScope,
+		SSHTimeoutMinutes: req.SSHTimeoutMinutes,
+	}
+
+	// Look up template's recommended disk space and SSH timeout (non-fatal if lookup fails)
+	if req.TemplateHashID != "" {
+		if templateProvider, err := s.inventory.GetTemplateProvider("vastai"); err == nil {
+			if tmpl, err := templateProvider.GetTemplate(ctx, req.TemplateHashID); err == nil && tmpl != nil {
+				createReq.TemplateRecommendedDiskGB = tmpl.RecommendedDiskSpace
+				// BUG-005: Use template's recommended SSH timeout for heavy images
+				createReq.TemplateRecommendedSSHTimeout = tmpl.GetRecommendedSSHTimeout()
+			}
+		}
+	}
+
+	// BUG-005: Client SSH timeout override takes priority over template timeout
+	if req.SSHTimeoutMinutes > 0 {
+		mins := req.SSHTimeoutMinutes
+		if mins > 30 {
+			mins = 30
+		}
+		if mins < 1 {
+			mins = 1
+		}
+		createReq.TemplateRecommendedSSHTimeout = time.Duration(mins) * time.Minute
 	}
 
 	session, err := s.provisioner.CreateSession(ctx, createReq, offer)
@@ -438,6 +583,21 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 			c.JSON(http.StatusConflict, ErrorResponse{
 				Error:     err.Error(),
 				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+
+		// Check for insufficient disk space error
+		var diskErr *provisioner.InsufficientDiskError
+		if errors.As(err, &diskErr) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":          err.Error(),
+				"error_type":     "insufficient_disk",
+				"requested_gb":   diskErr.RequestedGB,
+				"minimum_gb":     diskErr.MinimumGB,
+				"recommended_gb": diskErr.RecommendedGB,
+				"breakdown":      diskErr.Estimation,
+				"request_id":     c.GetString("request_id"),
 			})
 			return
 		}
@@ -458,17 +618,21 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:     err.Error(),
-			RequestID: c.GetString("request_id"),
+		errorType, retrySuggested := classifyProvisionError(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":           err.Error(),
+			"error_type":      errorType,
+			"retry_suggested": retrySuggested,
+			"request_id":      c.GetString("request_id"),
 		})
 		return
 	}
 
 	// Return session with secrets (only shown once)
 	c.JSON(http.StatusCreated, CreateSessionResponse{
-		Session:       session.ToResponse(),
-		SSHPrivateKey: session.SSHPrivateKey,
+		Session:          session.ToResponse(),
+		SSHPrivateKey:    session.SSHPrivateKey,
+		RetriesAttempted: session.RetryCount,
 	})
 }
 
@@ -638,7 +802,7 @@ func (s *Server) handleDeleteSession(c *gin.Context) {
 		var sessionNotFound *provisioner.SessionNotFoundError
 		if errors.As(err, &sessionNotFound) || errors.Is(err, storage.ErrNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:     fmt.Sprintf("session not found: %s", sessionID),
+				Error:     fmt.Sprintf("session not found: %s", sanitizeInput(sessionID, 128)),
 				RequestID: c.GetString("request_id"),
 			})
 			return
@@ -676,7 +840,7 @@ func (s *Server) handleGetCosts(c *gin.Context) {
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				c.JSON(http.StatusNotFound, ErrorResponse{
-					Error:     fmt.Sprintf("session not found: %s", params.SessionID),
+					Error:     fmt.Sprintf("session not found: %s", sanitizeInput(params.SessionID, 128)),
 					RequestID: c.GetString("request_id"),
 				})
 				return
@@ -853,6 +1017,44 @@ func formatDuration(d time.Duration) string {
 	return strconv.Itoa(minutes) + "m"
 }
 
+// sanitizeInput strips control characters and angle brackets from user input
+// to prevent log injection and XSS when reflected in error messages.
+func sanitizeInput(s string, maxLen int) string {
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r < 32 || r == '<' || r == '>' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// classifyProvisionError categorizes provisioning errors for consumer apps.
+// Returns an error type string and whether the consumer should retry.
+func classifyProvisionError(err error) (errorType string, retrySuggested bool) {
+	if err == nil {
+		return "none", false
+	}
+	msg := strings.ToLower(err.Error())
+
+	switch {
+	case strings.Contains(msg, "ssh") || strings.Contains(msg, "timeout"):
+		return "ssh_timeout", true
+	case strings.Contains(msg, "stopped") || strings.Contains(msg, "terminated"):
+		return "instance_stopped", true
+	case strings.Contains(msg, "connection refused"):
+		return "provider_unavailable", true
+	case strings.Contains(msg, "not found") || strings.Contains(msg, "invalid"):
+		return "invalid_request", false
+	default:
+		return "provision_failed", true
+	}
+}
+
 // Bug #9: sanitizeValidationError converts internal field names to JSON field names
 // in validation error messages to avoid leaking internal implementation details.
 func sanitizeValidationError(err error) string {
@@ -883,17 +1085,17 @@ func sanitizeValidationError(err error) string {
 func toSnakeCase(s string) string {
 	// Handle common field name mappings
 	fieldMappings := map[string]string{
-		"ConsumerID":     "consumer_id",
-		"OfferID":        "offer_id",
-		"WorkloadType":   "workload_type",
-		"ReservationHrs": "reservation_hours",
-		"IdleThreshold":  "idle_threshold_minutes",
-		"StoragePolicy":  "storage_policy",
-		"LaunchMode":     "launch_mode",
-		"DockerImage":    "docker_image",
-		"ModelID":        "model_id",
-		"ExposedPorts":   "exposed_ports",
-		"Quantization":   "quantization",
+		"ConsumerID":      "consumer_id",
+		"OfferID":         "offer_id",
+		"WorkloadType":    "workload_type",
+		"ReservationHrs":  "reservation_hours",
+		"IdleThreshold":   "idle_threshold_minutes",
+		"StoragePolicy":   "storage_policy",
+		"LaunchMode":      "launch_mode",
+		"DockerImage":     "docker_image",
+		"ModelID":         "model_id",
+		"ExposedPorts":    "exposed_ports",
+		"Quantization":    "quantization",
 		"AdditionalHours": "additional_hours",
 	}
 	if mapped, ok := fieldMappings[s]; ok {
@@ -904,3 +1106,168 @@ func toSnakeCase(s string) string {
 	return strings.ToLower(re.ReplaceAllString(s, "${1}_${2}"))
 }
 
+// Offer health handler (global failure tracking)
+
+func (s *Server) handleOfferHealth(c *gin.Context) {
+	offers, gpuTypes := s.inventory.GetAllOfferHealth()
+
+	// Optional filtering by provider and gpu_type
+	providerFilter := c.Query("provider")
+	gpuTypeFilter := c.Query("gpu_type")
+
+	if providerFilter != "" || gpuTypeFilter != "" {
+		var filtered []inventory.OfferHealthInfo
+		for _, o := range offers {
+			if providerFilter != "" && o.Provider != providerFilter {
+				continue
+			}
+			if gpuTypeFilter != "" && o.GPUType != gpuTypeFilter {
+				continue
+			}
+			filtered = append(filtered, o)
+		}
+		offers = filtered
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"offers":    offers,
+		"gpu_types": gpuTypes,
+		"count":     len(offers),
+	})
+}
+
+// Template handlers
+
+func (s *Server) handleListTemplates(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var query ListTemplatesQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Build filter from query parameters
+	filter := models.TemplateFilter{
+		Recommended: query.Recommended,
+		UseSSH:      query.UseSSH,
+		Name:        query.Name,
+		Image:       query.Image,
+	}
+
+	// Get the Vast.ai provider (templates are only available from Vast.ai)
+	templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "template provider not available: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	templates, err := templateProvider.ListTemplates(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to list templates: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"templates": templates,
+		"count":     len(templates),
+	})
+}
+
+func (s *Server) handleGetTemplate(c *gin.Context) {
+	ctx := c.Request.Context()
+	hashID := c.Param("hash_id")
+
+	// Get the Vast.ai provider (templates are only available from Vast.ai)
+	templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "template provider not available: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	template, err := templateProvider.GetTemplate(ctx, hashID)
+	if err != nil {
+		// Check if template not found using typed error
+		if errors.Is(err, provider.ErrTemplateNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:     err.Error(),
+				RequestID: c.GetString("request_id"),
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to get template: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, template)
+}
+
+func (s *Server) handleGetCompatibleTemplates(c *gin.Context) {
+	ctx := c.Request.Context()
+	offerID := c.Param("id")
+
+	// Get the offer first
+	offer, err := s.inventory.GetOffer(ctx, offerID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     "offer not found: " + sanitizeInput(offerID, 128),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Templates are only available for Vast.ai
+	if offer.Provider != "vastai" {
+		c.JSON(http.StatusOK, gin.H{
+			"compatible_templates": []models.CompatibleTemplate{},
+			"count":                0,
+			"offer_id":             offerID,
+			"provider":             offer.Provider,
+			"note":                 "templates are only available for Vast.ai offers",
+		})
+		return
+	}
+
+	// Get the Vast.ai provider
+	templateProvider, err := s.inventory.GetTemplateProvider("vastai")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "template provider not available: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	// Get compatible templates using filter matching
+	compatibleTemplates, err := templateProvider.GetCompatibleTemplates(ctx, offerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:     "failed to get compatible templates: " + err.Error(),
+			RequestID: c.GetString("request_id"),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"compatible_templates": compatibleTemplates,
+		"count":                len(compatibleTemplates),
+		"offer_id":             offerID,
+		"gpu_type":             offer.GPUType,
+		"vram_gb":              offer.VRAM,
+	})
+}

@@ -57,9 +57,9 @@ func (e *DuplicateSessionError) Error() string {
 // This suggests the offer appeared available but was not actually available.
 // Callers should consider retrying with a different offer.
 type StaleInventoryError struct {
-	OfferID      string
-	Provider     string
-	OriginalErr  error
+	OfferID     string
+	Provider    string
+	OriginalErr error
 }
 
 func (e *StaleInventoryError) Error() string {
@@ -69,6 +69,23 @@ func (e *StaleInventoryError) Error() string {
 
 func (e *StaleInventoryError) Unwrap() error {
 	return e.OriginalErr
+}
+
+// InsufficientDiskError indicates the requested disk space is too small for the model
+type InsufficientDiskError struct {
+	RequestedGB   int
+	MinimumGB     int
+	RecommendedGB int
+	Estimation    *DiskEstimation
+}
+
+func (e *InsufficientDiskError) Error() string {
+	msg := fmt.Sprintf("insufficient disk space: %d GB requested, minimum %d GB required (recommended: %d GB)",
+		e.RequestedGB, e.MinimumGB, e.RecommendedGB)
+	if e.Estimation != nil {
+		msg += " — breakdown: " + e.Estimation.FormatBreakdown()
+	}
+	return msg
 }
 
 // IsRetryableWithDifferentOffer returns true if the error indicates we should

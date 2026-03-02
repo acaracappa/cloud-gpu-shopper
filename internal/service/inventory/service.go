@@ -2,11 +2,13 @@ package inventory
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
@@ -42,16 +44,20 @@ type Service struct {
 	providers []provider.Provider
 	logger    *slog.Logger
 
-	mu              sync.RWMutex
-	cache           map[string]*providerCache
-	cacheTTL        time.Duration
-	backoffTTL      time.Duration
-	providerTimeout time.Duration
+	mu               sync.RWMutex
+	cache            map[string]*providerCache
+	cacheTTL         time.Duration
+	providerCacheTTL map[string]time.Duration // Provider-specific TTLs (overrides cacheTTL)
+	backoffTTL       time.Duration
+	providerTimeout  time.Duration
+
+	// Global offer failure tracking (BUG-010, BUG-011, BUG-012)
+	failureTracker *OfferFailureTracker
 
 	// Bug #19 fix: Track background refresh goroutines for graceful shutdown
-	refreshWg     sync.WaitGroup
-	shutdownCh    chan struct{}
-	shutdownOnce  sync.Once
+	refreshWg    sync.WaitGroup
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 }
 
 // providerCache holds cached offers for a single provider
@@ -96,6 +102,25 @@ func WithProviderTimeout(d time.Duration) Option {
 	}
 }
 
+// WithFailureStore sets a persistent store for the failure tracker.
+// When set, failures are written through to the DB and loaded on startup.
+func WithFailureStore(store FailureStore) Option {
+	return func(s *Service) {
+		s.failureTracker.SetStore(store, s.logger)
+	}
+}
+
+// WithProviderCacheTTL sets a custom cache TTL for a specific provider
+// This overrides the default cache TTL for providers with volatile inventory
+func WithProviderCacheTTL(providerName string, d time.Duration) Option {
+	return func(s *Service) {
+		if s.providerCacheTTL == nil {
+			s.providerCacheTTL = make(map[string]time.Duration)
+		}
+		s.providerCacheTTL[providerName] = d
+	}
+}
+
 // New creates a new inventory service
 func New(providers []provider.Provider, opts ...Option) *Service {
 	s := &Service{
@@ -105,6 +130,7 @@ func New(providers []provider.Provider, opts ...Option) *Service {
 		cacheTTL:        DefaultCacheTTL,
 		backoffTTL:      BackoffCacheTTL,
 		providerTimeout: DefaultProviderTimeout,
+		failureTracker:  NewOfferFailureTracker(),
 		shutdownCh:      make(chan struct{}), // Bug #19 fix: Initialize shutdown channel
 	}
 
@@ -307,11 +333,12 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 			return
 		}
 
-		softExpiry := now.Add(s.cacheTTL * 3 / 4) // Soft expiry at 75% of TTL
+		ttl := s.getCacheTTL(providerName)
+		softExpiry := now.Add(ttl * 3 / 4) // Soft expiry at 75% of TTL
 		s.cache[providerName] = &providerCache{
 			offers:     offers,
 			fetchedAt:  now,
-			expiresAt:  now.Add(s.cacheTTL),
+			expiresAt:  now.Add(ttl),
 			softExpiry: softExpiry,
 			err:        nil,
 			inBackoff:  false,
@@ -320,7 +347,8 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 
 		s.logger.Debug("background refresh completed",
 			slog.String("provider", providerName),
-			slog.Int("count", len(offers)))
+			slog.Int("count", len(offers)),
+			slog.Duration("ttl", ttl))
 	}()
 }
 
@@ -357,11 +385,12 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 		return nil, err
 	}
 
-	softExpiry := now.Add(s.cacheTTL * 3 / 4) // Soft expiry at 75% of TTL
+	ttl := s.getCacheTTL(providerName)
+	softExpiry := now.Add(ttl * 3 / 4) // Soft expiry at 75% of TTL
 	s.cache[providerName] = &providerCache{
 		offers:     offers,
 		fetchedAt:  now,
-		expiresAt:  now.Add(s.cacheTTL),
+		expiresAt:  now.Add(ttl),
 		softExpiry: softExpiry,
 		err:        nil,
 		inBackoff:  false,
@@ -370,7 +399,8 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 
 	s.logger.Debug("cached offers from provider",
 		slog.String("provider", providerName),
-		slog.Int("count", len(offers)))
+		slog.Int("count", len(offers)),
+		slog.Duration("ttl", ttl))
 
 	return offers, nil
 }
@@ -382,6 +412,19 @@ func (s *Service) filterAndSort(offers []models.GPUOffer, filter models.OfferFil
 	for _, offer := range offers {
 		// Apply staleness degradation to availability confidence
 		adjustedOffer := s.applyStalenessDegradation(offer)
+
+		// Skip suppressed offers (global failure tracking — BUG-010, BUG-011, BUG-012)
+		if s.failureTracker.IsSuppressed(adjustedOffer.ID) {
+			continue
+		}
+
+		// Apply failure-based confidence degradation
+		multiplier := s.failureTracker.GetConfidenceMultiplier(
+			adjustedOffer.ID, adjustedOffer.GPUType, adjustedOffer.Provider)
+		if multiplier < 1.0 {
+			adjustedOffer.AvailabilityConfidence *= multiplier
+		}
+
 		if adjustedOffer.MatchesFilter(filter) && adjustedOffer.Available {
 			filtered = append(filtered, adjustedOffer)
 		}
@@ -522,6 +565,17 @@ func (s *Service) ProviderNames() []string {
 	return names
 }
 
+// getCacheTTL returns the cache TTL for a specific provider
+// Uses provider-specific TTL if configured, otherwise falls back to default
+func (s *Service) getCacheTTL(providerName string) time.Duration {
+	if s.providerCacheTTL != nil {
+		if ttl, ok := s.providerCacheTTL[providerName]; ok {
+			return ttl
+		}
+	}
+	return s.cacheTTL
+}
+
 // Shutdown gracefully shuts down the inventory service
 // Bug #19 fix: Signals background refresh goroutines to stop and waits for completion
 func (s *Service) Shutdown() {
@@ -531,4 +585,124 @@ func (s *Service) Shutdown() {
 		s.refreshWg.Wait()
 		s.logger.Info("inventory service shutdown complete")
 	})
+}
+
+// RecordOfferFailure records a provisioning failure for global offer health tracking.
+// Called by the provisioner when an offer fails at any stage.
+func (s *Service) RecordOfferFailure(offerID, providerName, gpuType, failureType, reason string) {
+	s.failureTracker.RecordFailure(offerID, providerName, gpuType, FailureType(failureType), reason)
+	s.logger.Warn("offer failure recorded",
+		slog.String("offer_id", offerID),
+		slog.String("provider", providerName),
+		slog.String("gpu_type", gpuType),
+		slog.String("failure_type", failureType),
+		slog.String("reason", reason))
+	metrics.RecordOfferFailure(providerName, gpuType, failureType)
+}
+
+// GetAllOfferHealth returns structured health data for all tracked offers and GPU types
+func (s *Service) GetAllOfferHealth() ([]OfferHealthInfo, []GPUTypeHealthInfo) {
+	return s.failureTracker.GetAllHealth()
+}
+
+// LoadFailureData loads persisted failure data into the in-memory tracker.
+// Call this once at startup after the service is created.
+func (s *Service) LoadFailureData(ctx context.Context, failures []StoredFailure, suppressions []StoredSuppression) {
+	s.failureTracker.LoadFromStore(ctx, failures, suppressions)
+}
+
+// FindComparableOffers returns offers comparable to the original, filtered by scope.
+// It excludes any offers in excludeIDs (previously failed offers).
+// Results are sorted by availability confidence (desc) then price (asc), limited to 5.
+func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string) ([]models.GPUOffer, error) {
+	if original == nil {
+		return nil, fmt.Errorf("original offer is nil")
+	}
+
+	// Build filter based on scope
+	filter := models.OfferFilter{}
+
+	switch scope {
+	case "same_gpu":
+		filter.Provider = original.Provider
+		filter.GPUType = original.GPUType
+		filter.MaxPrice = original.PricePerHour * 1.2
+	case "same_vram":
+		filter.Provider = original.Provider
+		filter.MinVRAM = original.VRAM
+		filter.MaxPrice = original.PricePerHour * 1.5
+	case "any":
+		filter.MinVRAM = original.VRAM
+		filter.MaxPrice = original.PricePerHour * 2.0
+	default:
+		// Default to same_gpu
+		filter.Provider = original.Provider
+		filter.GPUType = original.GPUType
+		filter.MaxPrice = original.PricePerHour * 1.2
+	}
+
+	offers, err := s.ListOffers(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list comparable offers: %w", err)
+	}
+
+	// Build exclusion set
+	excluded := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		excluded[id] = true
+	}
+
+	// Filter out excluded offers, the original, and suppressed offers
+	var candidates []models.GPUOffer
+	for _, offer := range offers {
+		if excluded[offer.ID] || offer.ID == original.ID {
+			continue
+		}
+		if !offer.Available {
+			continue
+		}
+		// Skip suppressed offers (global failure tracking)
+		if s.failureTracker.IsSuppressed(offer.ID) {
+			continue
+		}
+		candidates = append(candidates, offer)
+	}
+
+	// Sort by availability confidence desc, then price asc
+	sort.Slice(candidates, func(i, j int) bool {
+		ci := candidates[i].GetEffectiveAvailabilityConfidence()
+		cj := candidates[j].GetEffectiveAvailabilityConfidence()
+		if ci != cj {
+			return ci > cj
+		}
+		return candidates[i].PricePerHour < candidates[j].PricePerHour
+	})
+
+	// Limit to top 5
+	if len(candidates) > 5 {
+		candidates = candidates[:5]
+	}
+
+	s.logger.Info("found comparable offers",
+		slog.String("original_offer", original.ID),
+		slog.String("scope", scope),
+		slog.Int("candidates", len(candidates)),
+		slog.Int("excluded", len(excludeIDs)))
+
+	return candidates, nil
+}
+
+// GetTemplateProvider returns the template provider for a given provider name.
+// Only providers that support templates (e.g., Vast.ai) can be returned.
+func (s *Service) GetTemplateProvider(providerName string) (provider.TemplateProvider, error) {
+	for _, p := range s.providers {
+		if p.Name() == providerName {
+			templateProvider, ok := p.(provider.TemplateProvider)
+			if !ok {
+				return nil, &ProviderNotFoundError{Name: providerName + " (does not support templates)"}
+			}
+			return templateProvider, nil
+		}
+	}
+	return nil, &ProviderNotFoundError{Name: providerName}
 }

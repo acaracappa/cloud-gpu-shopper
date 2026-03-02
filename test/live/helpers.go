@@ -88,12 +88,46 @@ type CreateSessionRequest struct {
 	WorkloadType   string `json:"workload_type"`
 	ReservationHrs int    `json:"reservation_hours"`
 	IdleThreshold  int    `json:"idle_threshold,omitempty"`
+	TemplateHashID string `json:"template_hash_id,omitempty"`
 }
 
 // CreateSessionResponse represents a session creation response
 type CreateSessionResponse struct {
 	Session       Session `json:"session"`
 	SSHPrivateKey string  `json:"ssh_private_key,omitempty"`
+}
+
+// Template represents a Vast.ai template from the API
+type Template struct {
+	HashID       string `json:"hash_id"`
+	Name         string `json:"name"`
+	Image        string `json:"image"`
+	RunType      string `json:"runtype"` // Note: API returns "runtype" not "run_type"
+	UseSSH       bool   `json:"use_ssh"`
+	Recommended  bool   `json:"recommended"`
+	ExtraFilters string `json:"extra_filters"`
+}
+
+// ListTemplates fetches available templates, optionally filtered by name
+func (e *LiveTestEnv) ListTemplates(t *testing.T, nameFilter string) []Template {
+	url := fmt.Sprintf("%s/api/v1/templates", e.Config.ServerURL)
+	if nameFilter != "" {
+		url += fmt.Sprintf("?name=%s", nameFilter)
+	}
+
+	resp, err := e.client.Get(url)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode, "Failed to list templates")
+
+	var result struct {
+		Templates []Template `json:"templates"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	require.NoError(t, err)
+
+	return result.Templates
 }
 
 // ListInventory fetches available GPUs, optionally filtered by provider and max price
@@ -676,8 +710,8 @@ func (e *LiveTestEnv) FindMidRangeOffer(t *testing.T, provider Provider) *GPUOff
 	})
 
 	// Calculate the middle 50% range (25th to 75th percentile)
-	startIdx := len(offers) / 4         // 25th percentile
-	endIdx := (len(offers) * 3) / 4     // 75th percentile
+	startIdx := len(offers) / 4     // 25th percentile
+	endIdx := (len(offers) * 3) / 4 // 75th percentile
 	if endIdx <= startIdx {
 		endIdx = startIdx + 1
 	}

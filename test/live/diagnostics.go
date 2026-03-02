@@ -15,12 +15,12 @@ import (
 
 // DiagnosticsCollector collects diagnostic data from GPU instances
 type DiagnosticsCollector struct {
-	sessionID  string
-	outputDir  string
-	startTime  time.Time
-	sshHelper  *SSHHelper
-	env        *LiveTestEnv
-	snapshots  []string
+	sessionID string
+	outputDir string
+	startTime time.Time
+	sshHelper *SSHHelper
+	env       *LiveTestEnv
+	snapshots []string
 }
 
 // DiagnosticSnapshot contains all collected diagnostic data
@@ -45,11 +45,11 @@ func NewDiagnosticsCollector(sessionID string, outputDir string, env *LiveTestEn
 	}
 
 	return &DiagnosticsCollector{
-		sessionID:  sessionID,
-		outputDir:  sessionDir,
-		startTime:  time.Now(),
-		env:        env,
-		snapshots:  make([]string, 0),
+		sessionID: sessionID,
+		outputDir: sessionDir,
+		startTime: time.Now(),
+		env:       env,
+		snapshots: make([]string, 0),
 	}
 }
 
@@ -216,10 +216,10 @@ func (d *DiagnosticsCollector) GetSnapshots() []string {
 
 // DiagnosticsConfig holds configuration for diagnostics collection
 type DiagnosticsConfig struct {
-	OutputDir           string
-	Enabled             bool
-	CollectOnFailure    bool
-	CollectOnTimeout    bool
+	OutputDir            string
+	Enabled              bool
+	CollectOnFailure     bool
+	CollectOnTimeout     bool
 	CollectOnLimitExceed bool
 }
 
@@ -231,10 +231,10 @@ func DefaultDiagnosticsConfig() *DiagnosticsConfig {
 	}
 
 	return &DiagnosticsConfig{
-		OutputDir:           outputDir,
-		Enabled:             true,
-		CollectOnFailure:    true,
-		CollectOnTimeout:    true,
+		OutputDir:            outputDir,
+		Enabled:              true,
+		CollectOnFailure:     true,
+		CollectOnTimeout:     true,
 		CollectOnLimitExceed: true,
 	}
 }

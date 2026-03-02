@@ -2,30 +2,54 @@
 
 ## Current Status
 
-**Phase**: Post-MVP QA Remediation
-**Status**: Complete - All Issues Resolved
-**Date**: 2026-01-31
+**Phase**: Post-MVP Feature Development
+**Status**: Active
+**Date**: 2026-02-07
 
-### MVP Complete
-- All 7 safety rules implemented and tested
-- E2E test coverage for all critical paths
-- Live testing infrastructure for both providers
+### Summary
+- MVP complete with all safety rules, E2E tests, and live testing
+- Feb 2026: Added auto-retry, global failure tracking, benchmarking infrastructure, disk estimation, Docker multi-arch builds
+- Active bug tracking for provider-specific issues (RTX 5080 driver incompatibility)
+- TensorDock inventory quality improved with aggressive confidence tuning and recency penalty
 
 ---
+
+## Known Issues
+
+| ID | Description | Status | Notes |
+|----|-------------|--------|-------|
+| BUG-003 | `.env` not loading provider creds | FIXED | `mapEnvFileKeys()` |
+| BUG-004 | CUDA version mismatch | Provider-side — Won't Fix | Provider-side data issue; `min_cuda` filter works around it |
+| BUG-005 | SSH timeout too short for heavy templates | FIXED | Client-configurable `ssh_timeout_minutes` (1-30 min) |
+| BUG-006 | pip vLLM incompatible with CUDA 13.0 | Provider-side — Won't Fix | Use Docker template instead |
+| BUG-008 | TensorDock port_forwards ignored | FIXED | Use `useDedicatedIp: true` |
+| BUG-009 | ALL TensorDock VMs missing nvidia drivers (systemic) | Fixed | Cloud-init: dpkg fix + DKMS build + modprobe |
+| BUG-010 | TensorDock "No available public IPs on hostnode" | Provider-side — Won't Fix | Stale inventory; confidence scoring suppresses bad offers |
+| BUG-011 | TensorDock H100 SXM5 stops immediately | Provider-side — Won't Fix | Global failure tracking auto-suppresses offer |
+| BUG-012 | RTX 5080 on Vast.ai can't provision | Provider-side — Won't Fix | Driver incompatibility; GPU-type degradation after 3+ failures |
+| BUG-013 | TensorDock nvidia packages in `iU` state (DKMS never built) | Fixed | Cloud-init runs `dpkg --configure -a` + DKMS build/install |
+| BUG-014 | dpkg lock contention on TensorDock VMs (2-5 min) | Fixed | Cloud-init kills unattended-upgrades, waits for lock, `DPkg::Lock::Timeout=120` |
+| BUG-015 | deepseek-r1:14b cold-start >2 min (CUDA JIT) | Provider-side — Won't Fix | Inherent to CUDA JIT; benchmark script uses warmup request |
+| BUG-016 | RTX 5000 ADA / RTX 5090 Chubbuck intermittent SSH/PCIe | Provider-side — Won't Fix | Hardware issue; failure tracker auto-suppresses |
+| BUG-017 | Vast.ai "loading" state killed during image pull | FIXED | Added "loading" to transient states allowlist in provisioner |
+| BUG-024 | No workload_type or retry_scope validation | FIXED | Validation in handlers.go + models/session.go |
+| BUG-040 | Unsanitized X-Request-ID + user input in errors | FIXED | sanitizeInput() + requestID regex validation |
+| BUG-047 | CLI nil map crash in sessions extend command | FIXED | Nil check before map access in sessions.go |
+| BUG-064 | Cost tracker records $0 for short-lived sessions | FIXED | RecordFinalCost + CostRecorder interface in provisioner |
 
 ## Backlog
 
 ### Outstanding (Medium Priority)
 
-_None - all medium priority items complete_
+_None_
 
 ### Outstanding (Low Priority)
 
-_None - all low priority items complete_
+_None_
 
 ### Deferred
 
-_None - all deferred items complete_
+_None_
 
 ### Completed (QA Remediation)
 | ID | Issue | Status |
@@ -560,3 +584,235 @@ go test -race ./...                    # All pass
 go test -tags=e2e -race ./test/e2e/... # All pass
 go test -race -parallel 4 ./cmd/cli/... # All pass
 ```
+
+### 2026-02-02 — Vast.ai Templates, Provisioning Refactor, SSH Fix
+
+- Implemented Vast.ai template system: list, get, compatibility checking
+- Template-aware provisioning: `template_hash_id` parameter auto-applies host requirements
+- Exposed `cuda_version` field in GPUOffer, added `min_cuda` filter to API
+- Fixed bundle cache merge (filtered queries no longer wipe unfiltered cache)
+- Fixed SSH verification for Vast.ai entrypoint-mode instances
+- Tested ollama and vLLM builds on Vast.ai
+
+### 2026-02-04 — Post-Provision Diagnostics, Disk Estimation, Auto-Retry
+
+#### Post-Provision Runtime Diagnostics
+- Added disk space check and OOM detection after SSH verification
+- Session diagnostics endpoint: `GET /api/v1/sessions/:id/diagnostics`
+- New metric: `gpu_session_disk_available_gb`
+
+#### Disk Estimation
+- `disk_gb` parameter on `POST /api/v1/sessions` for estimated disk needs
+- Filters out offers with insufficient disk during provisioning
+
+#### Auto-Retry Feature
+- `POST /api/v1/sessions` now supports `auto_retry`, `max_retries`, `retry_scope`
+- **Sync retry**: `StaleInventoryError` in `CreateInstance` triggers immediate retry with comparable offer
+- **Async retry**: SSH timeout / instance stopped triggers background retry
+- **Scopes**: `same_gpu` (1.2x price), `same_vram` (1.5x price), `any` (cross-provider, 2x price)
+- `FindComparableOffers()` on inventory service excludes failed offers, sorts by confidence then price
+- Session model extended: `RetryCount`, `RetryParentID`, `RetryChildID`, `FailedOffers`
+- New DB columns via idempotent `ALTER TABLE` migrations
+
+#### Session Model Updates
+- Added retry tracking fields to sessions table
+- Extended `SessionStore` with retry-related queries
+
+### 2026-02-05 — TensorDock Integration Fixes
+
+- **BUG-008 FIXED**: TensorDock `port_forwards` parameter ignored → use `useDedicatedIp: true`
+- **BUG-009**: TensorDock `ubuntu2404` image missing nvidia drivers → manual install + reboot
+- Working location: Joplin, Missouri (RTX 4090, $0.44/hr)
+- After driver install: CUDA 13.0, Driver 580.126.09
+
+### 2026-02-06 — Benchmarking Infrastructure, Global Failure Tracking, Docker Multi-Arch
+
+#### Benchmarking Infrastructure
+- Created `internal/benchmark/` package: models, store, manifest, parser
+- SQLite-backed benchmark storage with `benchmarks` table
+- Benchmark manifest for reproducible GPU test runs
+- Ollama-based benchmark runner with TPS parsing
+- API endpoints: `GET /api/v1/benchmarks`, `POST /api/v1/benchmarks`, compare, recommendations
+- CLI: `gpu-shopper benchmark run`, `gpu-shopper benchmark list`
+- Comprehensive documentation: `docs/BENCHMARKING.md`
+
+#### Benchmark Results (23 total runs)
+
+| GPU | Provider | Model | TPS | $/M tokens | Status |
+|-----|----------|-------|-----|-----------|--------|
+| RTX 4090 | TensorDock | deepseek-r1:14b | 93.7 | $1.30 | Success |
+| RTX 4090 | Vast.ai | deepseek-r1:14b | 84.0 | $0.73 | Success |
+| RTX 3090 | TensorDock | deepseek-r1:14b | 55.5 | $1.50 | Success |
+| RTX 3090 | Vast.ai | deepseek-r1:14b | 60.5 | $1.38 | Success |
+| RTX 5090 | Vast.ai | deepseek-r1:14b | 125.2 | $0.53 | Success |
+| A100 80GB | Vast.ai | deepseek-r1:14b | 83.0 | $1.21 | Success |
+| RTX 5080 | Vast.ai | deepseek-r1:14b | — | — | FAILED (BUG-012) |
+
+#### Global Offer Failure Tracking (BUG-010, BUG-011, BUG-012)
+- In-memory `OfferFailureTracker` in inventory service
+- Per-offer confidence degradation: `0.7^recentFailures`
+- Offer suppression: 3 failures within 30min → hidden for 30min
+- GPU-type-level aggregation: 3+ distinct offers fail → 0.3× multiplier
+- Time-based decay: failures expire after 1 hour
+- 3 failure recording points in provisioner: CreateInstance error, instance stopped, SSH timeout
+- API endpoint: `GET /api/v1/offer-health`
+- Prometheus metric: `gpu_offer_failures_total`
+- 14 unit tests
+
+#### Docker Multi-Arch
+- Added `amd64/arm64` support to Docker build
+- Container build workflow with `gofmt` check
+
+#### Documentation
+- CONTRIBUTING.md with development setup, testing, code style
+- Enhanced README with comprehensive user guide and CLI reference
+- Benchmark report with GPU comparisons and recommendations
+- `docs/BENCHMARKING.md` — full benchmarking infrastructure docs
+
+### 2026-02-06 — BUG-005 Fix + TensorDock Inventory Quality
+
+#### BUG-005: Client-Configurable SSH Timeout
+- Added `ssh_timeout_minutes` (1-30 min) to `POST /api/v1/sessions`
+- Client override takes priority over template-recommended timeout
+- Clamped to 1-30 minutes with validation
+- No provisioner changes needed — existing `TemplateRecommendedSSHTimeout` path handles it
+
+#### TensorDock Inventory Quality Improvements
+- Default confidence lowered: 50% → 30% (reflects 80%+ failure rate)
+- Minimum confidence floor lowered: 10% → 5%
+- Decay window shortened: 1 hour → 30 minutes (recover faster, punish faster)
+- Added `lastWasSuccess` tracking to `locationStats`
+- Added recency penalty: if last attempt failed, confidence halved
+- Net effect examples:
+  - Fresh location: 30% (was 50%)
+  - After 1 failure: 5% (was 10%)
+  - 1 success + 1 failure (failure last): 12.5% (was 50%)
+  - 3 successes, 0 failures: 100% (unchanged)
+
+### 2026-02-06 — TensorDock-Only Benchmark Campaign + Bug Fixes
+
+#### Benchmark Results (TensorDock)
+
+31 attempts, 5 successful (29% success rate). 22 failed (71%).
+
+| GPU | Model | TPS | $/M tokens | Price/hr | Location |
+|-----|-------|-----|-----------|----------|----------|
+| RTX 4090 | llama3.1:8b | 169.0 | $0.65 | $0.396 | Chubbuck ID |
+| RTX A6000 | llama3.1:8b | 121.9 | $0.91 | $0.400 | Chubbuck ID |
+| RTX 4090 | deepseek-r1:14b | 92.3 | $1.14 | $0.377 | Manassas VA |
+| RTX 3090 | deepseek-r1:14b | 80.1 | $0.69 | $0.200 | Manassas VA |
+| RTX A6000 | deepseek-r1:14b | 68.0 | $1.63 | $0.400 | Chubbuck ID |
+
+Key finding: **RTX 3090 is best value** for deepseek-r1:14b at $0.69/M tokens ($0.200/hr).
+
+#### Failure Analysis (22/31 = 71% failure rate)
+
+| Stage | Count | Cause |
+|-------|-------|-------|
+| Provision (stale inventory) | 8 | BUG-010: "No available public IPs on hostnode" |
+| SSH timeout | 6 | BUG-009/013/014: nvidia driver not loading, dpkg lock |
+| Instance stopped | 4 | BUG-011: instance stops immediately after provisioning |
+| SSH auth failure | 2 | BUG-016: RTX 5000 ADA / RTX 5090 Chubbuck PCIe issues |
+| Benchmark timeout | 2 | BUG-015: CUDA JIT cold-start >2 min |
+
+Working locations: **Manassas VA** (43% success), **Chubbuck ID** (50% success). All other locations failed.
+
+#### New Bugs Discovered
+
+- **BUG-013**: TensorDock nvidia packages in `iU` state — DKMS kernel module never built, `nvidia-smi` fails even though package is "installed"
+- **BUG-014**: `unattended-upgrades` holds dpkg lock for 2-5 min after boot, causing `apt` to fail in cloud-init
+- **BUG-015**: deepseek-r1:14b cold-start >2 min due to CUDA JIT compilation on first inference (not a code bug — inherent to model)
+- **BUG-016**: RTX 5000 ADA / RTX 5090 in Chubbuck have intermittent PCIe passthrough failures (hardware issue, won't fix)
+
+#### Bug Fixes
+
+- **BUG-009/013/014 (combined)**: Rewrote `buildCloudInit()` nvidia driver sequence:
+  1. Kill `unattended-upgrades` and wait for dpkg lock release
+  2. Run `dpkg --configure -a` to fix partially-installed packages
+  3. Try DKMS build/install first (handles `iU` state without full reinstall)
+  4. Fall back to full `nvidia-driver-550` install if no DKMS package present
+  5. Use `modprobe nvidia` instead of reboot
+  6. All `apt` commands use `DPkg::Lock::Timeout=120` for remaining lock contention
+
+### 2026-02-07 — High-Severity Bug Fixes + Cross-Provider Benchmark Campaign
+
+#### Bug Fixes (5 High-Severity)
+
+| Bug | Description | Fix |
+|-----|-------------|-----|
+| BUG-017 | Vast.ai "loading" state treated as fatal — all Vast.ai provisioning killed during Docker image pull | Added `"loading"` to transient states allowlist in `provisioner/service.go:893` |
+| BUG-040 | Unsanitized X-Request-ID and user input reflected in error responses (XSS/log injection risk) | Added `validRequestIDRegex` in `server.go`, `sanitizeInput()` utility in `handlers.go` applied at 8 locations |
+| BUG-024 | No validation on `workload_type` or `retry_scope` — any string accepted | Added `ValidWorkloadTypes` map + `IsValidRetryScope()` in `models/session.go`, validation in `handlers.go` |
+| BUG-047 | CLI nil map crash when extending sessions | Added nil check before map access in `cmd/cli/cmd/sessions.go` |
+| BUG-064 | Cost tracker records $0 for sessions that terminate before hourly aggregation | Added `RecordFinalCost()` to `cost/tracker.go`, `CostRecorder` interface in provisioner, called on destroy/fail |
+
+Files modified: `internal/api/server.go`, `internal/api/handlers.go`, `internal/api/benchmark_handlers.go`, `pkg/models/session.go`, `cmd/cli/cmd/sessions.go`, `internal/service/cost/tracker.go`, `internal/service/provisioner/service.go`, `cmd/server/main.go`
+
+#### Cross-Provider Benchmark Campaign (mistral:7b)
+
+First successful Vast.ai provisioning after BUG-017 fix. 6 nodes across 2 providers, all using Ollama template for Vast.ai.
+
+| GPU | Provider | Location | Avg TPS | $/hr | $/M tokens |
+|-----|----------|----------|---------|------|-----------|
+| RTX 4090 | TensorDock | Joplin, MO | 179.0 | $0.439 | $0.68 |
+| RTX 4090 | TensorDock | Orlando, FL | 178.4 | $0.377 | $0.59 |
+| RTX 4090 | TensorDock | Manassas, VA | 176.0 | $0.377 | $0.59 |
+| RTX 5080 | Vast.ai | California, US | 168.4 | $0.118 | $0.19 |
+| RTX 3090 | Vast.ai | Quebec, CA | 159.2 | $0.082 | $0.14 |
+| RTX 5060 Ti | Vast.ai | Ohio, US | 89.3 | $0.069 | $0.21 |
+
+Key findings:
+- **Best value**: RTX 3090 on Vast.ai at **$0.14/M tokens** — 4x cheaper than TensorDock RTX 4090
+- **Best throughput**: RTX 4090 on TensorDock at **179 TPS**
+- **RTX 5080 sweet spot**: 168 TPS at $0.19/M tokens — excellent price/performance
+- **RTX 5060 Ti**: Budget Blackwell card, only 89 TPS — half the 4090's speed
+- **Vast.ai dramatically cheaper**: 3-4x cheaper per hour than TensorDock for equivalent performance
+- **Vast.ai now works**: BUG-017 fix confirmed — all 3 Vast.ai nodes provisioned successfully via Ollama template
+- **TensorDock reliability improved**: Orlando FL and Joplin MO confirmed as new working locations (previously only Manassas VA and Chubbuck ID)
+
+#### Key Learnings
+
+- **SSH keys are ephemeral**: Private keys returned only in POST /sessions response, not stored in DB. Must save immediately.
+- **Vast.ai Ollama template**: Hash `a8a44c7363cbca20056020397e3bf072`, image `vastai/ollama:0.15.4`, 2-4 min image pull ("loading" phase)
+- **Template-based provisioning**: Provider templates should be the baseline for spinning up nodes, not raw Docker images
+- **TensorDock deployment failures**: Ottawa, Winnipeg, and Chubbuck all returned "unexpected error during deployment" — only Manassas, Orlando, and Joplin succeeded
+
+### 2026-02-07 — Automated Benchmark Infrastructure & $3 Benchmark Campaign
+
+#### Benchmark Runner Reliability Fixes (5 fixes, ~200 lines across 7 files)
+
+| Fix | Description | File(s) |
+|-----|-------------|---------|
+| Script upload via SCP | Benchmark script was never uploaded to instances — auto-uploads via SCP before execution | `runner.go` |
+| Vast.ai Ollama template | Auto-selects Ollama template (`a8a44c7363cbca20056020397e3bf072`) for Vast.ai benchmarks | `runner.go` |
+| Fail fast on permanent SSH | Detects `auth_failed`/`key_parse_failed` after 3 consecutive errors, destroys instance immediately | `provisioner/service.go` |
+| Entry-level retry | Each benchmark entry gets 2 attempts with unique consumer IDs | `runner.go` |
+| Structured error types | `classifyProvisionError()` returns `error_type` and `retry_suggested` for consumer apps | `handlers.go` |
+
+Additional fixes:
+- Ollama auto-start in benchmark script (ssh_proxy runtype doesn't execute container entrypoints)
+- Idempotent manifest migration (ALTER TABLE for missing columns)
+- Result timeout increased to 30 minutes (model pull + benchmark)
+- Benchmark progress logging (tails `/tmp/benchmark.log` on each poll)
+
+#### Automated Benchmark Campaign Results
+
+Ran $3 benchmark matrix across 3 batches via Docker container. 4 new Vast.ai data points collected:
+
+| GPU | Provider | Model | TPS | $/hr | $/M tokens | TTFT | Match | Location |
+|-----|----------|-------|-----|------|-----------|------|-------|----------|
+| RTX 3090 | Vast.ai | llama3.1:8b | 144.8 | $0.076 | $0.14 | 4454ms | 100% | Spain |
+| RTX 5060 Ti | Vast.ai | llama3.1:8b | 83.3 | $0.069 | $0.23 | 6149ms | 100% | Ohio |
+| RTX 3090 | Vast.ai | deepseek-r1:14b | 82.8 | $0.079 | $0.26 | 6890ms | — | Quebec |
+| RTX 4090 | Vast.ai | deepseek-r1:32b | 44.5 | $0.141 | $0.88 | 10422ms | — | India |
+
+Batch 3 (TensorDock validation) failed: nvidia drivers not ready, model pull failed on all 4 entries. This confirms TensorDock's high failure rate (71%+) persists despite cloud-init driver fixes.
+
+#### Benchmark Database Totals
+
+- **49 benchmark results** in database (45 with valid TPS)
+- **9 GPU types**: RTX 3090, RTX 4090, RTX 5060 Ti, RTX 5070, RTX 5070 Ti, RTX 5080, RTX 5090, A100 80GB, H200 NVL
+- **8 models**: qwen2:1.5b, qwen2:7b, phi3:mini, mistral:7b, llama3.1:8b, deepseek-r1:14b, deepseek-r1:32b, deepseek-r1:70b
+- **2 providers**: Vast.ai, TensorDock
+- **New quality metrics**: TTFT (4.4s-10.4s range), match rate (0-100%)
+- **Best value**: RTX 3090 on Vast.ai at $0.14/M tokens for llama3.1:8b

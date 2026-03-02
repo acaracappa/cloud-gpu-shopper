@@ -171,7 +171,7 @@ func TestVerify_InvalidPrivateKey(t *testing.T) {
 
 func TestVerifyOnce_InvalidPrivateKey(t *testing.T) {
 	v := NewVerifier(
-		WithConnectTimeout(100*time.Millisecond),
+		WithConnectTimeout(100 * time.Millisecond),
 	)
 
 	ctx := context.Background()

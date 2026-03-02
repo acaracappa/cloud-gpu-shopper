@@ -69,6 +69,28 @@ This enables:
 - Multi-deployment isolation
 - Cost attribution
 
+### Disk Allocation
+
+When creating a session, you can specify the disk size using the `disk_gb` parameter:
+
+```json
+POST /api/v1/sessions
+{
+  "offer_id": "vastai-12345",
+  "consumer_id": "my-app",
+  "reservation_hours": 2,
+  "workload_type": "ssh",
+  "disk_gb": 200
+}
+```
+
+**Important considerations**:
+- **Default**: 50GB if not specified
+- **Immutable**: Disk size cannot be changed after instance creation
+- **Large Models**: For large models (e.g., DeepSeek-V2.5 236B at 132GB), allocate sufficient space
+- **Templates**: Vast.ai templates include a `recommended_disk_space` field to guide allocation
+- **Storage Costs**: Disk storage is charged continuously, even when the instance is stopped
+
 ### Known Limitations
 
 1. **SSH Key Propagation Delay**: After provisioning, SSH keys take 10-15 seconds to propagate. Cloud GPU Shopper handles this automatically with verification polling.
@@ -80,6 +102,8 @@ This enables:
 4. **Rate Limiting**: Vast.ai has API rate limits. Cloud GPU Shopper implements caching and backoff automatically.
 
 5. **No Instance Resize**: You cannot change GPU count or type after creation. Destroy and recreate instead.
+
+6. **Fixed Disk Size**: Disk allocation is permanent and cannot be modified after instance creation. Plan your storage needs upfront.
 
 ### Tips for Vast.ai
 

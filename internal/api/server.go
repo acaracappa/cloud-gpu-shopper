@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"sync/atomic"
@@ -14,7 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/metrics"
+	benchsvc "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/benchmark"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/cost"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/inventory"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/service/lifecycle"
@@ -28,10 +31,13 @@ type Server struct {
 	logger     *slog.Logger
 
 	// Services
-	inventory   *inventory.Service
-	provisioner *provisioner.Service
-	lifecycle   *lifecycle.Manager
-	costTracker *cost.Tracker
+	inventory          *inventory.Service
+	provisioner        *provisioner.Service
+	lifecycle          *lifecycle.Manager
+	costTracker        *cost.Tracker
+	benchmarkStore     *benchmark.Store
+	benchmarkRunner    *benchsvc.Runner
+	benchmarkScheduler *benchsvc.Scheduler
 
 	// Configuration
 	host string
@@ -62,6 +68,27 @@ func WithHost(host string) Option {
 func WithPort(port int) Option {
 	return func(s *Server) {
 		s.port = port
+	}
+}
+
+// WithBenchmarkStore sets the benchmark store
+func WithBenchmarkStore(store *benchmark.Store) Option {
+	return func(s *Server) {
+		s.benchmarkStore = store
+	}
+}
+
+// WithBenchmarkRunner sets the benchmark runner
+func WithBenchmarkRunner(runner *benchsvc.Runner) Option {
+	return func(s *Server) {
+		s.benchmarkRunner = runner
+	}
+}
+
+// WithBenchmarkScheduler sets the benchmark scheduler
+func WithBenchmarkScheduler(scheduler *benchsvc.Scheduler) Option {
+	return func(s *Server) {
+		s.benchmarkScheduler = scheduler
 	}
 }
 
@@ -127,6 +154,11 @@ func (s *Server) setupRouter() {
 		// Inventory
 		v1.GET("/inventory", s.handleListInventory)
 		v1.GET("/inventory/:id", s.handleGetOffer)
+		v1.GET("/inventory/:id/compatible-templates", s.handleGetCompatibleTemplates)
+
+		// Templates (Vast.ai only)
+		v1.GET("/templates", s.handleListTemplates)
+		v1.GET("/templates/:hash_id", s.handleGetTemplate)
 
 		// Sessions
 		v1.POST("/sessions", s.handleCreateSession)
@@ -140,6 +172,29 @@ func (s *Server) setupRouter() {
 		// Costs
 		v1.GET("/costs", s.handleGetCosts)
 		v1.GET("/costs/summary", s.handleGetCostSummary)
+
+		// Offer health (global failure tracking)
+		v1.GET("/offer-health", s.handleOfferHealth)
+
+		// Benchmarks
+		v1.GET("/benchmarks", s.handleListBenchmarks)
+		v1.GET("/benchmarks/:id", s.handleGetBenchmark)
+		v1.POST("/benchmarks", s.handleCreateBenchmark)
+		v1.GET("/benchmarks/best", s.handleGetBestBenchmark)
+		v1.GET("/benchmarks/cheapest", s.handleGetCheapestBenchmark)
+		v1.GET("/benchmarks/compare", s.handleCompareBenchmarks)
+		v1.GET("/benchmarks/recommendations", s.handleGetHardwareRecommendations)
+
+		// Benchmark Runs (automated orchestration)
+		v1.POST("/benchmark-runs", s.handleStartBenchmarkRun)
+		v1.GET("/benchmark-runs/:id", s.handleGetBenchmarkRun)
+		v1.DELETE("/benchmark-runs/:id", s.handleCancelBenchmarkRun)
+
+		// Benchmark Schedules (recurring automation)
+		v1.POST("/benchmark-schedules", s.handleCreateBenchmarkSchedule)
+		v1.GET("/benchmark-schedules", s.handleListBenchmarkSchedules)
+		v1.PUT("/benchmark-schedules/:id", s.handleUpdateBenchmarkSchedule)
+		v1.DELETE("/benchmark-schedules/:id", s.handleDeleteBenchmarkSchedule)
 	}
 
 	s.router = router
@@ -150,13 +205,13 @@ func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 	// Bug #25 fix: Increase timeouts and connection limits to handle burst traffic
 	s.httpServer = &http.Server{
-		Addr:           addr,
-		Handler:        s.router,
-		ReadTimeout:    60 * time.Second,  // Bug #25: Increased from 30s
-		WriteTimeout:   60 * time.Second,  // Bug #25: Increased from 30s
-		IdleTimeout:    120 * time.Second, // Bug #25: Increased from 60s
-		ReadHeaderTimeout: 10 * time.Second, // Bug #25: Add header read timeout
-		MaxHeaderBytes: 1 << 20, // Bug #25: 1MB max header size
+		Addr:              addr,
+		Handler:           s.router,
+		ReadTimeout:       60 * time.Second,  // Bug #25: Increased from 30s
+		WriteTimeout:      60 * time.Second,  // Bug #25: Increased from 30s
+		IdleTimeout:       120 * time.Second, // Bug #25: Increased from 60s
+		ReadHeaderTimeout: 10 * time.Second,  // Bug #25: Add header read timeout
+		MaxHeaderBytes:    1 << 20,           // Bug #25: 1MB max header size
 	}
 
 	s.logger.Info("starting API server", slog.String("addr", addr))
@@ -176,10 +231,17 @@ func (s *Server) Router() *gin.Engine {
 
 // Middleware
 
+// validRequestIDRegex allows alphanumeric, dots, underscores, and hyphens up to 128 chars.
+var validRequestIDRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
+
+func isValidRequestID(id string) bool {
+	return id != "" && validRequestIDRegex.MatchString(id)
+}
+
 func (s *Server) requestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := c.GetHeader("X-Request-ID")
-		if requestID == "" {
+		if !isValidRequestID(requestID) {
 			requestID = uuid.New().String()
 		}
 		c.Set("request_id", requestID)

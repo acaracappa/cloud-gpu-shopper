@@ -213,6 +213,67 @@ func TestL3_VastAI_GracefulShutdown(t *testing.T) {
 	t.Log("Session gracefully stopped")
 }
 
+// TestL4_VastAI_TemplateProvisioning tests template-based provisioning with SSH access
+// This validates the fix for SSH failures when using templates (RunType must be ssh_proxy)
+func TestL4_VastAI_TemplateProvisioning(t *testing.T) {
+	if !testConfig.HasProvider(ProviderVastAI) {
+		t.Skip("Vast.ai not configured")
+	}
+
+	// List available templates - use PyTorch as a lighter template than Ollama/OpenWebUI
+	// These templates have runtype="jupyter" which would fail without our RunType=ssh_proxy fix
+	templates := testEnv.ListTemplates(t, "pytorch")
+	if len(templates) == 0 {
+		// Fallback to NVIDIA CUDA template
+		templates = testEnv.ListTemplates(t, "cuda")
+	}
+	if len(templates) == 0 {
+		// Try without filter
+		templates = testEnv.ListTemplates(t, "")
+	}
+	require.NotEmpty(t, templates, "No templates available")
+
+	template := templates[0]
+	t.Logf("Using template: %s (hash_id: %s, runtype: %s)", template.Name, template.HashID, template.RunType)
+
+	// Find a cheap Vast.ai offer
+	offer := testEnv.FindCheapestFromProvider(t, ProviderVastAI)
+	require.NotNil(t, offer)
+	t.Logf("Using offer: %s (%s) @ $%.4f/hr", offer.GPUType, offer.ID, offer.PricePerHour)
+
+	// Provision with template
+	resp := testEnv.CreateSession(t, CreateSessionRequest{
+		ConsumerID:     GenerateConsumerID(),
+		OfferID:        offer.ID,
+		WorkloadType:   "template-test",
+		ReservationHrs: 1,
+		TemplateHashID: template.HashID,
+	})
+	defer testEnv.Cleanup(t, resp.Session.ID)
+
+	t.Logf("Created session: %s", resp.Session.ID)
+
+	// Wait for running - this is where the fix matters
+	// Without RunType=ssh_proxy, instances would go to "stopped" or "failed"
+	session := testEnv.WaitForStatus(t, resp.Session.ID, "running", 5*time.Minute)
+	assert.Equal(t, "vastai", session.Provider)
+
+	// Verify SSH info is populated - critical for the fix
+	assert.NotEmpty(t, session.SSHHost, "SSH host should be set")
+	assert.Greater(t, session.SSHPort, 0, "SSH port should be set")
+	assert.NotEmpty(t, session.SSHUser, "SSH user should be set")
+
+	t.Logf("SSH access available: %s@%s:%d", session.SSHUser, session.SSHHost, session.SSHPort)
+
+	// Verify SSH connectivity
+	testEnv.VerifySSH(t, session.SSHHost, session.SSHPort, session.SSHUser)
+	t.Log("SSH verification successful - template provisioning fix confirmed")
+
+	// Cleanup
+	testEnv.DestroySession(t, resp.Session.ID)
+	testEnv.WaitForStatus(t, resp.Session.ID, "stopped", 2*time.Minute)
+}
+
 // ==============================================================================
 // TENSORDOCK SPECIFIC TESTS
 // ==============================================================================

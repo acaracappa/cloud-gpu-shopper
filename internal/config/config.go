@@ -53,8 +53,9 @@ type TensorDockConfig struct {
 
 // InventoryConfig holds inventory cache configuration
 type InventoryConfig struct {
-	DefaultCacheTTL time.Duration `mapstructure:"default_cache_ttl"`
-	BackoffCacheTTL time.Duration `mapstructure:"backoff_cache_ttl"`
+	DefaultCacheTTL    time.Duration `mapstructure:"default_cache_ttl"`
+	BackoffCacheTTL    time.Duration `mapstructure:"backoff_cache_ttl"`
+	TensorDockCacheTTL time.Duration `mapstructure:"tensordock_cache_ttl"` // Shorter TTL for volatile TensorDock inventory
 }
 
 // LifecycleConfig holds lifecycle management configuration
@@ -126,11 +127,16 @@ func LoadFromEnv() (*Config, error) {
 	v.SetConfigType("env")
 	_ = v.ReadInConfig() // Ignore error if .env doesn't exist
 
+	// Map flat .env keys (e.g., "vastai_api_key") to nested config paths
+	// (e.g., "providers.vastai.api_key"). BindEnv only reads os.Getenv(),
+	// not values parsed from the .env config file, so we bridge them here.
+	mapEnvFileKeys(v)
+
 	// Read from environment variables
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	// Bind specific environment variables
+	// Bind specific environment variables (for OS env vars)
 	bindEnvVars(v)
 
 	var cfg Config
@@ -152,11 +158,12 @@ func setDefaults(v *viper.Viper) {
 	// Provider defaults
 	v.SetDefault("providers.vastai.enabled", true)
 	v.SetDefault("providers.tensordock.enabled", true)
-	v.SetDefault("providers.tensordock.default_image", "ubuntu2404")
+	v.SetDefault("providers.tensordock.default_image", "ubuntu2204") // BUG-009: ubuntu2204 has better NVIDIA driver support
 
 	// Inventory defaults
 	v.SetDefault("inventory.default_cache_ttl", time.Minute)
 	v.SetDefault("inventory.backoff_cache_ttl", 5*time.Minute)
+	v.SetDefault("inventory.tensordock_cache_ttl", 30*time.Second) // Shorter TTL for volatile TensorDock inventory
 
 	// Lifecycle defaults
 	v.SetDefault("lifecycle.check_interval", time.Minute)
@@ -168,12 +175,38 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("lifecycle.shutdown_timeout", 60*time.Second)
 
 	// SSH verification defaults
-	v.SetDefault("ssh.verify_timeout", 5*time.Minute)
+	v.SetDefault("ssh.verify_timeout", 10*time.Minute)
 	v.SetDefault("ssh.check_interval", 15*time.Second)
 
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
+}
+
+// mapEnvFileKeys bridges .env file values to nested config paths.
+// When Viper reads a .env file, it stores "VASTAI_API_KEY=xxx" as the flat
+// key "vastai_api_key". But the Config struct needs "providers.vastai.api_key".
+// This function copies values from flat keys to their nested equivalents,
+// but only if the nested key hasn't already been set (preserving explicit config).
+func mapEnvFileKeys(v *viper.Viper) {
+	mappings := map[string]string{
+		"vastai_api_key":           "providers.vastai.api_key",
+		"tensordock_auth_id":       "providers.tensordock.auth_id",
+		"tensordock_api_token":     "providers.tensordock.api_token",
+		"tensordock_default_image": "providers.tensordock.default_image",
+		"database_path":            "database.path",
+		"server_host":              "server.host",
+		"server_port":              "server.port",
+		"log_level":                "logging.level",
+		"log_format":               "logging.format",
+		"deployment_id":            "lifecycle.deployment_id",
+	}
+
+	for flatKey, nestedKey := range mappings {
+		if val := v.GetString(flatKey); val != "" {
+			v.Set(nestedKey, val)
+		}
+	}
 }
 
 func bindEnvVars(v *viper.Viper) {

@@ -177,7 +177,8 @@ curl -X POST http://localhost:8080/api/v1/sessions \
   "workload_type": "llm",
   "reservation_hours": 2,
   "idle_threshold_minutes": 30,
-  "storage_policy": "destroy"
+  "storage_policy": "destroy",
+  "disk_gb": 100
 }
 ```
 
@@ -185,6 +186,18 @@ curl -X POST http://localhost:8080/api/v1/sessions \
 |-----------|---------|-------------|
 | `idle_threshold_minutes` | 0 (disabled) | Auto-shutdown after idle period |
 | `storage_policy` | "destroy" | "preserve" to keep data, "destroy" to clean up |
+| `disk_gb` | 50 | Disk space in GB. Cannot be changed after creation. |
+
+### Disk Allocation Guidance
+
+When choosing disk size, consider:
+
+- **Default (50GB)**: Sufficient for most workloads and smaller models
+- **100-200GB**: Recommended for medium LLMs (7B-30B parameters)
+- **200-500GB**: Required for large LLMs (70B+ parameters) like Llama 2 70B or Mixtral
+- **500GB+**: For very large models like DeepSeek-V2.5 (236B, ~132GB weights)
+
+**Important**: Disk size is permanent for Vast.ai instances. Plan your storage needs upfront.
 
 ### Step 3: Handle the Response
 
@@ -237,6 +250,26 @@ Once status is "running":
 ```bash
 ssh -i /tmp/session-key -p 22 root@192.168.1.100
 ```
+
+### Example: Provisioning for Large Models
+
+For large models that require substantial disk space:
+
+```bash
+# API - Provisioning with custom disk allocation for a large model
+curl -X POST http://localhost:8080/api/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "consumer_id": "llm-inference",
+    "offer_id": "vastai-30733007",
+    "workload_type": "ssh",
+    "reservation_hours": 4,
+    "template_hash_id": "a8a44c7363cbca20056020397e3bf072",
+    "disk_gb": 200
+  }'
+```
+
+This allocates 200GB of disk space, suitable for models like Llama 2 70B or similar large LLMs.
 
 ---
 

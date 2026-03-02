@@ -116,16 +116,16 @@ func TestParseOfferID_EdgeCases(t *testing.T) {
 
 func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 	tests := []struct {
-		name       string
-		serverFunc func(w http.ResponseWriter, r *http.Request)
-		expectErr  bool
+		name        string
+		serverFunc  func(w http.ResponseWriter, r *http.Request)
+		expectErr   bool
 		errContains string
 	}{
 		{
 			name: "connection refused",
 			// Using a server that closes immediately
-			serverFunc: nil, // Will use closed server
-			expectErr:  true,
+			serverFunc:  nil, // Will use closed server
+			expectErr:   true,
 			errContains: "request failed",
 		},
 		{
@@ -134,7 +134,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusInternalServerError)
 				w.Write([]byte("Internal Server Error"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 500",
 		},
 		{
@@ -143,7 +143,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusBadGateway)
 				w.Write([]byte("<html>Bad Gateway</html>"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 502",
 		},
 		{
@@ -152,7 +152,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				w.Write([]byte("Service Temporarily Unavailable"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 503",
 		},
 		{
@@ -161,7 +161,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusTooManyRequests)
 				w.Write([]byte("Rate limit exceeded"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "rate limit",
 		},
 		{
@@ -170,7 +170,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Invalid API credentials"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 401",
 		},
 		{
@@ -179,7 +179,7 @@ func TestClient_ListOffers_NetworkErrors(t *testing.T) {
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte("Access denied"))
 			},
-			expectErr: true,
+			expectErr:   true,
 			errContains: "HTTP 403",
 		},
 	}
@@ -265,63 +265,63 @@ func TestClient_ListOffers_ContextCancelled(t *testing.T) {
 
 func TestClient_ListOffers_InvalidJSON(t *testing.T) {
 	tests := []struct {
-		name     string
-		response string
+		name      string
+		response  string
 		expectErr bool
 	}{
 		{
-			name:     "empty response body",
-			response: "",
+			name:      "empty response body",
+			response:  "",
 			expectErr: true,
 		},
 		{
-			name:     "null response",
-			response: "null",
+			name:      "null response",
+			response:  "null",
 			expectErr: false, // json.Unmarshal handles null
 		},
 		{
-			name:     "malformed JSON",
-			response: "{invalid json}",
+			name:      "malformed JSON",
+			response:  "{invalid json}",
 			expectErr: true,
 		},
 		{
-			name:     "truncated JSON",
-			response: `{"data": {"locations": [{"id": "123"`,
+			name:      "truncated JSON",
+			response:  `{"data": {"locations": [{"id": "123"`,
 			expectErr: true,
 		},
 		{
-			name:     "HTML instead of JSON",
-			response: `<!DOCTYPE html><html><body>Error</body></html>`,
+			name:      "HTML instead of JSON",
+			response:  `<!DOCTYPE html><html><body>Error</body></html>`,
 			expectErr: true,
 		},
 		{
-			name:     "plain text error",
-			response: `Error: something went wrong`,
+			name:      "plain text error",
+			response:  `Error: something went wrong`,
 			expectErr: true,
 		},
 		{
-			name:     "wrong structure - array instead of object",
-			response: `["item1", "item2"]`,
+			name:      "wrong structure - array instead of object",
+			response:  `["item1", "item2"]`,
 			expectErr: true,
 		},
 		{
-			name:     "empty data object",
-			response: `{"data": {}}`,
+			name:      "empty data object",
+			response:  `{"data": {}}`,
 			expectErr: false, // Valid structure, just empty
 		},
 		{
-			name:     "null locations array",
-			response: `{"data": {"locations": null}}`,
+			name:      "null locations array",
+			response:  `{"data": {"locations": null}}`,
 			expectErr: false, // Should handle gracefully
 		},
 		{
-			name:     "wrong type for locations",
-			response: `{"data": {"locations": "not an array"}}`,
+			name:      "wrong type for locations",
+			response:  `{"data": {"locations": "not an array"}}`,
 			expectErr: true,
 		},
 		{
-			name:     "mixed valid/invalid location entries",
-			response: `{"data": {"locations": [{"id": "valid"}, null, {"id": "also-valid"}]}}`,
+			name:      "mixed valid/invalid location entries",
+			response:  `{"data": {"locations": [{"id": "valid"}, null, {"id": "also-valid"}]}}`,
 			expectErr: false, // Go's JSON decoder handles null entries gracefully
 		},
 	}
@@ -424,18 +424,18 @@ func TestClient_CreateInstance_APIErrors(t *testing.T) {
 			isStale:     true,
 		},
 		{
-			name:        "resource unavailable (stale inventory)",
-			statusCode:  http.StatusOK,
-			response:    `{"status": 400, "error": "Resource unavailable"}`,
-			expectErr:   true,
-			isStale:     true,
+			name:       "resource unavailable (stale inventory)",
+			statusCode: http.StatusOK,
+			response:   `{"status": 400, "error": "Resource unavailable"}`,
+			expectErr:  true,
+			isStale:    true,
 		},
 		{
-			name:        "out of stock (stale inventory)",
-			statusCode:  http.StatusOK,
-			response:    `{"status": 400, "error": "GPU model is out of stock"}`,
-			expectErr:   true,
-			isStale:     true,
+			name:       "out of stock (stale inventory)",
+			statusCode: http.StatusOK,
+			response:   `{"status": 400, "error": "GPU model is out of stock"}`,
+			expectErr:  true,
+			isStale:    true,
 		},
 		{
 			name:        "HTTP 200 with error in body",
@@ -543,7 +543,7 @@ func TestClient_CreateInstance_RequestValidation(t *testing.T) {
 		assert.Equal(t, TestSSHKey, capturedRequest.Data.Attributes.SSHKey)
 	})
 
-	t.Run("port forward is configured for SSH", func(t *testing.T) {
+	t.Run("dedicated IP is requested for SSH access", func(t *testing.T) {
 		req := provider.CreateInstanceRequest{
 			OfferID:      "tensordock-1a779525-4c04-4f2c-aa45-58b47d54bb38-rtx4090",
 			SSHPublicKey: TestSSHKey,
@@ -553,10 +553,8 @@ func TestClient_CreateInstance_RequestValidation(t *testing.T) {
 		_, err := client.CreateInstance(context.Background(), req)
 		require.NoError(t, err)
 
-		// Verify port forward is included
-		require.Len(t, capturedRequest.Data.Attributes.PortForwards, 1)
-		assert.Equal(t, 22, capturedRequest.Data.Attributes.PortForwards[0].InternalPort)
-		assert.Equal(t, "tcp", capturedRequest.Data.Attributes.PortForwards[0].Protocol)
+		// Verify dedicated IP is requested (replaces port forwarding)
+		assert.True(t, capturedRequest.Data.Attributes.UseDedicatedIP, "useDedicatedIp should be true for SSH access")
 	})
 
 	t.Run("location ID extracted from offer ID", func(t *testing.T) {
@@ -580,12 +578,12 @@ func TestClient_CreateInstance_RequestValidation(t *testing.T) {
 
 func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name        string
-		instanceID  string
-		statusCode  int
-		response    string
-		expectErr   bool
-		errContains string
+		name            string
+		instanceID      string
+		statusCode      int
+		response        string
+		expectErr       bool
+		errContains     string
 		expectedSSHPort int
 	}{
 		{
@@ -597,27 +595,27 @@ func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 			errContains: "",
 		},
 		{
-			name:        "no port forwards defaults to port 22",
-			instanceID:  "inst-123",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-123", "status": "running", "ipAddress": "1.2.3.4", "portForwards": []}`,
-			expectErr:   false,
+			name:            "no port forwards defaults to port 22",
+			instanceID:      "inst-123",
+			statusCode:      http.StatusOK,
+			response:        `{"id": "inst-123", "status": "running", "ipAddress": "1.2.3.4", "portForwards": []}`,
+			expectErr:       false,
 			expectedSSHPort: 22,
 		},
 		{
-			name:        "dynamic SSH port assignment",
-			instanceID:  "inst-456",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-456", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 22, "external_port": 20456}]}`,
-			expectErr:   false,
+			name:            "dynamic SSH port assignment",
+			instanceID:      "inst-456",
+			statusCode:      http.StatusOK,
+			response:        `{"id": "inst-456", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 22, "external_port": 20456}]}`,
+			expectErr:       false,
 			expectedSSHPort: 20456,
 		},
 		{
-			name:        "no IP address yet (still provisioning)",
-			instanceID:  "inst-789",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-789", "status": "creating", "ipAddress": "", "portForwards": []}`,
-			expectErr:   false,
+			name:       "no IP address yet (still provisioning)",
+			instanceID: "inst-789",
+			statusCode: http.StatusOK,
+			response:   `{"id": "inst-789", "status": "creating", "ipAddress": "", "portForwards": []}`,
+			expectErr:  false,
 		},
 		{
 			name:        "invalid JSON response",
@@ -628,11 +626,11 @@ func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 			errContains: "decode",
 		},
 		{
-			name:        "multiple port forwards - finds SSH",
-			instanceID:  "inst-multi",
-			statusCode:  http.StatusOK,
-			response:    `{"id": "inst-multi", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 80, "external_port": 8080}, {"internal_port": 22, "external_port": 2222}]}`,
-			expectErr:   false,
+			name:            "multiple port forwards - finds SSH",
+			instanceID:      "inst-multi",
+			statusCode:      http.StatusOK,
+			response:        `{"id": "inst-multi", "status": "running", "ipAddress": "1.2.3.4", "portForwards": [{"internal_port": 80, "external_port": 8080}, {"internal_port": 22, "external_port": 2222}]}`,
+			expectErr:       false,
 			expectedSSHPort: 2222,
 		},
 	}
@@ -677,46 +675,46 @@ func TestClient_GetInstanceStatus_EdgeCases(t *testing.T) {
 
 func TestClient_DestroyInstance_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name        string
-		instanceID  string
-		statusCode  int
-		response    string
-		expectErr   bool
+		name       string
+		instanceID string
+		statusCode int
+		response   string
+		expectErr  bool
 	}{
 		{
-			name:        "already deleted (404) is success",
-			instanceID:  "deleted-inst",
-			statusCode:  http.StatusNotFound,
-			response:    `{"error": "Instance not found"}`,
-			expectErr:   false, // 404 is treated as success
+			name:       "already deleted (404) is success",
+			instanceID: "deleted-inst",
+			statusCode: http.StatusNotFound,
+			response:   `{"error": "Instance not found"}`,
+			expectErr:  false, // 404 is treated as success
 		},
 		{
-			name:        "successful deletion",
-			instanceID:  "inst-123",
-			statusCode:  http.StatusOK,
-			response:    `{}`,
-			expectErr:   false,
+			name:       "successful deletion",
+			instanceID: "inst-123",
+			statusCode: http.StatusOK,
+			response:   `{}`,
+			expectErr:  false,
 		},
 		{
-			name:        "no content response",
-			instanceID:  "inst-456",
-			statusCode:  http.StatusNoContent,
-			response:    ``,
-			expectErr:   false,
+			name:       "no content response",
+			instanceID: "inst-456",
+			statusCode: http.StatusNoContent,
+			response:   ``,
+			expectErr:  false,
 		},
 		{
-			name:        "server error",
-			instanceID:  "inst-789",
-			statusCode:  http.StatusInternalServerError,
-			response:    `{"error": "Internal error"}`,
-			expectErr:   true,
+			name:       "server error",
+			instanceID: "inst-789",
+			statusCode: http.StatusInternalServerError,
+			response:   `{"error": "Internal error"}`,
+			expectErr:  true,
 		},
 		{
-			name:        "rate limited",
-			instanceID:  "inst-rate",
-			statusCode:  http.StatusTooManyRequests,
-			response:    `{"error": "Rate limit exceeded"}`,
-			expectErr:   true,
+			name:       "rate limited",
+			instanceID: "inst-rate",
+			statusCode: http.StatusTooManyRequests,
+			response:   `{"error": "Rate limit exceeded"}`,
+			expectErr:  true,
 		},
 	}
 
@@ -751,11 +749,11 @@ func TestClient_DestroyInstance_EdgeCases(t *testing.T) {
 
 func TestClient_ListAllInstances_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name           string
-		statusCode     int
-		response       string
-		expectErr      bool
-		expectedCount  int
+		name          string
+		statusCode    int
+		response      string
+		expectErr     bool
+		expectedCount int
 	}{
 		{
 			name:          "empty array format",
@@ -786,10 +784,10 @@ func TestClient_ListAllInstances_EdgeCases(t *testing.T) {
 			expectedCount: 2,
 		},
 		{
-			name:          "unauthorized returns error",
-			statusCode:    http.StatusUnauthorized,
-			response:      `{"error": "Invalid credentials"}`,
-			expectErr:     true,
+			name:       "unauthorized returns error",
+			statusCode: http.StatusUnauthorized,
+			response:   `{"error": "Invalid credentials"}`,
+			expectErr:  true,
 		},
 		{
 			name:          "server error returns empty list",
@@ -799,10 +797,10 @@ func TestClient_ListAllInstances_EdgeCases(t *testing.T) {
 			expectedCount: 0, // Non-401 errors return empty list
 		},
 		{
-			name:          "invalid JSON array in data",
-			statusCode:    http.StatusOK,
-			response:      `{"data": "not an array or object"}`,
-			expectErr:     true,
+			name:       "invalid JSON array in data",
+			statusCode: http.StatusOK,
+			response:   `{"data": "not an array or object"}`,
+			expectErr:  true,
 		},
 	}
 
@@ -955,6 +953,12 @@ func TestIsStaleInventoryErrorMessage(t *testing.T) {
 		{"Maximum instances reached", true},
 		{"Limit reached for this type", true},
 
+		// Network resource issues (BUG-010)
+		{"No available public IPs on hostnode", true},
+		{"No available public ip for this location", true},
+		{"Error: no public IP available", true},
+		{"NO AVAILABLE PUBLIC IPS", true},
+
 		// Non-stale errors (should return false)
 		{"Invalid image name", false},
 		{"SSH port required", false},
@@ -1015,20 +1019,108 @@ func TestBuildSSHKeyCloudInit(t *testing.T) {
 			cloudInit := buildSSHKeyCloudInit(tt.sshKey)
 
 			assert.NotNil(t, cloudInit)
-			assert.Len(t, cloudInit.RunCmd, 5)
 
-			// Verify directory creation
-			assert.Equal(t, "mkdir -p /root/.ssh", cloudInit.RunCmd[0])
-			assert.Equal(t, "chmod 700 /root/.ssh", cloudInit.RunCmd[1])
+			// New implementation uses only runcmd (no write_files)
+			assert.Nil(t, cloudInit.WriteFiles)
 
-			// Verify base64 encoding command is present
-			assert.Contains(t, cloudInit.RunCmd[2], "base64 -d")
-
-			// Verify permissions
-			assert.Equal(t, "chmod 600 /root/.ssh/authorized_keys", cloudInit.RunCmd[3])
-			assert.Equal(t, "chown -R root:root /root/.ssh", cloudInit.RunCmd[4])
+			// Verify runcmd has all commands for both root and user, plus driver fix
+			// 11 SSH commands + 5 NVIDIA driver fix commands = 16 total
+			assert.Len(t, cloudInit.RunCmd, 16)
+			assert.Contains(t, cloudInit.RunCmd[0], "mkdir -p /root/.ssh")
+			assert.Contains(t, cloudInit.RunCmd[5], "mkdir -p /home/user/.ssh")
+			// BUG-009/013/014: Verify NVIDIA driver fix commands are present
+			assert.Contains(t, cloudInit.RunCmd[11], "unattended-upgrades") // kill lock holder
+			assert.Contains(t, cloudInit.RunCmd[14], "dpkg --configure -a") // fix partial installs
+			assert.Contains(t, cloudInit.RunCmd[15], "nvidia-smi")          // driver fix
 		})
 	}
+}
+
+func TestBuildCloudInit_WithoutDrivers(t *testing.T) {
+	// Test that we can disable driver installation
+	cloudInit := buildCloudInit("ssh-rsa AAAA test@host", false)
+	assert.NotNil(t, cloudInit)
+	// Should only have 11 SSH commands, no driver install
+	assert.Len(t, cloudInit.RunCmd, 11)
+	for _, cmd := range cloudInit.RunCmd {
+		assert.NotContains(t, cmd, "nvidia-driver", "Should not contain driver install when disabled")
+	}
+}
+
+// =============================================================================
+// Location Stats Tracking (Stale Inventory Fix)
+// =============================================================================
+
+func TestLocationStats_BasicTracking(t *testing.T) {
+	stats := newLocationStats()
+
+	// Initial confidence should be default
+	assert.Equal(t, TensorDockAvailabilityConfidence, stats.getConfidence("loc-123"))
+
+	// Record some failures
+	stats.recordAttempt("loc-123", false)
+	stats.recordAttempt("loc-123", false)
+	stats.recordAttempt("loc-123", false)
+
+	// Confidence should drop (3 failures, 0 successes = 0%, last failed → 0% * 0.5, but min is 5%)
+	confidence := stats.getConfidence("loc-123")
+	assert.Equal(t, 0.05, confidence, "Confidence should be at minimum (5%)")
+}
+
+func TestLocationStats_SuccessRateCalculation(t *testing.T) {
+	stats := newLocationStats()
+
+	// 5 successes, 5 failures = 50%
+	for i := 0; i < 5; i++ {
+		stats.recordAttempt("loc-456", true)
+		stats.recordAttempt("loc-456", false)
+	}
+
+	// Last attempt was false (loop alternates true, false), so recency penalty applies:
+	// rate = 5/10 = 0.5, then * 0.5 = 0.25
+	confidence := stats.getConfidence("loc-456")
+	assert.InDelta(t, 0.25, confidence, 0.01, "Confidence should be 25% (50% base with recency penalty)")
+
+	// Record more successes to increase confidence
+	for i := 0; i < 10; i++ {
+		stats.recordAttempt("loc-456", true)
+	}
+
+	// Now: 15 successes, 5 failures = 75%, last was success (no penalty)
+	confidence = stats.getConfidence("loc-456")
+	assert.InDelta(t, 0.75, confidence, 0.01, "Confidence should be 75%")
+}
+
+func TestLocationStats_DifferentLocations(t *testing.T) {
+	stats := newLocationStats()
+
+	// Good location: all successes
+	for i := 0; i < 10; i++ {
+		stats.recordAttempt("good-loc", true)
+	}
+
+	// Bad location: all failures
+	for i := 0; i < 10; i++ {
+		stats.recordAttempt("bad-loc", false)
+	}
+
+	assert.Equal(t, 1.0, stats.getConfidence("good-loc"), "Good location should have 100% confidence")
+	assert.Equal(t, 0.05, stats.getConfidence("bad-loc"), "Bad location should have minimum 5% confidence")
+	assert.Equal(t, TensorDockAvailabilityConfidence, stats.getConfidence("unknown-loc"), "Unknown location should have default confidence")
+}
+
+func TestLocationStats_GetStats(t *testing.T) {
+	stats := newLocationStats()
+
+	stats.recordAttempt("loc-789", true)
+	stats.recordAttempt("loc-789", true)
+	stats.recordAttempt("loc-789", false)
+
+	attempts, successes, confidence := stats.getStats("loc-789")
+	assert.Equal(t, 3, attempts)
+	assert.Equal(t, 2, successes)
+	// 2/3 ≈ 0.667, last attempt was failure → 0.667 * 0.5 ≈ 0.333
+	assert.InDelta(t, 0.333, confidence, 0.01)
 }
 
 // =============================================================================
@@ -1044,10 +1136,10 @@ func TestNormalizeGPUName_EdgeCases(t *testing.T) {
 		{"   ", ""},
 		// TrimPrefix + TrimSpace behavior: TrimSpace happens first, then prefix removal
 		// "NVIDIA " -> TrimSpace -> "NVIDIA" -> no prefix match (prefix is "NVIDIA " with space)
-		{"NVIDIA ", "NVIDIA"},                                  // TrimSpace removes trailing, doesn't match "NVIDIA "
-		{"NVIDIA   ", "NVIDIA"},                                // Same - after TrimSpace becomes "NVIDIA"
-		{"GeForce ", "GeForce"},                                // Same logic
-		{"Tesla   ", "Tesla"},                                  // Same logic
+		{"NVIDIA ", "NVIDIA"},   // TrimSpace removes trailing, doesn't match "NVIDIA "
+		{"NVIDIA   ", "NVIDIA"}, // Same - after TrimSpace becomes "NVIDIA"
+		{"GeForce ", "GeForce"}, // Same logic
+		{"Tesla   ", "Tesla"},   // Same logic
 		{"NVIDIA GeForce RTX 4090 PCIe 24GB", "RTX 4090"},
 		{"  NVIDIA GeForce RTX 4090 PCIe 24GB  ", "RTX 4090"},
 		{"Unknown GPU Model", "Unknown GPU Model"},
@@ -1071,8 +1163,8 @@ func TestParseVRAMFromName_EdgeCases(t *testing.T) {
 		{"No VRAM info", 0},
 		{"24GB", 24},
 		{"24 GB", 24},
-		{"24gb", 24},  // Case-insensitive: gb is valid
-		{"24 Gb", 24}, // Case-insensitive: Gb is valid
+		{"24gb", 24},                   // Case-insensitive: gb is valid
+		{"24 Gb", 24},                  // Case-insensitive: Gb is valid
 		{"Multiple 24GB and 48GB", 24}, // Returns first match
 		{"0GB", 0},
 		{"1024GB", 1024},

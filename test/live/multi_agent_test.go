@@ -15,10 +15,10 @@ import (
 
 // MultiAgentCoordinator orchestrates multi-agent validation workflows
 type MultiAgentCoordinator struct {
-	env       *LiveTestEnv
-	qaAgent   *QAAgent
-	mu        sync.Mutex
-	results   []ValidationResult
+	env     *LiveTestEnv
+	qaAgent *QAAgent
+	mu      sync.Mutex
+	results []ValidationResult
 }
 
 // NewMultiAgentCoordinator creates a new multi-agent coordinator

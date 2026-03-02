@@ -770,4 +770,3 @@ func TestManager_TimeInjection_OrphanGracePeriod(t *testing.T) {
 	assert.Len(t, handler.orphanSessions, 1, "orphan detected after grace period")
 	assert.Equal(t, "sess-orphan-grace", handler.orphanSessions[0].ID)
 }
-

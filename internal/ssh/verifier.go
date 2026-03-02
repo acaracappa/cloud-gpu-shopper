@@ -3,6 +3,7 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"strings"
@@ -259,4 +260,82 @@ func (v *Verifier) VerifyOnce(ctx context.Context, host string, port int, user, 
 	}
 
 	return v.tryConnect(ctx, host, port, user, signer)
+}
+
+// RunCommand connects via SSH and runs an arbitrary command, returning stdout.
+func RunCommand(ctx context.Context, host string, port int, user, privateKey, command string) (string, error) {
+	if host == "" || port <= 0 || user == "" || privateKey == "" {
+		return "", fmt.Errorf("invalid SSH parameters")
+	}
+
+	signer, err := ssh.ParsePrivateKey([]byte(privateKey))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	config := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+	dialer := net.Dialer{Timeout: 30 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		return "", fmt.Errorf("SSH handshake failed: %w", err)
+	}
+
+	client := ssh.NewClient(sshConn, chans, reqs)
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Run(command)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return stdout.String(), fmt.Errorf("command failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+		}
+		return stdout.String(), nil
+	case <-ctx.Done():
+		session.Signal(ssh.SIGKILL)
+		return "", ctx.Err()
+	}
+}
+
+// SCPWrite uploads content to a remote file via SSH using base64 encoding
+// to avoid shell injection via heredoc terminators or special characters.
+func SCPWrite(ctx context.Context, host string, port int, user, privateKey, remotePath, content string) error {
+	// Base64-encode content to prevent any shell injection, then decode on the remote side.
+	// The remote path is single-quoted to prevent expansion.
+	encoded := base64Encode(content)
+	quotedPath := "'" + strings.ReplaceAll(remotePath, "'", "'\\''") + "'"
+	cmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, quotedPath)
+	_, err := RunCommand(ctx, host, port, user, privateKey, cmd)
+	return err
+}
+
+// base64Encode encodes a string to base64 without any shell-unsafe characters.
+func base64Encode(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }
