@@ -17,7 +17,7 @@ const (
 	DefaultStartupSweepTimeout = 2 * time.Minute
 
 	// DefaultShutdownTimeout is the default timeout for graceful shutdown
-	DefaultShutdownTimeout = 60 * time.Second
+	DefaultShutdownTimeout = 120 * time.Second
 
 	// MaxParallelDestroys is the maximum number of concurrent destroy operations
 	MaxParallelDestroys = 5
@@ -162,6 +162,8 @@ func (m *StartupShutdownManager) RunStartupSweep(ctx context.Context) error {
 
 // GracefulShutdown destroys all active sessions before shutdown.
 // This method blocks until all sessions are destroyed or the context is cancelled.
+// After timeout, any sessions not yet destroyed receive a fire-and-forget last-chance
+// destroy call with a short 10s timeout.
 func (m *StartupShutdownManager) GracefulShutdown(ctx context.Context) error {
 	m.logger.Info("starting graceful shutdown",
 		slog.Duration("timeout", m.shutdownTimeout))
@@ -199,10 +201,13 @@ func (m *StartupShutdownManager) GracefulShutdown(ctx context.Context) error {
 	m.logger.Info("destroying active sessions during shutdown",
 		slog.Int("count", len(sessions)))
 
+	// Track which sessions were successfully destroyed
+	var destroyedMu sync.Mutex
+	destroyedSet := make(map[string]bool, len(sessions))
+
 	// Destroy sessions concurrently with a semaphore to limit parallelism
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, MaxParallelDestroys)
-	var destroyedCount, failedCount atomic.Int64
 
 	for _, session := range sessions {
 		wg.Add(1)
@@ -216,7 +221,6 @@ func (m *StartupShutdownManager) GracefulShutdown(ctx context.Context) error {
 			case <-shutdownCtx.Done():
 				m.logger.Warn("shutdown context cancelled, skipping session destroy",
 					slog.String("session_id", s.ID))
-				failedCount.Add(1)
 				return
 			}
 
@@ -225,33 +229,60 @@ func (m *StartupShutdownManager) GracefulShutdown(ctx context.Context) error {
 					slog.String("session_id", s.ID),
 					slog.String("provider", s.Provider),
 					slog.String("error", err.Error()))
-				failedCount.Add(1)
 			} else {
 				m.logger.Info("destroyed session during shutdown",
 					slog.String("session_id", s.ID),
 					slog.String("provider", s.Provider))
-				destroyedCount.Add(1)
+				destroyedMu.Lock()
+				destroyedSet[s.ID] = true
+				destroyedMu.Unlock()
 			}
 		}(session)
 	}
 
-	// Wait for all destroys to complete
+	// Wait for all destroys to complete or timeout
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
+	timedOut := false
 	select {
 	case <-done:
 		// All destroys completed
 	case <-shutdownCtx.Done():
+		timedOut = true
 		m.logger.Warn("shutdown context timed out, some sessions may not be destroyed")
 	}
 
+	// Fire-and-forget last-chance destroys for sessions that were NOT destroyed
+	if timedOut {
+		destroyedMu.Lock()
+		var remaining []*models.Session
+		for _, s := range sessions {
+			if !destroyedSet[s.ID] {
+				remaining = append(remaining, s)
+			}
+		}
+		destroyedMu.Unlock()
+
+		if len(remaining) > 0 {
+			m.logger.Warn("firing last-chance destroy for remaining sessions",
+				slog.Int("count", len(remaining)))
+			for _, s := range remaining {
+				go m.fireAndForgetDestroy(s)
+			}
+		}
+	}
+
+	// Compute final counts from the destroyed set (race-free)
+	destroyedMu.Lock()
+	destroyed := int64(len(destroyedSet))
+	destroyedMu.Unlock()
+	failed := int64(len(sessions)) - destroyed
+
 	elapsed := time.Since(start)
-	destroyed := destroyedCount.Load()
-	failed := failedCount.Load()
 
 	m.metrics.mu.Lock()
 	m.metrics.ShutdownSuccess = failed == 0
@@ -280,6 +311,33 @@ func (m *StartupShutdownManager) GracefulShutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// fireAndForgetDestroy makes a single last-chance destroy attempt with a short timeout.
+// It uses a fresh context (not the cancelled shutdown context) and does not block.
+func (m *StartupShutdownManager) fireAndForgetDestroy(session *models.Session) {
+	if session.ProviderID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	prov, err := m.providers.Get(session.Provider)
+	if err != nil {
+		m.logger.Error("fire-and-forget: provider not found",
+			slog.String("session_id", session.ID),
+			slog.String("provider", session.Provider))
+		return
+	}
+	if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+		m.logger.Error("fire-and-forget destroy failed",
+			slog.String("session_id", session.ID),
+			slog.String("provider_id", session.ProviderID),
+			slog.String("error", err.Error()))
+	} else {
+		m.logger.Info("fire-and-forget destroy succeeded",
+			slog.String("session_id", session.ID),
+			slog.String("provider_id", session.ProviderID))
+	}
 }
 
 // destroySession destroys a single session using the provider

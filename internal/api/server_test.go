@@ -146,6 +146,10 @@ func (m *mockSessionStore) GetExpiredSessions(ctx context.Context) ([]*models.Se
 	return nil, nil
 }
 
+func (m *mockSessionStore) GetFailedSessionsWithInstances(ctx context.Context) ([]*models.Session, error) {
+	return nil, nil
+}
+
 func (m *mockSessionStore) GetSessionsByStatus(ctx context.Context, statuses ...models.SessionStatus) ([]*models.Session, error) {
 	return nil, nil
 }

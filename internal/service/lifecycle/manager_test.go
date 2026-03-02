@@ -66,6 +66,19 @@ func (m *mockSessionStore) GetExpiredSessions(ctx context.Context) ([]*models.Se
 	return result, nil
 }
 
+func (m *mockSessionStore) GetFailedSessionsWithInstances(ctx context.Context) ([]*models.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*models.Session
+	for _, s := range m.sessions {
+		if s.Status == models.StatusFailed && s.ProviderID != "" {
+			copy := *s
+			result = append(result, &copy)
+		}
+	}
+	return result, nil
+}
+
 func (m *mockSessionStore) GetSessionsByStatus(ctx context.Context, statuses ...models.SessionStatus) ([]*models.Session, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -329,6 +342,19 @@ func (m *mockSessionStoreWithExpiry) GetExpiredSessions(ctx context.Context) ([]
 	var result []*models.Session
 	for _, s := range m.sessions {
 		if s.Status == models.StatusRunning && m.now.After(s.ExpiresAt) {
+			copy := *s
+			result = append(result, &copy)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockSessionStoreWithExpiry) GetFailedSessionsWithInstances(ctx context.Context) ([]*models.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*models.Session
+	for _, s := range m.sessions {
+		if s.Status == models.StatusFailed && s.ProviderID != "" {
 			copy := *s
 			result = append(result, &copy)
 		}
@@ -769,4 +795,101 @@ func TestManager_TimeInjection_OrphanGracePeriod(t *testing.T) {
 	m.checkOrphans(ctx)
 	assert.Len(t, handler.orphanSessions, 1, "orphan detected after grace period")
 	assert.Equal(t, "sess-orphan-grace", handler.orphanSessions[0].ID)
+}
+
+// TestManager_CheckFailedDestroys verifies that checkFailedDestroys re-attempts
+// destruction for failed sessions that still have a provider instance ID.
+func TestManager_CheckFailedDestroys(t *testing.T) {
+	store := newMockSessionStore()
+	destroyer := newMockDestroyer()
+
+	now := time.Now()
+
+	// Failed session WITH provider instance ID — should be re-destroyed
+	failedWithInstance := &models.Session{
+		ID:         "sess-failed-leak",
+		Status:     models.StatusFailed,
+		Provider:   "vastai",
+		ProviderID: "inst-12345",
+		CreatedAt:  now.Add(-2 * time.Hour),
+		ExpiresAt:  now.Add(-1 * time.Hour),
+	}
+	store.add(failedWithInstance)
+
+	// Failed session WITHOUT provider instance ID — should be skipped
+	failedNoInstance := &models.Session{
+		ID:        "sess-failed-clean",
+		Status:    models.StatusFailed,
+		Provider:  "vastai",
+		CreatedAt: now.Add(-2 * time.Hour),
+		ExpiresAt: now.Add(-1 * time.Hour),
+	}
+	store.add(failedNoInstance)
+
+	// Running session — should not be picked up
+	runningSession := &models.Session{
+		ID:         "sess-running",
+		Status:     models.StatusRunning,
+		Provider:   "vastai",
+		ProviderID: "inst-99999",
+		CreatedAt:  now.Add(-1 * time.Hour),
+		ExpiresAt:  now.Add(1 * time.Hour),
+	}
+	store.add(runningSession)
+
+	m := New(store, destroyer,
+		WithLogger(newTestLogger()),
+		WithTimeFunc(func() time.Time { return now }))
+
+	ctx := context.Background()
+	m.checkFailedDestroys(ctx)
+
+	// Only the failed session with a provider ID should be destroyed
+	calls := destroyer.getDestroyCalls()
+	assert.Equal(t, []string{"sess-failed-leak"}, calls)
+
+	// Verify metric was incremented
+	metrics := m.GetMetrics()
+	assert.Equal(t, int64(1), metrics.FailedDestroysRecovered)
+}
+
+// TestManager_CheckFailedDestroys_DestroyFails verifies that when the re-destroy
+// attempt fails, the session stays in failed state and the metric is NOT incremented.
+func TestManager_CheckFailedDestroys_DestroyFails(t *testing.T) {
+	store := newMockSessionStore()
+	destroyer := newMockDestroyer()
+	destroyer.err = errors.New("provider API unavailable")
+
+	now := time.Now()
+
+	failedSession := &models.Session{
+		ID:         "sess-failed-retry",
+		Status:     models.StatusFailed,
+		Provider:   "tensordock",
+		ProviderID: "td-instance-42",
+		CreatedAt:  now.Add(-3 * time.Hour),
+		ExpiresAt:  now.Add(-2 * time.Hour),
+	}
+	store.add(failedSession)
+
+	m := New(store, destroyer,
+		WithLogger(newTestLogger()),
+		WithTimeFunc(func() time.Time { return now }))
+
+	ctx := context.Background()
+	m.checkFailedDestroys(ctx)
+
+	// Destroyer was called but failed
+	calls := destroyer.getDestroyCalls()
+	assert.Equal(t, []string{"sess-failed-retry"}, calls)
+
+	// Metric should NOT be incremented on failure
+	metrics := m.GetMetrics()
+	assert.Equal(t, int64(0), metrics.FailedDestroysRecovered)
+
+	// Session should still be in failed status (unchanged)
+	session, err := store.Get(ctx, "sess-failed-retry")
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusFailed, session.Status)
+	assert.Equal(t, "td-instance-42", session.ProviderID)
 }

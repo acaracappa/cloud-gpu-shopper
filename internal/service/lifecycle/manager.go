@@ -36,6 +36,7 @@ type SessionStore interface {
 	GetActiveSessions(ctx context.Context) ([]*models.Session, error)
 	GetExpiredSessions(ctx context.Context) ([]*models.Session, error)
 	GetSessionsByStatus(ctx context.Context, statuses ...models.SessionStatus) ([]*models.Session, error)
+	GetFailedSessionsWithInstances(ctx context.Context) ([]*models.Session, error)
 	Get(ctx context.Context, id string) (*models.Session, error)
 	Update(ctx context.Context, session *models.Session) error
 }
@@ -94,15 +95,16 @@ type Manager struct {
 
 // Metrics tracks lifecycle manager statistics
 type Metrics struct {
-	mu                    sync.RWMutex
-	ChecksRun             int64
-	SessionsExpired       int64
-	HardMaxEnforced       int64
-	OrphansDetected       int64
-	DestroySuccesses      int64
-	DestroyFailures       int64
-	SSHHealthChecksRun    int64
-	SSHHealthChecksFailed int64
+	mu                      sync.RWMutex
+	ChecksRun               int64
+	SessionsExpired         int64
+	HardMaxEnforced         int64
+	OrphansDetected         int64
+	DestroySuccesses        int64
+	DestroyFailures         int64
+	SSHHealthChecksRun      int64
+	SSHHealthChecksFailed   int64
+	FailedDestroysRecovered int64
 }
 
 // Option configures the lifecycle manager
@@ -286,6 +288,7 @@ func (m *Manager) runChecks(ctx context.Context) {
 	m.checkReservationExpiry(ctx)
 	m.checkOrphans(ctx)
 	m.checkStuckSessions(ctx) // Bug #103 fix: Check for stuck sessions
+	m.checkFailedDestroys(ctx)
 
 	// Run SSH health check if enabled and interval has passed
 	// Bug #17 fix: Protect lastSSHHealthCheck with mutex
@@ -558,6 +561,46 @@ func (m *Manager) destroySession(ctx context.Context, session *models.Session, r
 	m.metrics.mu.Unlock()
 }
 
+// checkFailedDestroys re-attempts destruction for sessions marked failed that still
+// have a provider instance ID. These are sessions where the initial destroy failed
+// but the provider instance may still be running and accumulating charges.
+func (m *Manager) checkFailedDestroys(ctx context.Context) {
+	sessions, err := m.store.GetFailedSessionsWithInstances(ctx)
+	if err != nil {
+		m.logger.Error("failed to get failed sessions for re-destroy",
+			slog.String("error", err.Error()))
+		return
+	}
+
+	for _, session := range sessions {
+		m.logger.Info("re-attempting destroy for failed session",
+			slog.String("session_id", session.ID),
+			slog.String("provider", session.Provider),
+			slog.String("provider_id", session.ProviderID))
+
+		if err := m.destroyer.DestroySession(ctx, session.ID); err != nil {
+			m.logger.Error("re-destroy failed for leaked session",
+				slog.String("session_id", session.ID),
+				slog.String("provider_id", session.ProviderID),
+				slog.String("error", err.Error()))
+			continue
+		}
+
+		m.logger.Info("successfully destroyed leaked session",
+			slog.String("session_id", session.ID),
+			slog.String("provider_id", session.ProviderID))
+
+		m.metrics.mu.Lock()
+		m.metrics.FailedDestroysRecovered++
+		m.metrics.mu.Unlock()
+
+		logging.Audit(ctx, "failed_destroy_recovered",
+			"session_id", session.ID,
+			"provider", session.Provider,
+			"provider_id", session.ProviderID)
+	}
+}
+
 // SignalDone signals that a session has completed its work
 func (m *Manager) SignalDone(ctx context.Context, sessionID string) error {
 	session, err := m.store.Get(ctx, sessionID)
@@ -642,14 +685,15 @@ func (m *Manager) GetMetrics() Metrics {
 	defer m.metrics.mu.RUnlock()
 
 	return Metrics{
-		ChecksRun:             m.metrics.ChecksRun,
-		SessionsExpired:       m.metrics.SessionsExpired,
-		HardMaxEnforced:       m.metrics.HardMaxEnforced,
-		OrphansDetected:       m.metrics.OrphansDetected,
-		DestroySuccesses:      m.metrics.DestroySuccesses,
-		DestroyFailures:       m.metrics.DestroyFailures,
-		SSHHealthChecksRun:    m.metrics.SSHHealthChecksRun,
-		SSHHealthChecksFailed: m.metrics.SSHHealthChecksFailed,
+		ChecksRun:               m.metrics.ChecksRun,
+		SessionsExpired:         m.metrics.SessionsExpired,
+		HardMaxEnforced:         m.metrics.HardMaxEnforced,
+		OrphansDetected:         m.metrics.OrphansDetected,
+		DestroySuccesses:        m.metrics.DestroySuccesses,
+		DestroyFailures:         m.metrics.DestroyFailures,
+		SSHHealthChecksRun:      m.metrics.SSHHealthChecksRun,
+		SSHHealthChecksFailed:   m.metrics.SSHHealthChecksFailed,
+		FailedDestroysRecovered: m.metrics.FailedDestroysRecovered,
 	}
 }
 

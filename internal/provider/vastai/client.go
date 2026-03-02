@@ -192,6 +192,9 @@ type bundleCache struct {
 	mu        sync.RWMutex
 }
 
+// Compile-time interface checks
+var _ provider.BalanceProvider = (*Client)(nil)
+
 // Client implements the provider.Provider interface for Vast.ai
 type Client struct {
 	apiKey     string
@@ -993,6 +996,46 @@ func (c *Client) GetTemplate(ctx context.Context, hashID string) (*models.VastTe
 // Returns an error if the context is cancelled while waiting.
 func (c *Client) rateLimit(ctx context.Context) error {
 	return c.limiter.Wait(ctx)
+}
+
+// GetAccountBalance returns the current account credit balance from Vast.ai.
+// It calls the /users/current/ endpoint and extracts the credit field.
+func (c *Client) GetAccountBalance(ctx context.Context) (*provider.AccountBalance, error) {
+	if err := c.rateLimit(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
+
+	reqURL := fmt.Sprintf("%s/users/current/", c.baseURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("balance check failed: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Credit float64 `json:"credit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	return &provider.AccountBalance{
+		Balance:  result.Credit,
+		Currency: "USD",
+	}, nil
 }
 
 // handleError converts HTTP errors to provider errors

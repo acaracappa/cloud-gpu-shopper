@@ -347,3 +347,62 @@ func TestStartupShutdownManager_GetMetrics(t *testing.T) {
 	assert.Equal(t, int64(0), metrics.SessionsDestroyed)
 	assert.Equal(t, int64(0), metrics.DestroyFailures)
 }
+
+func TestGracefulShutdown_FireAndForgetOnTimeout(t *testing.T) {
+	// Slow provider takes 1s to destroy — longer than the 200ms shutdown timeout,
+	// but short enough to complete within the fire-and-forget 10s timeout.
+	slowProv := &mockStartupProvider{
+		name:         "slow-provider",
+		destroyDelay: 1 * time.Second,
+	}
+	// Fast provider destroys immediately
+	fastProv := &mockStartupProvider{
+		name: "fast-provider",
+	}
+
+	store := &mockStartupStore{
+		sessions: []*models.Session{
+			{
+				ID:         "fast-session",
+				Provider:   "fast-provider",
+				ProviderID: "fast-instance",
+				Status:     models.StatusRunning,
+			},
+			{
+				ID:         "slow-session",
+				Provider:   "slow-provider",
+				ProviderID: "slow-instance",
+				Status:     models.StatusRunning,
+			},
+		},
+	}
+
+	registry := newMockProviderRegistry()
+	registry.providers["fast-provider"] = fastProv
+	registry.providers["slow-provider"] = slowProv
+	reconciler := NewReconciler(nil, nil)
+
+	// Very short shutdown timeout to trigger fire-and-forget path
+	manager := NewStartupShutdownManager(
+		store,
+		reconciler,
+		registry,
+		WithShutdownTimeout(200*time.Millisecond),
+	)
+
+	ctx := context.Background()
+	err := manager.GracefulShutdown(ctx)
+
+	// Should return an error because slow session wasn't destroyed in time
+	assert.Error(t, err)
+
+	// Fast provider should have been destroyed normally (exactly 1 call)
+	assert.Equal(t, 1, fastProv.getDestroyCalls())
+
+	// Slow provider should have received at least one destroy call —
+	// the fire-and-forget attempt after timeout. Wait for the fire-and-forget
+	// goroutine to complete (1s delay + margin).
+	time.Sleep(2 * time.Second)
+	assert.GreaterOrEqual(t, slowProv.getDestroyCalls(), 1,
+		"slow provider should have received at least one destroy call (fire-and-forget)")
+}
