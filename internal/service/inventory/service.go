@@ -587,6 +587,26 @@ func (s *Service) Shutdown() {
 	})
 }
 
+// EvictOffer removes a specific offer from the cache immediately.
+// Called when an offer fails provisioning so other concurrent requests
+// don't pick the same stale/broken offer.
+func (s *Service) EvictOffer(offerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, cached := range s.cache {
+		for i, offer := range cached.offers {
+			if offer.ID == offerID {
+				cached.offers[i] = cached.offers[len(cached.offers)-1]
+				cached.offers = cached.offers[:len(cached.offers)-1]
+				s.logger.Info("evicted failed offer from cache",
+					slog.String("offer_id", offerID))
+				return
+			}
+		}
+	}
+}
+
 // RecordOfferFailure records a provisioning failure for global offer health tracking.
 // Called by the provisioner when an offer fails at any stage.
 func (s *Service) RecordOfferFailure(offerID, providerName, gpuType, failureType, reason string) {
@@ -612,9 +632,10 @@ func (s *Service) LoadFailureData(ctx context.Context, failures []StoredFailure,
 }
 
 // FindComparableOffers returns offers comparable to the original, filtered by scope.
-// It excludes any offers in excludeIDs (previously failed offers).
+// It excludes any offers in excludeIDs (previously failed offers) and any offers
+// on machines in excludeMachineIDs (hosts known to have issues like SSH auth failures).
 // Results are sorted by availability confidence (desc) then price (asc), limited to 5.
-func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string) ([]models.GPUOffer, error) {
+func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string, excludeMachineIDs []string) ([]models.GPUOffer, error) {
 	if original == nil {
 		return nil, fmt.Errorf("original offer is nil")
 	}
@@ -646,16 +667,25 @@ func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPU
 		return nil, fmt.Errorf("failed to list comparable offers: %w", err)
 	}
 
-	// Build exclusion set
+	// Build exclusion sets
 	excluded := make(map[string]bool, len(excludeIDs))
 	for _, id := range excludeIDs {
 		excluded[id] = true
 	}
+	excludedMachines := make(map[string]bool, len(excludeMachineIDs))
+	for _, mid := range excludeMachineIDs {
+		if mid != "" {
+			excludedMachines[mid] = true
+		}
+	}
 
-	// Filter out excluded offers, the original, and suppressed offers
+	// Filter out excluded offers, excluded machines, the original, and suppressed offers
 	var candidates []models.GPUOffer
 	for _, offer := range offers {
 		if excluded[offer.ID] || offer.ID == original.ID {
+			continue
+		}
+		if offer.MachineID != "" && excludedMachines[offer.MachineID] {
 			continue
 		}
 		if !offer.Available {

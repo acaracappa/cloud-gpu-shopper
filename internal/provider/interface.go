@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
@@ -178,9 +179,19 @@ type ProviderInstance struct {
 	PricePerHour float64
 }
 
-// IsOurs checks if this instance belongs to our shopper deployment
+// IsOurs checks if this instance belongs to our shopper deployment.
+// Uses prefix matching because Blue Lobster truncates the deployment ID
+// in instance names due to a 64-char name limit.
 func (p ProviderInstance) IsOurs(deploymentID string) bool {
-	return p.Tags.ShopperDeploymentID == deploymentID
+	tag := p.Tags.ShopperDeploymentID
+	if tag == "" || deploymentID == "" {
+		return tag == deploymentID
+	}
+	// Either could be the truncated version, so check both directions
+	if len(tag) <= len(deploymentID) {
+		return strings.HasPrefix(deploymentID, tag)
+	}
+	return strings.HasPrefix(tag, deploymentID)
 }
 
 // IsExpired checks if this instance is past its expiration time

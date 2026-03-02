@@ -6,6 +6,7 @@ package benchmark
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,8 +77,9 @@ type Runner struct {
 	runs    map[string]*BenchmarkRun
 	cancels map[string]context.CancelFunc
 
-	// Concurrency limit for benchmark workers
-	workerSem chan struct{}
+	// Provisioning gate: only one entry provisions at a time so that
+	// cache evictions from failures benefit subsequent entries.
+	provisionSem chan struct{}
 }
 
 // NewRunner creates a new benchmark runner.
@@ -107,7 +109,7 @@ func NewRunner(
 		scriptContent: scriptContent,
 		runs:          make(map[string]*BenchmarkRun),
 		cancels:       make(map[string]context.CancelFunc),
-		workerSem:     make(chan struct{}, 5), // Max 5 concurrent benchmarks
+		provisionSem:  make(chan struct{}, 1),
 	}
 }
 
@@ -284,7 +286,7 @@ func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 		}
 
 		// Get next pending entries
-		entries, err := r.manifest.GetPendingByPriority(ctx, run.ID, cap(r.workerSem))
+		entries, err := r.manifest.GetPendingByPriority(ctx, run.ID, 1000) // fetch all pending
 		if err != nil {
 			r.logger.Error("failed to get pending entries", slog.String("error", err.Error()))
 			break
@@ -313,7 +315,7 @@ func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 			}
 		}
 
-		for _, entry := range entries {
+		for i, entry := range entries {
 			// Mark running BEFORE dispatching to prevent double-dispatch
 			// when the outer loop re-fetches pending entries.
 			workerID := "worker-" + uuid.New().String()[:8]
@@ -321,19 +323,30 @@ func (r *Runner) processRun(ctx context.Context, run *BenchmarkRun) {
 				r.logger.Error("failed to mark entry running", slog.String("error", err.Error()))
 				continue
 			}
+			entry.Status = benchmarkpkg.ManifestStatusRunning // sync in-memory status
 
 			select {
 			case <-ctx.Done():
 				wg.Wait()
 				r.updateRunStatus(run)
 				return
-			case r.workerSem <- struct{}{}:
+			default:
 				wg.Add(1)
 				go func(e *benchmarkpkg.ManifestEntry) {
 					defer wg.Done()
-					defer func() { <-r.workerSem }()
 					r.processEntry(ctx, run, e)
 				}(entry)
+			}
+
+			// Brief stagger to avoid API rate limiting (provisioning gate handles sequencing)
+			if i < len(entries)-1 {
+				select {
+				case <-ctx.Done():
+					wg.Wait()
+					r.updateRunStatus(run)
+					return
+				case <-time.After(500 * time.Millisecond):
+				}
 			}
 		}
 	}
@@ -352,10 +365,23 @@ func (r *Runner) updateRunStatus(run *BenchmarkRun) {
 	}
 
 	summary, _ := r.manifest.GetSummary(context.Background(), run.ID)
+	totalCost, _ := r.manifest.GetTotalCost(context.Background(), run.ID)
+
 	run.Pending = summary[benchmarkpkg.ManifestStatusPending]
 	run.Running = summary[benchmarkpkg.ManifestStatusRunning]
-	run.Completed = summary[benchmarkpkg.ManifestStatusSuccess]
-	run.Failed = summary[benchmarkpkg.ManifestStatusFailed] + summary[benchmarkpkg.ManifestStatusTimeout]
+
+	// Completed and failed counts should never decrease (monotonic)
+	newCompleted := summary[benchmarkpkg.ManifestStatusSuccess]
+	newFailed := summary[benchmarkpkg.ManifestStatusFailed] + summary[benchmarkpkg.ManifestStatusTimeout]
+	if newCompleted > run.Completed {
+		run.Completed = newCompleted
+	}
+	if newFailed > run.Failed {
+		run.Failed = newFailed
+	}
+	if totalCost > run.TotalCost {
+		run.TotalCost = totalCost
+	}
 
 	if run.Pending == 0 && run.Running == 0 {
 		if run.Failed > 0 && run.Completed == 0 {
@@ -371,33 +397,84 @@ func (r *Runner) updateRunStatus(run *BenchmarkRun) {
 // The entry is already marked as running by processRun before dispatch.
 func (r *Runner) processEntry(ctx context.Context, run *BenchmarkRun, entry *benchmarkpkg.ManifestEntry) {
 	const maxAttempts = 2
+	var failedOfferIDs []string
+	var failedMachineIDs []string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			r.logger.Info("retrying benchmark entry",
 				slog.String("entry_id", entry.ID),
 				slog.Int("attempt", attempt))
-			// Reset entry state for retry and wait for cleanup to propagate
+			// Destroy previous session before retrying to prevent orphans
+			if entry.SessionID != "" {
+				r.logger.Info("cleaning up previous attempt session",
+					slog.String("session_id", entry.SessionID),
+					slog.String("entry_id", entry.ID))
+				r.cleanupSession(ctx, entry.SessionID)
+			}
+			// Reset entry state for retry
 			entry.SessionID = ""
 			entry.OfferID = ""
 			time.Sleep(10 * time.Second)
 		}
-		if r.processEntryOnce(ctx, run, entry, attempt) {
-			return // success
+		success, shouldRetry, lastMachineID := r.processEntryOnce(ctx, run, entry, attempt, failedOfferIDs, failedMachineIDs)
+		if success {
+			return
 		}
-		// Check if context was cancelled before retrying
+		// Track the failed offer and machine for exclusion on next attempt
+		if entry.OfferID != "" {
+			failedOfferIDs = append(failedOfferIDs, entry.OfferID)
+		}
+		if lastMachineID != "" {
+			failedMachineIDs = append(failedMachineIDs, lastMachineID)
+		}
+		if !shouldRetry {
+			r.logger.Info("skipping retry — no offers available",
+				slog.String("entry_id", entry.ID))
+			return
+		}
 		if ctx.Err() != nil {
+			// Context cancelled — mark with reason if not already terminal (use Background since ctx is cancelled)
+			if mfErr := r.manifest.MarkFailed(context.Background(), entry.ID, "run cancelled", "cancelled"); mfErr != nil {
+				r.logger.Error("failed to mark cancelled entry", slog.String("error", mfErr.Error()))
+			}
 			return
 		}
 	}
+	// All retries exhausted — ensure entry has a failure reason
+	r.logger.Warn("all retry attempts exhausted",
+		slog.String("entry_id", entry.ID),
+		slog.Int("attempts", maxAttempts))
+	if mfErr := r.manifest.MarkFailed(context.Background(), entry.ID,
+		fmt.Sprintf("all %d attempts failed", maxAttempts), "retry_exhausted"); mfErr != nil {
+		r.logger.Error("failed to mark exhausted entry", slog.String("error", mfErr.Error()))
+	}
 }
 
-// processEntryOnce runs a single attempt. Returns true on success, false on failure.
-func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry *benchmarkpkg.ManifestEntry, attempt int) bool {
+// processEntryOnce runs a single attempt. Returns (success, shouldRetry, machineID).
+// shouldRetry=false signals the caller to skip remaining attempts (e.g., zero offers).
+// machineID is the physical host of the selected offer (for host-level exclusion on retry).
+func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry *benchmarkpkg.ManifestEntry, attempt int, failedOfferIDs []string, failedMachineIDs []string) (success bool, shouldRetry bool, machineID string) {
 	r.logger.Info("processing benchmark entry",
 		slog.String("entry_id", entry.ID),
 		slog.String("model", entry.Model),
 		slog.String("gpu_type", entry.GPUType),
 		slog.String("provider", entry.Provider))
+
+	// Acquire provisioning gate — only one entry provisions at a time so that
+	// cache evictions from failed offers benefit the next entry.
+	select {
+	case r.provisionSem <- struct{}{}:
+	case <-ctx.Done():
+		return false, false, ""
+	}
+	provisionGateHeld := true
+	releaseGate := func() {
+		if provisionGateHeld {
+			<-r.provisionSem
+			provisionGateHeld = false
+		}
+	}
+	defer releaseGate()
 
 	// Step 1: Find a suitable offer
 	offers, err := r.inventory.ListOffers(ctx, models.OfferFilter{
@@ -405,16 +482,53 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		GPUType:  entry.GPUType,
 	})
 	if err != nil || len(offers) == 0 {
-		reason := "no offers found"
+		reason := fmt.Sprintf("no offers available for %s on %s", entry.GPUType, entry.Provider)
 		if err != nil {
 			reason = err.Error()
 		}
-		r.logger.Warn("no offers for benchmark", slog.String("gpu_type", entry.GPUType), slog.String("provider", entry.Provider))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, reason, "find_offer")
-		return false
+		r.logger.Warn(reason, slog.String("gpu_type", entry.GPUType), slog.String("provider", entry.Provider))
+		if err := r.manifest.MarkFailed(ctx, entry.ID, reason, "find_offer"); err != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", err.Error()))
+		}
+		return false, false, "" // no retry — no offers exist
 	}
 
-	offer := &offers[0]
+	// Exclude offers that failed in previous attempts (by offer ID and machine ID)
+	if len(failedOfferIDs) > 0 || len(failedMachineIDs) > 0 {
+		filtered := offers[:0]
+		excludeSet := make(map[string]bool, len(failedOfferIDs))
+		for _, id := range failedOfferIDs {
+			excludeSet[id] = true
+		}
+		excludeMachines := make(map[string]bool, len(failedMachineIDs))
+		for _, mid := range failedMachineIDs {
+			if mid != "" {
+				excludeMachines[mid] = true
+			}
+		}
+		for _, o := range offers {
+			if excludeSet[o.ID] {
+				continue
+			}
+			if o.MachineID != "" && excludeMachines[o.MachineID] {
+				continue
+			}
+			filtered = append(filtered, o)
+		}
+		offers = filtered
+		if len(offers) == 0 {
+			reason := fmt.Sprintf("no offers remaining after excluding %d failed offers for %s on %s", len(failedOfferIDs), entry.GPUType, entry.Provider)
+			r.logger.Warn(reason)
+			if err := r.manifest.MarkFailed(ctx, entry.ID, reason, "find_offer"); err != nil {
+				r.logger.Error("failed to mark entry as failed", slog.String("error", err.Error()))
+			}
+			return false, false, "" // no retry
+		}
+	}
+
+	offer := models.SelectFromTopN(offers, 5, 1.5)
 	entry.OfferID = offer.ID
 	entry.PriceHour = offer.PricePerHour
 
@@ -438,19 +552,41 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 	}
 	session, err := r.provisioner.CreateSession(ctx, createReq, offer)
 	if err != nil {
-		r.logger.Error("failed to provision session for benchmark",
-			slog.String("error", err.Error()),
-			slog.String("entry_id", entry.ID))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, err.Error(), "provision")
-		return false
+		// If duplicate session error, destroy the existing session and retry
+		var dupErr *provisioner.DuplicateSessionError
+		if errors.As(err, &dupErr) {
+			r.logger.Warn("destroying duplicate session before retry",
+				slog.String("existing_session", dupErr.SessionID),
+				slog.String("entry_id", entry.ID))
+			r.cleanupSession(ctx, dupErr.SessionID)
+			// Return false to trigger retry with fresh session
+		} else {
+			r.logger.Error("failed to provision session for benchmark",
+				slog.String("error", err.Error()),
+				slog.String("entry_id", entry.ID))
+		}
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, err.Error(), "provision"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
+		return false, true, offer.MachineID
 	}
 
 	entry.SessionID = session.ID
-	_ = r.manifest.Update(ctx, entry)
+	if err := r.manifest.Update(ctx, entry); err != nil {
+		r.logger.Error("failed to update manifest entry",
+			slog.String("entry_id", entry.ID),
+			slog.String("error", err.Error()))
+	}
 
 	r.logger.Info("benchmark session provisioned",
 		slog.String("session_id", session.ID),
 		slog.String("entry_id", entry.ID))
+
+	// Release provisioning gate — instance created successfully, next entry can start.
+	// Benchmark execution (SSH wait, script upload, result polling) runs concurrently.
+	releaseGate()
 
 	// Step 3: Wait for session to be running with SSH access
 	var sshHost, sshUser, sshKey string
@@ -468,18 +604,28 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		case <-pollCtx.Done():
 			r.logger.Warn("timeout waiting for benchmark session",
 				slog.String("session_id", session.ID))
-			_ = r.manifest.MarkTimeout(ctx, entry.ID, "ssh_wait")
+			if err := r.manifest.MarkTimeout(ctx, entry.ID, "ssh_wait"); err != nil {
+				r.logger.Error("failed to mark entry as timeout",
+					slog.String("entry_id", entry.ID),
+					slog.String("error", err.Error()))
+			}
+			r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "ssh_timeout", "benchmark SSH wait timeout")
 			r.cleanupSession(ctx, session.ID)
-			return false
+			return false, true, offer.MachineID
 		case <-ticker.C:
 			s, err := r.provisioner.GetSession(ctx, session.ID)
 			if err != nil {
 				continue
 			}
 			if s.Status == models.StatusFailed {
-				_ = r.manifest.MarkFailed(ctx, entry.ID, s.Error, "provision")
+				if err := r.manifest.MarkFailed(ctx, entry.ID, s.Error, "provision"); err != nil {
+					r.logger.Error("failed to mark entry as failed",
+						slog.String("entry_id", entry.ID),
+						slog.String("error", err.Error()))
+				}
+				r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "session_failed", s.Error)
 				r.cleanupSession(ctx, session.ID)
-				return false
+				return false, true, offer.MachineID
 			}
 			if s.Status == models.StatusRunning && s.SSHHost != "" {
 				sshHost = s.SSHHost
@@ -494,17 +640,26 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 	// Step 3.5: Wait for system readiness (Blue Lobster post-boot dist-upgrade)
 	if err := r.waitForSystemReady(ctx, sshHost, sshPort, sshUser, sshKey, entry.Provider); err != nil {
 		r.logger.Error("system readiness failed", slog.String("error", err.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "system not ready: "+err.Error(), "readiness")
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, "system not ready: "+err.Error(), "readiness"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
+		r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "readiness_timeout", "system not ready: "+err.Error())
 		r.cleanupSession(ctx, session.ID)
-		return false
+		return false, true, offer.MachineID
 	}
 
 	// Step 4: Upload and run the benchmark script via SSH
 	if r.scriptContent == "" {
 		r.logger.Error("benchmark script not loaded, cannot deploy")
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "benchmark script not loaded", "deploy")
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, "benchmark script not loaded", "deploy"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
 		r.cleanupSession(ctx, session.ID)
-		return false
+		return false, true, offer.MachineID
 	}
 
 	r.logger.Info("uploading benchmark script via SCP",
@@ -540,9 +695,14 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 	}
 	if uploadErr != nil {
 		r.logger.Error("failed to upload benchmark script after retries", slog.String("error", uploadErr.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+uploadErr.Error(), "deploy")
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, "script upload failed: "+uploadErr.Error(), "deploy"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
+		r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "deploy_failed", "script upload failed: "+uploadErr.Error())
 		r.cleanupSession(ctx, session.ID)
-		return false
+		return false, true, offer.MachineID
 	}
 
 	benchmarkCmd := buildBenchmarkOnStartCmd(entry.Model, session.ID, offer.PricePerHour, entry.Provider, offer.Location)
@@ -555,9 +715,13 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		r.logger.Error("failed to deploy benchmark script",
 			slog.String("error", deployErr.Error()),
 			slog.String("session_id", session.ID))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "deploy failed: "+deployErr.Error(), "deploy")
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, "deploy failed: "+deployErr.Error(), "deploy"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
 		r.cleanupSession(ctx, session.ID)
-		return false
+		return false, true, offer.MachineID
 	}
 
 	// Step 5: Poll for results via SSH
@@ -577,18 +741,26 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		case <-resultCtx.Done():
 			r.logger.Warn("timeout waiting for benchmark results",
 				slog.String("session_id", session.ID))
-			_ = r.manifest.MarkTimeout(ctx, entry.ID, "result_collection")
+			if err := r.manifest.MarkTimeout(ctx, entry.ID, "result_collection"); err != nil {
+				r.logger.Error("failed to mark entry as timeout",
+					slog.String("entry_id", entry.ID),
+					slog.String("error", err.Error()))
+			}
 			r.cleanupSession(ctx, session.ID)
-			return false
+			return false, true, offer.MachineID
 		case <-resultTicker.C:
 			// Check for script crash marker
 			if failOut, failErr := sshpkg.RunCommand(resultCtx, sshHost, sshPort, sshUser, sshKey,
 				"test -f /tmp/benchmark_failed && cat /tmp/benchmark_failed"); failErr == nil && strings.TrimSpace(failOut) != "" {
 				reason := "script crashed: " + strings.TrimSpace(failOut)
 				r.logger.Error("benchmark script crashed", slog.String("session_id", session.ID), slog.String("reason", reason))
-				_ = r.manifest.MarkFailed(ctx, entry.ID, reason, "script_crash")
+				if markErr := r.manifest.MarkFailed(ctx, entry.ID, reason, "script_crash"); markErr != nil {
+					r.logger.Error("failed to mark entry as failed",
+						slog.String("entry_id", entry.ID),
+						slog.String("error", markErr.Error()))
+				}
 				r.cleanupSession(ctx, session.ID)
-				return false
+				return false, true, offer.MachineID
 			}
 
 			// Check if benchmark is complete
@@ -622,24 +794,36 @@ resultsCollected:
 		r.logger.Error("failed to parse benchmark results",
 			slog.String("error", err.Error()),
 			slog.String("session_id", session.ID))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "invalid result JSON: "+err.Error(), "parse")
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, "invalid result JSON: "+err.Error(), "parse"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
 		r.cleanupSession(ctx, session.ID)
-		return false
+		return false, true, offer.MachineID
 	}
 
 	if err := r.store.Save(ctx, &result); err != nil {
 		r.logger.Error("failed to save benchmark results",
 			slog.String("error", err.Error()))
-		_ = r.manifest.MarkFailed(ctx, entry.ID, "save failed: "+err.Error(), "save")
+		if markErr := r.manifest.MarkFailed(ctx, entry.ID, "save failed: "+err.Error(), "save"); markErr != nil {
+			r.logger.Error("failed to mark entry as failed",
+				slog.String("entry_id", entry.ID),
+				slog.String("error", markErr.Error()))
+		}
 		r.cleanupSession(ctx, session.ID)
-		return false
+		return false, true, offer.MachineID
 	}
 
 	// Calculate cost: session duration * price/hour
 	duration := time.Since(session.CreatedAt)
 	totalCost := duration.Hours() * offer.PricePerHour
 
-	_ = r.manifest.MarkSuccess(ctx, entry.ID, result.ID, result.Results.AvgTokensPerSecond, totalCost)
+	if err := r.manifest.MarkSuccess(ctx, entry.ID, result.ID, result.Results.AvgTokensPerSecond, totalCost); err != nil {
+		r.logger.Error("CRITICAL: failed to mark entry as success",
+			slog.String("entry_id", entry.ID),
+			slog.String("error", err.Error()))
+	}
 
 	r.logger.Info("benchmark entry completed",
 		slog.String("entry_id", entry.ID),
@@ -649,7 +833,17 @@ resultsCollected:
 
 	// Step 7: Cleanup session
 	r.cleanupSession(ctx, session.ID)
-	return true
+	return true, true, offer.MachineID
+}
+
+// reportOfferFailure records a post-provisioning failure to the global tracker
+// and evicts the offer from cache so other concurrent entries avoid it.
+func (r *Runner) reportOfferFailure(offerID, provider, gpuType, failureType, reason string) {
+	if offerID == "" {
+		return
+	}
+	r.inventory.RecordOfferFailure(offerID, provider, gpuType, failureType, reason)
+	r.inventory.EvictOffer(offerID)
 }
 
 // cleanupSession destroys a benchmark session.
@@ -704,14 +898,14 @@ func (r *Runner) waitForSystemReady(ctx context.Context, host string, port int, 
 		return nil
 	}
 	r.logger.Info("waiting for system readiness (dpkg + nvidia-smi)", slog.String("host", host))
-	readyCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-readyCtx.Done():
-			return fmt.Errorf("system readiness timeout after 20 minutes")
+			return fmt.Errorf("system readiness timeout after 30 minutes")
 		case <-ticker.C:
 			output, err := sshpkg.RunCommand(readyCtx, host, port, user, key,
 				"fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && echo LOCKED || "+

@@ -154,21 +154,31 @@ RAM_GIB=0
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   # Wait for nvidia-smi to return stable values (DKMS rebuild may be in progress)
+  # RTX 8000 instances can take 15-25 minutes for NVML drivers to stabilize
   NVIDIA_WAIT=0
-  while [ $NVIDIA_WAIT -lt 600 ]; do
+  NVIDIA_TIMEOUT=1800
+  NVIDIA_STABLE=false
+  while [ $NVIDIA_WAIT -lt $NVIDIA_TIMEOUT ]; do
     TEST_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || true
     if echo "$TEST_MEM" | grep -qE '^[0-9]+$'; then
+      NVIDIA_STABLE=true
       break
     fi
     log "nvidia-smi not stable yet (got: ${TEST_MEM:-empty}), waiting 10s..."
     sleep 10
     NVIDIA_WAIT=$((NVIDIA_WAIT + 10))
   done
-  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || GPU_NAME="unknown"
-  GPU_MEMORY_MIB=$(ensure_numeric "$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)")
-  GPU_COUNT=$(ensure_numeric "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | xargs)")
-  DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || DRIVER_VERSION="unknown"
-  CUDA_VERSION=$(nvidia-smi 2>/dev/null | awk '/CUDA Version:/{for(i=1;i<=NF;i++)if($i=="Version:")print $(i+1)}' || echo "unknown")
+
+  if [ "$NVIDIA_STABLE" = true ]; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || GPU_NAME="unknown"
+    GPU_MEMORY_MIB=$(ensure_numeric "$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs)")
+    GPU_COUNT=$(ensure_numeric "$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | xargs)")
+    DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs) || DRIVER_VERSION="unknown"
+    CUDA_VERSION=$(nvidia-smi 2>/dev/null | awk '/CUDA Version:/{for(i=1;i<=NF;i++)if($i=="Version:")print $(i+1)}' || echo "unknown")
+  else
+    log "WARNING: nvidia-smi did not stabilize after ${NVIDIA_TIMEOUT}s, GPU info will use defaults"
+    GPU_NAME="unknown"
+  fi
 fi
 
 if [ -f /proc/cpuinfo ]; then

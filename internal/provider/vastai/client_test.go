@@ -206,6 +206,21 @@ func TestClient_HandleError_RateLimit(t *testing.T) {
 	assert.True(t, provider.IsRateLimitError(err))
 }
 
+func TestClient_HandleError_NoSuchAsk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"success":false,"error":"invalid_args","msg":"error 404/3603: no_such_ask  Instance type by id 29907796 is not available.","ask_id":29907796}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL))
+
+	_, err := client.ListOffers(context.Background(), models.OfferFilter{})
+
+	require.Error(t, err)
+	assert.True(t, provider.IsStaleInventoryError(err), "no_such_ask should be classified as stale inventory")
+}
+
 // TestClient_AttachSSHKey verifies the SSH key attachment API call.
 // LEARNING: Vast.ai requires a separate API call to register SSH keys after instance creation.
 // The ssh_key parameter in the create request doesn't reliably register the key.
@@ -1055,6 +1070,31 @@ func TestClient_GetAccountBalance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 42.50, balance.Balance)
 	assert.Equal(t, "USD", balance.Currency)
+}
+
+func TestClient_Retry429(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"message": "rate limited"}`))
+			return
+		}
+		// Third attempt succeeds
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"offers": []interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithBaseURL(server.URL))
+
+	_, err := client.ListOffers(context.Background(), models.OfferFilter{})
+
+	require.NoError(t, err, "should succeed after 429 retries")
+	assert.Equal(t, 3, attempts, "should have retried twice before succeeding")
 }
 
 func TestClient_GetAccountBalance_Error(t *testing.T) {

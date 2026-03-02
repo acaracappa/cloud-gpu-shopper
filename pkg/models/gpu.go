@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"math/rand/v2"
+	"time"
+)
 
 // CompatibleTemplate represents a template that can run on a specific GPU offer.
 // Used to show users which templates are compatible with each offer.
@@ -26,6 +29,7 @@ type GPUOffer struct {
 	FetchedAt              time.Time `json:"fetched_at"`              // When this offer was fetched
 	AvailabilityConfidence float64   `json:"availability_confidence"` // 0-1 confidence that offer is actually available (default 1.0)
 	CUDAVersion            float64   `json:"cuda_version,omitempty"`  // Max supported CUDA version (e.g., 12.9). Only for Vast.ai.
+	MachineID              string    `json:"machine_id,omitempty"`    // Physical host identifier (e.g., Vast.ai machine_id). Used for host-level failure avoidance.
 
 	// CompatibleTemplates lists templates that can run on this offer.
 	// Only populated when include_templates=true is requested, and only for Vast.ai offers.
@@ -84,4 +88,34 @@ func (o *GPUOffer) GetEffectiveAvailabilityConfidence() float64 {
 		return 1.0
 	}
 	return o.AvailabilityConfidence
+}
+
+// SelectFromTopN randomly selects an offer from the top N offers within
+// a price tolerance of the cheapest. Assumes offers are sorted by price
+// ascending. This prevents thundering herd when multiple concurrent entries
+// all pick the same cheapest offer.
+func SelectFromTopN(offers []GPUOffer, maxN int, priceTolerance float64) *GPUOffer {
+	if len(offers) == 0 {
+		return nil
+	}
+	if len(offers) == 1 {
+		return &offers[0]
+	}
+
+	cheapest := offers[0].PricePerHour
+	maxPrice := cheapest * priceTolerance
+
+	n := 0
+	for _, o := range offers {
+		if o.PricePerHour <= maxPrice {
+			n++
+		} else {
+			break // offers are sorted by price
+		}
+	}
+	if n > maxN {
+		n = maxN
+	}
+
+	return &offers[rand.IntN(n)]
 }

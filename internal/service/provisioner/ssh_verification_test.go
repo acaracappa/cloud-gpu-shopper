@@ -124,8 +124,8 @@ func TestSSHVerification_TimeoutDestroysInstance(t *testing.T) {
 
 	assert.Contains(t, finalError, "SSH verification timeout", "Error should indicate SSH timeout")
 
-	// Verify provider destroy was called
-	assert.Equal(t, 1, prov.destroyCalls, "Instance should be destroyed after SSH timeout")
+	// Verify provider destroy was called (once by SSH timeout handler, once defensively by failSession)
+	assert.Equal(t, 2, prov.destroyCalls, "Instance should be destroyed after SSH timeout (caller + failSession)")
 }
 
 // TestSSHVerification_MultipleAttempts verifies that SSH verification retries
@@ -522,6 +522,6 @@ func TestSSHVerification_InstanceStoppedFailsFast(t *testing.T) {
 	assert.Contains(t, finalError, "instance stopped", "Error should indicate instance stopped")
 	assert.Contains(t, finalError, "stopped", "Error should contain the status")
 
-	// Verify provider destroy was called
-	assert.Equal(t, 1, prov.destroyCalls, "Instance should be destroyed when it stops unexpectedly")
+	// Verify provider destroy was called (once by stopped-instance handler, once defensively by failSession)
+	assert.Equal(t, 2, prov.destroyCalls, "Instance should be destroyed when it stops unexpectedly (caller + failSession)")
 }

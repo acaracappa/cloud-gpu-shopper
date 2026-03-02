@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
@@ -372,7 +375,7 @@ func TestDestroyInstance_Success(t *testing.T) {
 	}
 }
 
-func TestDestroyInstance_NotFound(t *testing.T) {
+func TestDestroyInstance_NotFound_TreatedAsSuccess(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -385,11 +388,28 @@ func TestDestroyInstance_NotFound(t *testing.T) {
 
 	client := newTestClient(t, handler)
 	err := client.DestroyInstance(context.Background(), "nonexistent")
-	if err == nil {
-		t.Fatal("expected error for not found instance, got nil")
+	if err != nil {
+		t.Fatalf("expected no error for 404 on destroy (instance already gone), got: %v", err)
 	}
-	if !provider.IsNotFoundError(err) {
-		t.Errorf("expected IsNotFoundError to return true, got false. err: %v", err)
+}
+
+func TestDestroyInstance_404_TreatedAsSuccess(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/instances/") {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    "instance_not_found",
+					"message": "Instance not found",
+				},
+			})
+			return
+		}
+	})
+	client := newTestClient(t, handler)
+	err := client.DestroyInstance(context.Background(), "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("expected no error for 404 on destroy (instance already gone), got: %v", err)
 	}
 }
 
@@ -665,4 +685,75 @@ func TestAPIKeyHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListOffers returned error: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Deployment ID encoding tests (C2-10: BL-007 workaround)
+// ---------------------------------------------------------------------------
+
+func TestCreateInstance_IncludesDeploymentIDInName(t *testing.T) {
+	deploymentID := "550e8400-e29b-41d4-a716-446655440000" // realistic 36-char UUID
+
+	var capturedName string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/instances/launch-instance"):
+			var req map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&req)
+			capturedName = req["name"].(string)
+			json.NewEncoder(w).Encode(map[string]interface{}{"task_id": "task-1", "vm_uuid": "inst-abc"})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tasks/task-1"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "COMPLETED",
+				"params": map[string]interface{}{"vm_uuid": "inst-abc"},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/instances/inst-abc"):
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"uuid": "inst-abc", "power_status": "running",
+				"ip_address": "1.2.3.4", "vm_username": "ubuntu",
+			})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	client := newTestClient(t, handler)
+	info, err := client.CreateInstance(context.Background(), provider.CreateInstanceRequest{
+		OfferID:      "bluelobster:gpu-a4000:us-east-1",
+		SSHPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@test",
+		Tags: models.InstanceTags{
+			ShopperSessionID:    "sess-123",
+			ShopperDeploymentID: deploymentID,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	// Deployment ID is truncated to 8 chars to stay within Blue Lobster's 64-char name limit
+	assert.Contains(t, capturedName, "-deploy-"+deploymentID[:8])
+}
+
+func TestListAllInstances_ParsesDeploymentIDFromName(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/instances" {
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"uuid": "inst-1", "power_status": "running",
+					"name":                 "shopper-sess123-deploy-abcdef12",
+					"ip_address":           "1.2.3.4",
+					"price_cents_per_hour": 100,
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	client := newTestClient(t, handler)
+	instances, err := client.ListAllInstances(context.Background())
+	require.NoError(t, err)
+	require.Len(t, instances, 1)
+	// Deployment ID is everything after "-deploy-" in the name
+	assert.Equal(t, "abcdef12", instances[0].Tags.ShopperDeploymentID)
+	// Session ID should still be parsed correctly (without deployment suffix)
+	assert.Equal(t, "sess123", instances[0].Tags.ShopperSessionID)
 }

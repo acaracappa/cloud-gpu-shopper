@@ -3,6 +3,7 @@ package benchmark
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -282,15 +283,29 @@ func (s *ManifestStore) GetTotalCost(ctx context.Context, runID string) (float64
 	return total.Float64, nil
 }
 
-// MarkRunning marks an entry as running with worker info
+// ErrEntryNotPending is returned when MarkRunning is called on an entry that is not pending.
+var ErrEntryNotPending = errors.New("entry is not in pending state")
+
+// MarkRunning atomically claims a pending entry for a worker.
+// Returns ErrEntryNotPending if the entry has already been claimed or completed.
 func (s *ManifestStore) MarkRunning(ctx context.Context, id, workerID, outputFile string) error {
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE benchmark_manifest SET
 			status = 'running', worker_id = ?, output_file = ?, started_at = ?
-		WHERE id = ?
+		WHERE id = ? AND status = 'pending'
 	`, workerID, outputFile, now, id)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("%w: entry %s", ErrEntryNotPending, id)
+	}
+	return nil
 }
 
 // MarkSuccess marks an entry as successful with results

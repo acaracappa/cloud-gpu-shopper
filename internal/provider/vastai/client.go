@@ -1,6 +1,7 @@
 package vastai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -353,7 +354,7 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req, nil)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -506,7 +507,7 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithRetry(httpReq, body)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -744,7 +745,7 @@ func (c *Client) AttachSSHKey(ctx context.Context, instanceID string, sshPublicK
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithRetry(httpReq, body)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -786,7 +787,7 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err er
 
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req, nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -1038,21 +1039,61 @@ func (c *Client) GetAccountBalance(ctx context.Context) (*provider.AccountBalanc
 	}, nil
 }
 
+// doWithRetry executes an HTTP request with automatic retry on 429 (rate limit).
+// Retries up to 3 times with exponential backoff: 1s, 2s, 4s.
+func (c *Client) doWithRetry(req *http.Request, bodyBytes []byte) (*http.Response, error) {
+	const maxRetries = 3
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<(attempt-1)) * time.Second
+			log.Printf("[Vast.ai] Rate limited (429), retrying attempt %d after %v", attempt, delay)
+			select {
+			case <-time.After(delay):
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
+			// Reset body for retry
+			if bodyBytes != nil {
+				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+		resp.Body.Close()
+	}
+	// All retries exhausted, make one final attempt and return whatever happens
+	if bodyBytes != nil {
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+	return c.httpClient.Do(req)
+}
+
 // handleError converts HTTP errors to provider errors
 func (c *Client) handleError(resp *http.Response, operation string) error {
 	body, _ := io.ReadAll(resp.Body)
 	message := string(body)
 
 	var baseErr error
-	switch resp.StatusCode {
-	case http.StatusTooManyRequests:
-		baseErr = provider.ErrProviderRateLimit
-	case http.StatusUnauthorized, http.StatusForbidden:
-		baseErr = provider.ErrProviderAuth
-	case http.StatusNotFound:
-		baseErr = provider.ErrInstanceNotFound
-	default:
-		baseErr = provider.ErrProviderError
+
+	// Check for specific error patterns in response body before status code switch
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(message, "no_such_ask") {
+		baseErr = provider.ErrOfferStaleInventory
+	} else {
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			baseErr = provider.ErrProviderRateLimit
+		case http.StatusUnauthorized, http.StatusForbidden:
+			baseErr = provider.ErrProviderAuth
+		case http.StatusNotFound:
+			baseErr = provider.ErrInstanceNotFound
+		default:
+			baseErr = provider.ErrProviderError
+		}
 	}
 
 	return provider.NewProviderError("vastai", operation, resp.StatusCode, message, baseErr)

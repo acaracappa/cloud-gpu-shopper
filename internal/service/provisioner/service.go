@@ -145,9 +145,10 @@ type ProviderRegistry interface {
 // InventoryFinder provides access to comparable offer lookup for auto-retry
 // and global offer failure tracking
 type InventoryFinder interface {
-	FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string) ([]models.GPUOffer, error)
+	FindComparableOffers(ctx context.Context, original *models.GPUOffer, scope string, excludeIDs []string, excludeMachineIDs []string) ([]models.GPUOffer, error)
 	GetOffer(ctx context.Context, offerID string) (*models.GPUOffer, error)
 	RecordOfferFailure(offerID, provider, gpuType, failureType, reason string)
+	EvictOffer(offerID string)
 }
 
 // CostRecorder records final costs for terminated sessions.
@@ -363,13 +364,13 @@ func (s *Service) CreateSession(ctx context.Context, req models.CreateSessionReq
 		req.RetryScope = "same_gpu"
 	}
 
-	return s.createSessionWithRetry(ctx, req, offer, nil, 0, "")
+	return s.createSessionWithRetry(ctx, req, offer, nil, nil, 0, "")
 }
 
 // createSessionWithRetry is the internal implementation that supports retry.
 // failedOfferIDs tracks offers that already failed, retryCount is the current attempt,
 // retryParentID links back to the original session if this is a retry.
-func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateSessionRequest, offer *models.GPUOffer, failedOfferIDs []string, retryCount int, retryParentID string) (*models.Session, error) {
+func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateSessionRequest, offer *models.GPUOffer, failedOfferIDs []string, failedMachineIDs []string, retryCount int, retryParentID string) (*models.Session, error) {
 	s.logger.Info("creating session",
 		slog.String("consumer_id", req.ConsumerID),
 		slog.String("offer_id", req.OfferID),
@@ -575,13 +576,14 @@ func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateS
 	if err != nil {
 		s.failSession(ctx, session, fmt.Sprintf("provider create failed: %s", err.Error()))
 
-		// Record global offer failure for cross-session intelligence
+		// Record global offer failure and evict from cache for cross-session intelligence
 		if s.inventory != nil {
 			failType := "unknown"
 			if provider.ShouldRetryWithDifferentOffer(err) {
 				failType = "stale_inventory"
 			}
 			s.inventory.RecordOfferFailure(offer.ID, offer.Provider, offer.GPUType, failType, err.Error())
+			s.inventory.EvictOffer(offer.ID)
 		}
 
 		// Check if this is a retryable error and auto-retry is enabled
@@ -589,22 +591,26 @@ func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateS
 			metrics.RecordRetryAttempt(offer.Provider, req.RetryScope, "stale_inventory")
 
 			newFailedOffers := append(failedOfferIDs, offer.ID)
+			newFailedMachines := failedMachineIDs
+			if offer.MachineID != "" {
+				newFailedMachines = append(append([]string{}, failedMachineIDs...), offer.MachineID)
+			}
 			s.logger.Info("auto-retrying with different offer",
 				slog.String("failed_offer", offer.ID),
 				slog.Int("retry_count", retryCount+1),
 				slog.Int("max_retries", req.MaxRetries),
 				slog.String("scope", req.RetryScope))
 
-			alternatives, findErr := s.inventory.FindComparableOffers(ctx, offer, req.RetryScope, newFailedOffers)
+			alternatives, findErr := s.inventory.FindComparableOffers(ctx, offer, req.RetryScope, newFailedOffers, newFailedMachines)
 			if findErr != nil {
 				s.logger.Warn("failed to find comparable offers for retry",
 					slog.String("error", findErr.Error()))
 			} else if len(alternatives) > 0 {
-				nextOffer := &alternatives[0]
+				nextOffer := models.SelectFromTopN(alternatives, 3, 1.3)
 				req.OfferID = nextOffer.ID
 
 				// Update the parent session's retry_child_id will be set after child creation
-				retrySession, retryErr := s.createSessionWithRetry(ctx, req, nextOffer, newFailedOffers, retryCount+1, session.ID)
+				retrySession, retryErr := s.createSessionWithRetry(ctx, req, nextOffer, newFailedOffers, newFailedMachines, retryCount+1, session.ID)
 				if retryErr == nil {
 					// Success — link parent to child
 					session.RetryChildID = retrySession.ID
@@ -767,7 +773,8 @@ func (s *Service) triggerAsyncRetry(failedSession *models.Session, originalReq m
 	}
 	failedOfferIDs = append(failedOfferIDs, failedSession.OfferID)
 
-	// Get original offer info for comparison
+	// Get original offer info for comparison and build machine ID exclusion list
+	var failedMachineIDs []string
 	originalOffer, err := s.inventory.GetOffer(ctx, failedSession.OfferID)
 	if err != nil {
 		// Build a synthetic offer from session data for comparison
@@ -779,8 +786,11 @@ func (s *Service) triggerAsyncRetry(failedSession *models.Session, originalReq m
 			PricePerHour: failedSession.PricePerHour,
 		}
 	}
+	if originalOffer.MachineID != "" {
+		failedMachineIDs = append(failedMachineIDs, originalOffer.MachineID)
+	}
 
-	alternatives, err := s.inventory.FindComparableOffers(ctx, originalOffer, failedSession.RetryScope, failedOfferIDs)
+	alternatives, err := s.inventory.FindComparableOffers(ctx, originalOffer, failedSession.RetryScope, failedOfferIDs, failedMachineIDs)
 	if err != nil || len(alternatives) == 0 {
 		s.logger.Warn("async retry: no comparable offers found",
 			slog.String("session_id", failedSession.ID),
@@ -789,7 +799,7 @@ func (s *Service) triggerAsyncRetry(failedSession *models.Session, originalReq m
 		return
 	}
 
-	nextOffer := &alternatives[0]
+	nextOffer := models.SelectFromTopN(alternatives, 3, 1.3)
 	originalReq.OfferID = nextOffer.ID
 
 	s.logger.Info("async retry: reprovisioning with new offer",
@@ -797,7 +807,7 @@ func (s *Service) triggerAsyncRetry(failedSession *models.Session, originalReq m
 		slog.String("new_offer", nextOffer.ID),
 		slog.Int("retry_count", failedSession.RetryCount+1))
 
-	newSession, err := s.createSessionWithRetry(ctx, originalReq, nextOffer, failedOfferIDs, failedSession.RetryCount+1, failedSession.ID)
+	newSession, err := s.createSessionWithRetry(ctx, originalReq, nextOffer, failedOfferIDs, failedMachineIDs, failedSession.RetryCount+1, failedSession.ID)
 	if err != nil {
 		s.logger.Warn("async retry failed",
 			slog.String("session_id", failedSession.ID),
@@ -900,9 +910,10 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 			// Bug #94 fix: Record session destroyed when SSH verification times out
 			metrics.RecordSessionDestroyed(session.Provider, "ssh_verify_timeout")
 
-			// Record global offer failure for cross-session intelligence
+			// Record global offer failure and evict from cache for cross-session intelligence
 			if s.inventory != nil {
 				s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "ssh_timeout", "SSH verification timeout")
+				s.inventory.EvictOffer(session.OfferID)
 			}
 			return
 
@@ -963,9 +974,10 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 					s.failSession(ctx, session, failReason)
 					metrics.RecordSessionDestroyed(session.Provider, "instance_stopped")
 
-					// Record global offer failure for cross-session intelligence
+					// Record global offer failure and evict from cache for cross-session intelligence
 					if s.inventory != nil {
 						s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "instance_stopped", failReason)
+						s.inventory.EvictOffer(session.OfferID)
 					}
 					return
 				}
@@ -1057,13 +1069,23 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 							slog.String("error_type", lastErrorType),
 							slog.Int("consecutive_errors", consecutivePermanentErrors))
 
-						if session.ProviderID != "" {
-							if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
-								logger.Error("failed to destroy instance after permanent SSH error",
-									slog.String("error", err.Error()))
+						// Set FailedOffers BEFORE failSession so it's persisted atomically
+						if session.OfferID != "" {
+							if session.FailedOffers == "" {
+								session.FailedOffers = session.OfferID
+							} else if !strings.Contains(session.FailedOffers, session.OfferID) {
+								session.FailedOffers = session.FailedOffers + "," + session.OfferID
 							}
 						}
+
 						s.failSession(ctx, session, "permanent SSH error: "+lastErrorType)
+
+						// Record global offer failure and evict from cache
+						if s.inventory != nil {
+							s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "auth_failed", "permanent SSH error: "+lastErrorType)
+							s.inventory.EvictOffer(session.OfferID)
+						}
+
 						metrics.RecordSSHVerifyFailure()
 						metrics.RecordSessionDestroyed(session.Provider, "permanent_ssh_error")
 						return
@@ -1386,6 +1408,28 @@ func classifyInstanceStopReason(status, errorMsg string) string {
 
 // failSession marks a session as failed
 func (s *Service) failSession(ctx context.Context, session *models.Session, reason string) {
+	// Destroy provider instance if one exists (defensive — prevents orphans)
+	if session.ProviderID != "" {
+		if prov, err := s.providers.Get(session.Provider); err == nil {
+			if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+				// 404 is expected if caller already destroyed — only log other errors
+				if !errors.Is(err, provider.ErrInstanceNotFound) {
+					s.logger.Warn("failed to destroy instance during session failure",
+						slog.String("session_id", session.ID),
+						slog.String("provider_id", session.ProviderID),
+						slog.String("error", err.Error()))
+				}
+			} else {
+				s.logger.Info("AUDIT",
+					slog.Bool("audit", true),
+					slog.String("operation", "instance_destroyed_on_fail"),
+					slog.String("session_id", session.ID),
+					slog.String("provider_id", session.ProviderID),
+					slog.String("provider", session.Provider))
+			}
+		}
+	}
+
 	oldStatus := session.Status
 	session.Status = models.StatusFailed
 	session.Error = reason

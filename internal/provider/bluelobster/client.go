@@ -341,10 +341,26 @@ func (c *Client) ListAllInstances(ctx context.Context) (instances []provider.Pro
 		}
 
 		// BL-007: Blue Lobster doesn't persist metadata. Fall back to parsing
-		// the session ID from the instance name (format: "shopper-{session_id}").
+		// the session ID and deployment ID from the instance name.
+		// Name format: "shopper-{session_id}" or "shopper-{session_id}-deploy-{deployment_id}"
 		if tags.ShopperSessionID == "" {
 			if sessionID, ok := models.ParseLabel(vm.Name); ok {
-				tags.ShopperSessionID = sessionID
+				// Strip deployment ID suffix if present.
+				// Use LastIndex so session IDs containing "-deploy-" are handled correctly.
+				if idx := strings.LastIndex(sessionID, "-deploy-"); idx >= 0 {
+					tags.ShopperSessionID = sessionID[:idx]
+				} else {
+					tags.ShopperSessionID = sessionID
+				}
+			}
+		}
+
+		// BL-007: Parse deployment ID from name if not available from metadata.
+		// Format: "shopper-{session_id}-deploy-{deployment_id}"
+		// Use LastIndex so session IDs containing "-deploy-" are handled correctly.
+		if tags.ShopperDeploymentID == "" {
+			if idx := strings.LastIndex(vm.Name, "-deploy-"); idx >= 0 {
+				tags.ShopperDeploymentID = vm.Name[idx+len("-deploy-"):]
 			}
 		}
 
@@ -407,7 +423,19 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 
 	// Build the launch request
 	// Sanitize the name for Blue Lobster's regex: ^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$
+	// BL-007: Blue Lobster doesn't persist metadata, so encode the deployment ID
+	// in the instance name as "shopper-{session_id}-deploy-{deployment_id_prefix}"
+	// so ListAllInstances can parse it back out for reconciliation.
+	// Blue Lobster enforces a 64-char name limit. Base name is ~44 chars
+	// (shopper- + 36-char UUID), leaving 12 chars for "-deploy-" (8) + prefix (4).
 	name := sanitizeInstanceName(req.Tags.ToLabel())
+	if req.Tags.ShopperDeploymentID != "" {
+		depID := sanitizeInstanceName(req.Tags.ShopperDeploymentID)
+		if len(depID) > 8 {
+			depID = depID[:8]
+		}
+		name += "-deploy-" + depID
+	}
 
 	launchReq := LaunchInstanceRequest{
 		Region:       region,
@@ -534,6 +562,14 @@ func (c *Client) DestroyInstance(ctx context.Context, instanceID string) (err er
 	}
 
 	if err = c.doRequest(ctx, http.MethodDelete, "/instances/"+instanceID, nil, nil); err != nil {
+		// 404 means instance is already gone — treat as success
+		if provider.IsNotFoundError(err) {
+			c.logger.Info("instance already gone (404 on destroy)",
+				slog.String("provider", "bluelobster"),
+				slog.String("instance_id", instanceID),
+			)
+			return nil
+		}
 		return fmt.Errorf("bluelobster: DestroyInstance: %w", err)
 	}
 

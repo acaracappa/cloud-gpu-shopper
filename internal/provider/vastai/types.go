@@ -151,6 +151,7 @@ func (b Bundle) ToGPUOffer() models.GPUOffer {
 		// Vast.ai inventory is generally reliable
 		AvailabilityConfidence: VastAIAvailabilityConfidence,
 		CUDAVersion:            b.CudaMaxGood,
+		MachineID:              fmt.Sprintf("vastai-machine-%d", b.MachineID),
 	}
 }
 
