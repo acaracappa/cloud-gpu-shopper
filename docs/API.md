@@ -1,3 +1,17 @@
+---
+type: reference
+title: API Documentation
+created: 2026-02-02
+tags:
+  - api
+  - reference
+  - endpoints
+related:
+  - "[[CONFIGURATION]]"
+  - "[[WORKFLOWS]]"
+  - "[[TROUBLESHOOTING]]"
+---
+
 # Cloud GPU Shopper API Documentation
 
 Base URL: `http://localhost:8080`
@@ -6,23 +20,59 @@ Base URL: `http://localhost:8080`
 
 Currently, the API does not require authentication. Agent endpoints use session-specific tokens passed in the request body.
 
+For configuration details, see [[CONFIGURATION]]. For usage examples, see [[WORKFLOWS]].
+
 ---
 
 ## Health & Metrics
 
 ### GET /health
 
-Health check endpoint.
+Health check endpoint. Returns 503 during startup sweep.
 
-**Response**
+**Response** (200 OK)
 ```json
 {
   "status": "ok",
   "timestamp": "2026-01-29T12:00:00Z",
   "services": {
     "lifecycle": "running",
-    "inventory": "ok"
+    "inventory": "ok",
+    "ready": "true"
   }
+}
+```
+
+**Response** (503 Service Unavailable - during startup)
+```json
+{
+  "status": "unavailable",
+  "timestamp": "2026-01-29T12:00:00Z",
+  "services": {
+    "lifecycle": "stopped",
+    "inventory": "ok",
+    "ready": "false"
+  }
+}
+```
+
+### GET /ready
+
+Simple readiness check endpoint.
+
+**Response** (200 OK)
+```json
+{
+  "ready": true,
+  "timestamp": "2026-01-29T12:00:00Z"
+}
+```
+
+**Response** (503 Service Unavailable)
+```json
+{
+  "ready": false,
+  "timestamp": "2026-01-29T12:00:00Z"
 }
 ```
 
@@ -51,9 +101,15 @@ List available GPU offers from all providers.
 |-----------|------|-------------|
 | provider | string | Filter by provider ("vastai", "tensordock") |
 | gpu_type | string | Filter by GPU type (e.g., "RTX 4090", "A100") |
+| location | string | Filter by location |
 | min_vram | int | Minimum VRAM in GB |
 | max_price | float | Maximum price per hour in USD |
 | min_gpu_count | int | Minimum number of GPUs |
+| gpu_count | int | Alias for min_gpu_count |
+| min_reliability | float | Minimum reliability score (0-1) |
+| min_availability_confidence | float | Minimum availability confidence (0-1) |
+| limit | int | Maximum number of results (must be positive) |
+| offset | int | Number of results to skip (for pagination) |
 
 **Response**
 ```json
@@ -74,7 +130,8 @@ List available GPU offers from all providers.
       "fetched_at": "2026-01-29T12:00:00Z"
     }
   ],
-  "count": 1
+  "count": 1,
+  "total": 150
 }
 ```
 
@@ -131,6 +188,11 @@ Create a new GPU session.
 | reservation_hours | int | Yes | Duration in hours (1-12) |
 | idle_threshold_minutes | int | No | Auto-shutdown after idle time (0 = disabled) |
 | storage_policy | string | No | "preserve" or "destroy" (default: "destroy") |
+| launch_mode | string | No | "ssh" or "entrypoint" (default: "ssh") |
+| docker_image | string | No | Custom Docker image (for entrypoint mode) |
+| model_id | string | No | HuggingFace model ID (for vLLM/TGI workloads) |
+| exposed_ports | array | No | Ports to expose (e.g., [8000]) |
+| quantization | string | No | Quantization method (e.g., "awq", "gptq") |
 
 **Response** (201 Created)
 ```json
@@ -166,6 +228,7 @@ List sessions.
 |-----------|------|-------------|
 | consumer_id | string | Filter by consumer |
 | status | string | Filter by status |
+| provider | string | Filter by provider ("vastai", "tensordock") |
 | limit | int | Maximum results |
 
 **Response**
@@ -253,6 +316,39 @@ Force destroy a session immediately.
   "session_id": "sess-abc123"
 }
 ```
+
+**Errors**
+- `404 Not Found` - Session not found
+
+### GET /api/v1/sessions/:id/diagnostics
+
+Get diagnostic information for a running session.
+
+**Response** (200 OK)
+```json
+{
+  "session_id": "sess-abc123",
+  "status": "running",
+  "provider": "vastai",
+  "gpu_type": "RTX 4090",
+  "gpu_count": 1,
+  "ssh_host": "192.168.1.100",
+  "ssh_port": 22,
+  "ssh_user": "root",
+  "launch_mode": "ssh",
+  "api_endpoint": "",
+  "created_at": "2026-01-29T12:00:00Z",
+  "expires_at": "2026-01-29T14:00:00Z",
+  "uptime": "1h 30m",
+  "time_to_expiry": "30m",
+  "ssh_available": true,
+  "note": "Full SSH diagnostics require client-side SSH access."
+}
+```
+
+**Errors**
+- `400 Bad Request` - Session is not running
+- `404 Not Found` - Session not found
 
 ---
 
@@ -342,5 +438,39 @@ Common HTTP status codes:
 - `400 Bad Request` - Invalid request body or parameters
 - `401 Unauthorized` - Invalid authentication
 - `404 Not Found` - Resource not found
+- `409 Conflict` - Operation conflicts with current state (e.g., extending a stopped session)
 - `500 Internal Server Error` - Server error
+- `503 Service Unavailable` - Server not ready or offer no longer available (stale inventory)
 
+---
+
+## Stale Inventory Errors
+
+When provisioning fails due to stale inventory data (offer no longer available), the API returns a structured error:
+
+**Response** (503 Service Unavailable)
+```json
+{
+  "error": "offer unavailable due to stale inventory",
+  "error_type": "stale_inventory",
+  "offer_id": "vastai-12345",
+  "provider": "vastai",
+  "retry_suggested": true,
+  "message": "The selected offer is no longer available. Please refresh inventory and select a different offer.",
+  "request_id": "uuid-of-request"
+}
+```
+
+When you receive this error:
+1. Refresh the inventory list
+2. Select a different offer
+3. Retry the provision request
+
+---
+
+## Related Documentation
+
+- [[CONFIGURATION]] - Environment variables and configuration options
+- [[WORKFLOWS]] - Common usage patterns and examples
+- [[PROVIDERS]] - Provider-specific information
+- [[TROUBLESHOOTING]] - Common issues and solutions
