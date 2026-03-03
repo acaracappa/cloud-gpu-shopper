@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	sshverify "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/ssh"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/provider"
+	sshverify "github.com/cloud-gpu-shopper/cloud-gpu-shopper/internal/ssh"
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
 
