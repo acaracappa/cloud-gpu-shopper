@@ -3,6 +3,7 @@ package provisioner
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/cloud-gpu-shopper/cloud-gpu-shopper/pkg/models"
 )
@@ -93,4 +94,103 @@ func (e *InsufficientDiskError) Error() string {
 func IsRetryableWithDifferentOffer(err error) bool {
 	var staleErr *StaleInventoryError
 	return errors.As(err, &staleErr)
+}
+
+// classifySSHError categorizes SSH connection errors for logging.
+// Returns: error_type (connection_refused, timeout, auth_failed, etc.)
+func classifySSHError(err error) string {
+	if err == nil {
+		return "none"
+	}
+
+	errStr := err.Error()
+
+	if strings.Contains(errStr, "connection refused") {
+		return "connection_refused"
+	}
+
+	if strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "connection timed out") ||
+		strings.Contains(errStr, "deadline exceeded") {
+		return "timeout"
+	}
+
+	if strings.Contains(errStr, "no route to host") ||
+		strings.Contains(errStr, "network is unreachable") {
+		return "network_unreachable"
+	}
+
+	if strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "lookup") {
+		return "dns_failed"
+	}
+
+	if strings.Contains(errStr, "SSH handshake failed") ||
+		strings.Contains(errStr, "unable to authenticate") ||
+		strings.Contains(errStr, "permission denied") {
+		return "auth_failed"
+	}
+
+	if strings.Contains(errStr, "failed to parse private key") {
+		return "key_parse_failed"
+	}
+
+	if strings.Contains(errStr, "failed to create session") ||
+		strings.Contains(errStr, "verify command failed") {
+		return "command_failed"
+	}
+
+	if strings.Contains(errStr, "unexpected packet") {
+		return "connection_closed"
+	}
+
+	if strings.Contains(errStr, "EOF") {
+		return "connection_closed"
+	}
+
+	return "unknown"
+}
+
+// classifyInstanceStopReason provides a more descriptive failure reason based on
+// the instance status and error message from the provider.
+func classifyInstanceStopReason(status, errorMsg string) string {
+	base := fmt.Sprintf("instance stopped unexpectedly: %s", status)
+
+	if errorMsg != "" {
+		base += fmt.Sprintf(" (%s)", errorMsg)
+	}
+
+	lower := strings.ToLower(status + " " + errorMsg)
+	switch {
+	case strings.Contains(lower, "loading"):
+		base += " — likely cause: image pull failed, disk full, or driver incompatibility"
+	case strings.Contains(lower, "error"):
+		base += " — likely cause: runtime crash, OOM, or configuration error"
+	case strings.Contains(lower, "exited"):
+		base += " — likely cause: entrypoint failed or OOM kill"
+	}
+
+	return base
+}
+
+// ClassifyProvisionError categorizes provisioning errors for consumer apps.
+// Returns an error type string and whether the consumer should retry.
+func ClassifyProvisionError(err error) (errorType string, retrySuggested bool) {
+	if err == nil {
+		return "none", false
+	}
+	msg := strings.ToLower(err.Error())
+
+	switch {
+	case strings.Contains(msg, "ssh") || strings.Contains(msg, "timeout"):
+		return "ssh_timeout", true
+	case strings.Contains(msg, "stopped") || strings.Contains(msg, "terminated"):
+		return "instance_stopped", true
+	case strings.Contains(msg, "connection refused"):
+		return "provider_unavailable", true
+	case strings.Contains(msg, "not found") || strings.Contains(msg, "invalid"):
+		return "invalid_request", false
+	default:
+		return "provision_failed", true
+	}
 }

@@ -609,12 +609,15 @@ func (s *Service) EvictOffer(offerID string) {
 
 // RecordOfferFailure records a provisioning failure for global offer health tracking.
 // Called by the provisioner when an offer fails at any stage.
-func (s *Service) RecordOfferFailure(offerID, providerName, gpuType, failureType, reason string) {
-	s.failureTracker.RecordFailure(offerID, providerName, gpuType, FailureType(failureType), reason)
+// machineID is the physical host identifier; pass "" if unknown (the tracker will
+// use a previously recorded machineID for that offer if available).
+func (s *Service) RecordOfferFailure(offerID, providerName, gpuType, machineID, failureType, reason string) {
+	s.failureTracker.RecordFailure(offerID, providerName, gpuType, machineID, FailureType(failureType), reason)
 	s.logger.Warn("offer failure recorded",
 		slog.String("offer_id", offerID),
 		slog.String("provider", providerName),
 		slog.String("gpu_type", gpuType),
+		slog.String("machine_id", machineID),
 		slog.String("failure_type", failureType),
 		slog.String("reason", reason))
 	metrics.RecordOfferFailure(providerName, gpuType, failureType)
@@ -693,6 +696,10 @@ func (s *Service) FindComparableOffers(ctx context.Context, original *models.GPU
 		}
 		// Skip suppressed offers (global failure tracking)
 		if s.failureTracker.IsSuppressed(offer.ID) {
+			continue
+		}
+		// Skip offers on blacklisted machines
+		if offer.MachineID != "" && s.failureTracker.IsMachineSuppressed(offer.Provider, offer.MachineID) {
 			continue
 		}
 		candidates = append(candidates, offer)
