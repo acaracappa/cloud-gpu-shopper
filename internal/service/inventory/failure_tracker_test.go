@@ -17,7 +17,7 @@ func TestNoFailures_MultiplierIsOne(t *testing.T) {
 
 func TestSingleFailure_MultiplierDegrades(t *testing.T) {
 	tracker := NewOfferFailureTracker()
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "not available")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "not available")
 
 	m := tracker.GetConfidenceMultiplier("offer-1", "RTX 4090", "vastai")
 	expected := 0.7
@@ -28,8 +28,8 @@ func TestSingleFailure_MultiplierDegrades(t *testing.T) {
 
 func TestTwoFailures_MultiplierDegradesFurther(t *testing.T) {
 	tracker := NewOfferFailureTracker()
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "not available")
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "still not available")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "not available")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "still not available")
 
 	m := tracker.GetConfidenceMultiplier("offer-1", "RTX 4090", "vastai")
 	expected := 0.49 // 0.7^2
@@ -40,9 +40,9 @@ func TestTwoFailures_MultiplierDegradesFurther(t *testing.T) {
 
 func TestThreeFailures_OfferSuppressed(t *testing.T) {
 	tracker := NewOfferFailureTracker()
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "fail 1")
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "fail 2")
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "fail 3")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "fail 1")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "fail 2")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "fail 3")
 
 	if !tracker.IsSuppressed("offer-1") {
 		t.Error("expected offer to be suppressed after 3 failures")
@@ -95,7 +95,7 @@ func TestFailuresDecayAfterPeriod(t *testing.T) {
 	tracker.mu.Unlock()
 
 	// Trigger cleanup via a new failure on a different offer
-	tracker.RecordFailure("offer-2", "vastai", "RTX 3090", "", FailureStaleInventory, "new fail")
+	tracker.RecordFailure("offer-2", "vastai", "RTX 3090", FailureStaleInventory, "new fail")
 
 	m := tracker.GetConfidenceMultiplier("offer-1", "RTX 4090", "vastai")
 	if m != 1.0 {
@@ -107,9 +107,9 @@ func TestGPUTypeAggregation_ThreeDistinctOffersFail(t *testing.T) {
 	tracker := NewOfferFailureTracker()
 
 	// Three different RTX 5080 offers fail
-	tracker.RecordFailure("offer-a", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
-	tracker.RecordFailure("offer-b", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
-	tracker.RecordFailure("offer-c", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-a", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-b", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-c", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
 
 	// A fourth RTX 5080 offer that hasn't failed should still be degraded
 	m := tracker.GetConfidenceMultiplier("offer-d", "RTX 5080", "vastai")
@@ -122,9 +122,9 @@ func TestGPUTypeAggregation_ThreeDistinctOffersFail(t *testing.T) {
 func TestGPUTypeDegradation_AppliesToNonFailedOffer(t *testing.T) {
 	tracker := NewOfferFailureTracker()
 
-	tracker.RecordFailure("offer-1", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
-	tracker.RecordFailure("offer-2", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
-	tracker.RecordFailure("offer-3", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-2", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-3", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
 
 	// offer-99 has never failed, but all RTX 5080 are degraded
 	m := tracker.GetConfidenceMultiplier("offer-99", "RTX 5080", "vastai")
@@ -143,9 +143,9 @@ func TestCombinedOfferAndGPUTypeDegradation(t *testing.T) {
 	tracker := NewOfferFailureTracker()
 
 	// Three different offers fail → GPU-type degraded (0.3)
-	tracker.RecordFailure("offer-a", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
-	tracker.RecordFailure("offer-b", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
-	tracker.RecordFailure("offer-c", "vastai", "RTX 5080", "", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-a", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-b", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-c", "vastai", "RTX 5080", FailureInstanceStopped, "stopped")
 
 	// offer-a also has its own per-offer degradation (1 failure → 0.7)
 	// Combined: 0.7 × 0.3 = 0.21
@@ -165,8 +165,8 @@ func TestIsSuppressed_ReturnsFalseForUnknown(t *testing.T) {
 
 func TestGetAllHealth_ReturnsStructuredData(t *testing.T) {
 	tracker := NewOfferFailureTracker()
-	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", "", FailureStaleInventory, "not available")
-	tracker.RecordFailure("offer-2", "tensordock", "H100 SXM5", "", FailureInstanceStopped, "stopped")
+	tracker.RecordFailure("offer-1", "vastai", "RTX 4090", FailureStaleInventory, "not available")
+	tracker.RecordFailure("offer-2", "tensordock", "H100 SXM5", FailureInstanceStopped, "stopped")
 
 	offers, gpuTypes := tracker.GetAllHealth()
 
@@ -208,7 +208,7 @@ func TestConcurrentAccess(t *testing.T) {
 			if i%2 == 0 {
 				offerID = "offer-concurrent-2"
 			}
-			tracker.RecordFailure(offerID, "vastai", "RTX 4090", "", FailureStaleInventory, "concurrent fail")
+			tracker.RecordFailure(offerID, "vastai", "RTX 4090", FailureStaleInventory, "concurrent fail")
 		}(i)
 	}
 
@@ -247,7 +247,7 @@ func TestCleanupRemovesExpiredRecords(t *testing.T) {
 	tracker.mu.Unlock()
 
 	// Trigger cleanup via RecordFailure
-	tracker.RecordFailure("new-offer", "tensordock", "RTX 4090", "", FailureStaleInventory, "new")
+	tracker.RecordFailure("new-offer", "tensordock", "RTX 4090", FailureStaleInventory, "new")
 
 	tracker.mu.RLock()
 	defer tracker.mu.RUnlock()
@@ -447,106 +447,5 @@ func TestLoadFromStore_ExpiredSuppressionIgnored(t *testing.T) {
 
 	if tracker.IsSuppressed("expired-offer") {
 		t.Error("expected expired suppression to be cleared after loading from store")
-	}
-}
-
-func TestMachineBlacklisting_TwoFailuresOnSameMachine(t *testing.T) {
-	tracker := NewOfferFailureTracker()
-
-	// Two different offers on the same machine fail
-	tracker.RecordFailure("offer-a", "vastai", "RTX 4090", "machine-123", FailureSSHTimeout, "timeout")
-	tracker.RecordFailure("offer-b", "vastai", "RTX 4090", "machine-123", FailureSSHAuth, "auth failed")
-
-	if !tracker.IsMachineSuppressed("vastai", "machine-123") {
-		t.Error("expected machine to be blacklisted after 2 failures")
-	}
-
-	// Offer on the blacklisted machine should be suppressed
-	if !tracker.IsSuppressed("offer-a") {
-		t.Error("expected offer on blacklisted machine to be suppressed")
-	}
-
-	// Confidence multiplier should be 0
-	m := tracker.GetConfidenceMultiplier("offer-a", "RTX 4090", "vastai")
-	if m != 0.0 {
-		t.Errorf("expected 0.0 confidence for offer on blacklisted machine, got %f", m)
-	}
-}
-
-func TestMachineBlacklisting_HardwareIssueImmediateBlacklist(t *testing.T) {
-	tracker := NewOfferFailureTracker()
-
-	// A single hardware issue immediately blacklists the machine
-	tracker.RecordFailure("offer-hw", "vastai", "RTX 4090", "machine-bad", FailureHardwareIssue, "XID error 79")
-
-	if !tracker.IsMachineSuppressed("vastai", "machine-bad") {
-		t.Error("expected machine to be blacklisted after hardware issue")
-	}
-}
-
-func TestMachineBlacklisting_NoBlacklistWithoutMachineID(t *testing.T) {
-	tracker := NewOfferFailureTracker()
-
-	// Failures without machineID should not trigger machine blacklisting
-	tracker.RecordFailure("offer-x", "vastai", "RTX 4090", "", FailureSSHTimeout, "timeout")
-	tracker.RecordFailure("offer-y", "vastai", "RTX 4090", "", FailureSSHAuth, "auth failed")
-
-	if tracker.IsMachineSuppressed("vastai", "") {
-		t.Error("expected no machine blacklisting without machine ID")
-	}
-}
-
-func TestMachineBlacklisting_ResolveMachineIDFromRecord(t *testing.T) {
-	tracker := NewOfferFailureTracker()
-
-	// First call with machineID records the association
-	tracker.RecordFailure("offer-r", "vastai", "RTX 4090", "machine-456", FailureSSHTimeout, "timeout")
-
-	// Second call without machineID should resolve from existing record
-	tracker.RecordFailure("offer-r", "vastai", "RTX 4090", "", FailureSSHAuth, "auth failed")
-
-	// Machine should be blacklisted (2 failures resolved to same machine)
-	if !tracker.IsMachineSuppressed("vastai", "machine-456") {
-		t.Error("expected machine to be blacklisted via resolved machineID")
-	}
-}
-
-func TestMachineBlacklisting_DifferentMachinesSeparate(t *testing.T) {
-	tracker := NewOfferFailureTracker()
-
-	// One failure on machine-1, one on machine-2 — neither should be blacklisted
-	tracker.RecordFailure("offer-m1", "vastai", "RTX 4090", "machine-1", FailureSSHTimeout, "timeout")
-	tracker.RecordFailure("offer-m2", "vastai", "RTX 4090", "machine-2", FailureSSHTimeout, "timeout")
-
-	if tracker.IsMachineSuppressed("vastai", "machine-1") {
-		t.Error("machine-1 should not be blacklisted with only 1 failure")
-	}
-	if tracker.IsMachineSuppressed("vastai", "machine-2") {
-		t.Error("machine-2 should not be blacklisted with only 1 failure")
-	}
-}
-
-func TestMachineBlacklisting_CleanupExpiresMachineRecords(t *testing.T) {
-	tracker := NewOfferFailureTracker()
-
-	// Inject a machine with expired suppression
-	tracker.mu.Lock()
-	tracker.machines["vastai:machine-old"] = &machineRecord{
-		Provider: "vastai",
-		Failures: []failureEvent{
-			{Type: FailureSSHTimeout, Timestamp: time.Now().Add(-2 * FailureDecayPeriod), Reason: "old"},
-		},
-		SuppressedAt: time.Now().Add(-MachineSuppressionCooldown - time.Minute),
-	}
-	tracker.mu.Unlock()
-
-	// Trigger cleanup
-	tracker.RecordFailure("trigger-offer", "tensordock", "RTX 3090", "", FailureStaleInventory, "trigger")
-
-	tracker.mu.RLock()
-	defer tracker.mu.RUnlock()
-
-	if _, exists := tracker.machines["vastai:machine-old"]; exists {
-		t.Error("expected expired machine record to be cleaned up")
 	}
 }

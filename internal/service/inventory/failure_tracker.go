@@ -15,8 +15,6 @@ const (
 	FailureStaleInventory  FailureType = "stale_inventory"
 	FailureInstanceStopped FailureType = "instance_stopped"
 	FailureSSHTimeout      FailureType = "ssh_timeout"
-	FailureSSHAuth         FailureType = "ssh_auth"
-	FailureHardwareIssue   FailureType = "hardware_issue"
 	FailureUnknown         FailureType = "unknown"
 )
 
@@ -25,22 +23,11 @@ const (
 	// before an offer is suppressed from results
 	SuppressionThreshold = 3
 
-	// MachineSuppressionThreshold is the number of failures on a single machine
-	// (across different offers) before the machine is blacklisted
-	MachineSuppressionThreshold = 2
-
-	// HardwareIssueSuppressionThreshold: a single confirmed hardware issue
-	// (e.g., dmesg XID error) triggers immediate machine blacklisting
-	HardwareIssueSuppressionThreshold = 1
-
 	// SuppressionWindow is the time window for counting failures toward suppression
 	SuppressionWindow = 30 * time.Minute
 
 	// SuppressionCooldown is how long a suppressed offer stays hidden
 	SuppressionCooldown = 30 * time.Minute
-
-	// MachineSuppressionCooldown is how long a blacklisted machine stays hidden
-	MachineSuppressionCooldown = 24 * time.Hour
 
 	// FailureDecayPeriod is how long failure events are retained before cleanup
 	FailureDecayPeriod = 1 * time.Hour
@@ -67,7 +54,6 @@ type OfferFailureTracker struct {
 	mu       sync.RWMutex
 	offers   map[string]*offerFailureRecord // keyed by offer ID
 	gpuTypes map[string]*gpuTypeRecord      // keyed by "provider:GPUType"
-	machines map[string]*machineRecord      // keyed by "provider:machineID"
 
 	// Optional persistent storage (nil = in-memory only)
 	store  FailureStore
@@ -77,15 +63,8 @@ type OfferFailureTracker struct {
 type offerFailureRecord struct {
 	Provider     string
 	GPUType      string
-	MachineID    string
 	Failures     []failureEvent
 	SuppressedAt time.Time // zero if not suppressed
-}
-
-type machineRecord struct {
-	Provider     string
-	Failures     []failureEvent
-	SuppressedAt time.Time
 }
 
 type failureEvent struct {
@@ -126,7 +105,6 @@ func NewOfferFailureTracker() *OfferFailureTracker {
 	return &OfferFailureTracker{
 		offers:   make(map[string]*offerFailureRecord),
 		gpuTypes: make(map[string]*gpuTypeRecord),
-		machines: make(map[string]*machineRecord),
 		logger:   slog.Default(),
 	}
 }
@@ -222,8 +200,8 @@ type StoredSuppression struct {
 	SuppressedAt time.Time
 }
 
-// RecordFailure records a provisioning failure for an offer and optionally its machine
-func (t *OfferFailureTracker) RecordFailure(offerID, providerName, gpuType, machineID string, failureType FailureType, reason string) {
+// RecordFailure records a provisioning failure for an offer
+func (t *OfferFailureTracker) RecordFailure(offerID, providerName, gpuType string, failureType FailureType, reason string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -233,63 +211,18 @@ func (t *OfferFailureTracker) RecordFailure(offerID, providerName, gpuType, mach
 	record, exists := t.offers[offerID]
 	if !exists {
 		record = &offerFailureRecord{
-			Provider:  providerName,
-			GPUType:   gpuType,
-			MachineID: machineID,
+			Provider: providerName,
+			GPUType:  gpuType,
 		}
 		t.offers[offerID] = record
 	}
-	if record.MachineID == "" && machineID != "" {
-		record.MachineID = machineID
-	}
 
-	event := failureEvent{
+	// Append failure event
+	record.Failures = append(record.Failures, failureEvent{
 		Type:      failureType,
 		Timestamp: now,
 		Reason:    reason,
-	}
-
-	// Append failure event
-	record.Failures = append(record.Failures, event)
-
-	// Resolve machineID from existing record if caller didn't provide one
-	if machineID == "" && record.MachineID != "" {
-		machineID = record.MachineID
-	}
-
-	// Track machine-level failures
-	if machineID != "" {
-		machineKey := providerName + ":" + machineID
-		mRec, exists := t.machines[machineKey]
-		if !exists {
-			mRec = &machineRecord{Provider: providerName}
-			t.machines[machineKey] = mRec
-		}
-		mRec.Failures = append(mRec.Failures, event)
-
-		// Check machine suppression thresholds
-		hwFailures := 0
-		recentFailures := 0
-		cutoff := now.Add(-SuppressionWindow)
-		for _, f := range mRec.Failures {
-			if f.Type == FailureHardwareIssue {
-				hwFailures++
-			}
-			if f.Timestamp.After(cutoff) {
-				recentFailures++
-			}
-		}
-
-		if mRec.SuppressedAt.IsZero() &&
-			(hwFailures >= HardwareIssueSuppressionThreshold || recentFailures >= MachineSuppressionThreshold) {
-			mRec.SuppressedAt = now
-			t.logger.Warn("machine blacklisted",
-				slog.String("machine_id", machineID),
-				slog.String("provider", providerName),
-				slog.Int("recent_failures", recentFailures),
-				slog.Int("hw_failures", hwFailures))
-		}
-	}
+	})
 
 	// Check suppression threshold: count failures within SuppressionWindow
 	recentCount := 0
@@ -350,18 +283,10 @@ func (t *OfferFailureTracker) GetConfidenceMultiplier(offerID, gpuType, provider
 
 	now := time.Now()
 
-	// Check if offer or its machine is suppressed
+	// Check if offer is suppressed
 	if record, exists := t.offers[offerID]; exists {
 		if !record.SuppressedAt.IsZero() && now.Before(record.SuppressedAt.Add(SuppressionCooldown)) {
 			return 0.0
-		}
-		if record.MachineID != "" {
-			machineKey := providerName + ":" + record.MachineID
-			if mRec, mExists := t.machines[machineKey]; mExists {
-				if !mRec.SuppressedAt.IsZero() && now.Before(mRec.SuppressedAt.Add(MachineSuppressionCooldown)) {
-					return 0.0
-				}
-			}
 		}
 	}
 
@@ -398,7 +323,7 @@ func (t *OfferFailureTracker) GetConfidenceMultiplier(offerID, gpuType, provider
 	return result
 }
 
-// IsSuppressed returns true if the offer or its machine is currently suppressed
+// IsSuppressed returns true if the offer is currently suppressed
 func (t *OfferFailureTracker) IsSuppressed(offerID string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -408,44 +333,12 @@ func (t *OfferFailureTracker) IsSuppressed(offerID string) bool {
 		return false
 	}
 
-	now := time.Now()
-
-	// Check machine-level suppression
-	if record.MachineID != "" {
-		machineKey := record.Provider + ":" + record.MachineID
-		if mRec, mExists := t.machines[machineKey]; mExists {
-			if !mRec.SuppressedAt.IsZero() && now.Before(mRec.SuppressedAt.Add(MachineSuppressionCooldown)) {
-				return true
-			}
-		}
-	}
-
 	if record.SuppressedAt.IsZero() {
 		return false
 	}
 
+	now := time.Now()
 	return now.Before(record.SuppressedAt.Add(SuppressionCooldown))
-}
-
-// IsMachineSuppressed returns true if the machine is currently blacklisted
-func (t *OfferFailureTracker) IsMachineSuppressed(providerName, machineID string) bool {
-	if machineID == "" {
-		return false
-	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	machineKey := providerName + ":" + machineID
-	mRec, exists := t.machines[machineKey]
-	if !exists {
-		return false
-	}
-
-	if mRec.SuppressedAt.IsZero() {
-		return false
-	}
-
-	return time.Now().Before(mRec.SuppressedAt.Add(MachineSuppressionCooldown))
 }
 
 // GetAllHealth returns structured health data for all tracked offers
@@ -533,18 +426,10 @@ func (t *OfferFailureTracker) countRecentFailuresLocked(record *offerFailureReco
 // getConfidenceMultiplierLocked calculates the multiplier without acquiring the lock.
 // Must be called with at least a read lock held.
 func (t *OfferFailureTracker) getConfidenceMultiplierLocked(offerID, gpuType, providerName string, now time.Time) float64 {
-	// Check offer and machine suppression
+	// Check suppression
 	if record, exists := t.offers[offerID]; exists {
 		if !record.SuppressedAt.IsZero() && now.Before(record.SuppressedAt.Add(SuppressionCooldown)) {
 			return 0.0
-		}
-		if record.MachineID != "" {
-			machineKey := providerName + ":" + record.MachineID
-			if mRec, mExists := t.machines[machineKey]; mExists {
-				if !mRec.SuppressedAt.IsZero() && now.Before(mRec.SuppressedAt.Add(MachineSuppressionCooldown)) {
-					return 0.0
-				}
-			}
 		}
 	}
 
@@ -604,25 +489,6 @@ func (t *OfferFailureTracker) cleanupLocked(now time.Time) {
 		// Remove record if no failures and not suppressed
 		if len(record.Failures) == 0 && record.SuppressedAt.IsZero() {
 			delete(t.offers, offerID)
-		}
-	}
-
-	// Clean up machine records
-	for machineKey, mRec := range t.machines {
-		var kept []failureEvent
-		for _, f := range mRec.Failures {
-			if f.Timestamp.After(decayCutoff) {
-				kept = append(kept, f)
-			}
-		}
-		mRec.Failures = kept
-
-		if !mRec.SuppressedAt.IsZero() && now.After(mRec.SuppressedAt.Add(MachineSuppressionCooldown)) {
-			mRec.SuppressedAt = time.Time{}
-		}
-
-		if len(mRec.Failures) == 0 && mRec.SuppressedAt.IsZero() {
-			delete(t.machines, machineKey)
 		}
 	}
 

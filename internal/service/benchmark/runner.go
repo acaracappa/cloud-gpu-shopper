@@ -609,7 +609,7 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 					slog.String("entry_id", entry.ID),
 					slog.String("error", err.Error()))
 			}
-			r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, offer.MachineID, "ssh_timeout", "benchmark SSH wait timeout")
+			r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "ssh_timeout", "benchmark SSH wait timeout")
 			r.cleanupSession(ctx, session.ID)
 			return false, true, offer.MachineID
 		case <-ticker.C:
@@ -623,7 +623,7 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 						slog.String("entry_id", entry.ID),
 						slog.String("error", err.Error()))
 				}
-				r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, offer.MachineID, "session_failed", s.Error)
+				r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "session_failed", s.Error)
 				r.cleanupSession(ctx, session.ID)
 				return false, true, offer.MachineID
 			}
@@ -645,7 +645,7 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 				slog.String("entry_id", entry.ID),
 				slog.String("error", markErr.Error()))
 		}
-		r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, offer.MachineID, "readiness_timeout", "system not ready: "+err.Error())
+		r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "readiness_timeout", "system not ready: "+err.Error())
 		r.cleanupSession(ctx, session.ID)
 		return false, true, offer.MachineID
 	}
@@ -700,7 +700,7 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 				slog.String("entry_id", entry.ID),
 				slog.String("error", markErr.Error()))
 		}
-		r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, offer.MachineID, "deploy_failed", "script upload failed: "+uploadErr.Error())
+		r.reportOfferFailure(offer.ID, entry.Provider, entry.GPUType, "deploy_failed", "script upload failed: "+uploadErr.Error())
 		r.cleanupSession(ctx, session.ID)
 		return false, true, offer.MachineID
 	}
@@ -838,11 +838,11 @@ resultsCollected:
 
 // reportOfferFailure records a post-provisioning failure to the global tracker
 // and evicts the offer from cache so other concurrent entries avoid it.
-func (r *Runner) reportOfferFailure(offerID, provider, gpuType, machineID, failureType, reason string) {
+func (r *Runner) reportOfferFailure(offerID, provider, gpuType, failureType, reason string) {
 	if offerID == "" {
 		return
 	}
-	r.inventory.RecordOfferFailure(offerID, provider, gpuType, machineID, failureType, reason)
+	r.inventory.RecordOfferFailure(offerID, provider, gpuType, failureType, reason)
 	r.inventory.EvictOffer(offerID)
 }
 
