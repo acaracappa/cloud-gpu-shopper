@@ -356,6 +356,16 @@ func (r *Reconciler) handleGhost(ctx context.Context, session *models.Session) {
 		return
 	}
 
+	// Grace period: don't mark young sessions as ghosts — the provider API
+	// may not yet list them (pagination lag, eventual consistency).
+	const ghostGracePeriod = 10 * time.Minute
+	if r.now().Sub(session.CreatedAt) < ghostGracePeriod {
+		r.logger.Debug("skipping ghost check for young session",
+			slog.String("session_id", session.ID),
+			slog.Duration("age", r.now().Sub(session.CreatedAt)))
+		return
+	}
+
 	r.logger.Warn("GHOST DETECTED: Session in DB but instance not on provider",
 		slog.String("session_id", session.ID),
 		slog.String("provider_id", session.ProviderID),

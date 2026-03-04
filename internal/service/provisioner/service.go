@@ -1143,9 +1143,33 @@ func (s *Service) DestroySession(ctx context.Context, sessionID string) error {
 
 	// Check for terminal OR stopping state (another destroy may have started)
 	if session.IsTerminal() || session.Status == models.StatusStopping {
-		s.logger.Debug("session already terminal or stopping, skipping destroy",
-			slog.String("session_id", sessionID),
-			slog.String("status", string(session.Status)))
+		// If a failed session still has a provider ID, the initial destroy may
+		// not have reached the provider. Attempt provider-side cleanup and
+		// transition to stopped so checkFailedDestroys doesn't loop forever.
+		if session.Status == models.StatusFailed && session.ProviderID != "" {
+			s.logger.Info("failed session has provider ID, attempting provider cleanup",
+				slog.String("session_id", sessionID),
+				slog.String("provider_id", session.ProviderID))
+
+			if prov, err := s.providers.Get(session.Provider); err == nil {
+				if err := prov.DestroyInstance(ctx, session.ProviderID); err != nil {
+					s.logger.Warn("provider cleanup failed for failed session",
+						slog.String("session_id", sessionID),
+						slog.String("error", err.Error()))
+				}
+			}
+
+			// Clear provider ID and move to stopped so this session
+			// is not re-processed by checkFailedDestroys.
+			session.ProviderID = ""
+			session.Status = models.StatusStopped
+			session.StoppedAt = s.now()
+			if err := s.store.Update(ctx, session); err != nil {
+				s.logger.Error("failed to update session after cleanup",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()))
+			}
+		}
 		return nil // Already terminated or being terminated
 	}
 

@@ -266,7 +266,7 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 		apiKey:         apiKey,
 		baseURL:        defaultBaseURL,
 		httpClient:     &http.Client{Timeout: defaultTimeout},
-		limiter:        rate.NewLimiter(rate.Limit(2), 3),                // 2 req/s, burst 3
+		limiter:        rate.NewLimiter(rate.Limit(1), 2),                // 1 req/s, burst 2 (Vast.ai 429 threshold is ~2 req/s)
 		circuitBreaker: newCircuitBreaker(DefaultCircuitBreakerConfig()), // Bug #48
 		templates:      &templateCache{},
 		bundles:        &bundleCache{bundles: make(map[int]Bundle)},
