@@ -335,11 +335,11 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	if filter.MaxPrice > 0 {
 		query["dph_total"] = map[string]float64{"lte": filter.MaxPrice}
 	}
-	// Enforce reliability floor: use filter value if set, otherwise default to 0.98
-	// Higher floor avoids cheap unreliable hosts that go offline mid-session.
+	// Enforce reliability floor: use filter value if set, otherwise default to 0.95
+	// Balances reliability with offer availability.
 	minReliability := filter.MinReliability
 	if minReliability <= 0 {
-		minReliability = 0.98
+		minReliability = 0.95
 	}
 	query["reliability2"] = map[string]float64{"gte": minReliability}
 	if filter.MinCUDAVersion > 0 {
