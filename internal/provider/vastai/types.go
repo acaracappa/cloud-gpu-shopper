@@ -152,18 +152,18 @@ func (b Bundle) ToGPUOffer() models.GPUOffer {
 	confidence := 0.6*b.Reliability + 0.4*bidSafety
 
 	return models.GPUOffer{
-		ID:           fmt.Sprintf("vastai-%d", b.ID),
-		Provider:     "vastai",
-		ProviderID:   fmt.Sprintf("%d", b.ID),
-		GPUType:      normalizeGPUName(b.GPUName),
-		GPUCount:     b.NumGPUs,
-		VRAM:         int(b.GPURam / 1024), // Convert MB to GB
-		PricePerHour: b.DphTotal,
-		Location:     b.Geolocation,
-		Reliability:  b.Reliability,
-		Available:    b.Rentable && !b.Rented,
-		MaxDuration:  0, // Vast.ai doesn't have max duration
-		FetchedAt:    time.Now(),
+		ID:                     fmt.Sprintf("vastai-%d", b.ID),
+		Provider:               "vastai",
+		ProviderID:             fmt.Sprintf("%d", b.ID),
+		GPUType:                normalizeGPUName(b.GPUName),
+		GPUCount:               b.NumGPUs,
+		VRAM:                   int(b.GPURam / 1024), // Convert MB to GB
+		PricePerHour:           b.DphTotal,
+		Location:               b.Geolocation,
+		Reliability:            b.Reliability,
+		Available:              b.Rentable && !b.Rented,
+		MaxDuration:            0, // Vast.ai doesn't have max duration
+		FetchedAt:              time.Now(),
 		AvailabilityConfidence: confidence,
 		CUDAVersion:            b.CudaMaxGood,
 		MachineID:              fmt.Sprintf("vastai-machine-%d", b.MachineID),
