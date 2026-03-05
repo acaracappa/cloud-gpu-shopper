@@ -135,6 +135,9 @@ type CreateInstanceRequest struct {
 	// If TemplateHashID is set, use the template instead of building config from DockerImage/EnvVars
 	TemplateHashID string // Vast.ai template hash_id (e.g., "4e17788f74f075dd9aab7d0d4427968f")
 
+	// Pricing for interruptible/spot instances
+	BidPrice float64 // Bid per GPU/hr for interruptible instances (0 = on-demand, omit price)
+
 	// Storage configuration
 	DiskGB int // Disk space in GB (cannot be changed after creation)
 }

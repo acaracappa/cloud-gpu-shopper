@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type BenchmarkRunRequest struct {
 	Providers []string `json:"providers,omitempty"`  // e.g. ["vastai", "tensordock"] — empty = all
 	MaxBudget float64  `json:"max_budget,omitempty"` // Total $ budget for the run
 	Priority  int      `json:"priority,omitempty"`   // Manifest priority (lower = higher)
+	Location  string   `json:"location,omitempty"`   // Country code filter (e.g., "US")
 }
 
 // BenchmarkRunStatus represents the current state of a benchmark run.
@@ -480,6 +482,7 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 	offers, err := r.inventory.ListOffers(ctx, models.OfferFilter{
 		Provider: entry.Provider,
 		GPUType:  entry.GPUType,
+		Location: run.Request.Location,
 	})
 	if err != nil || len(offers) == 0 {
 		reason := fmt.Sprintf("no offers available for %s on %s", entry.GPUType, entry.Provider)
@@ -528,6 +531,53 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 		}
 	}
 
+	// Vast.ai: filter offers to those compatible with the Ollama template
+	ollamaTemplateHash := "38a9dab633743d43107eb9a80d4ada9e"
+	if entry.Provider == "vastai" {
+		templateProv, err := r.inventory.GetTemplateProvider("vastai")
+		if err == nil {
+			compatible := offers[:0]
+			for _, o := range offers {
+				templates, err := templateProv.GetCompatibleTemplates(ctx, o.ID)
+				if err != nil {
+					continue
+				}
+				for _, t := range templates {
+					if t.HashID == ollamaTemplateHash {
+						compatible = append(compatible, o)
+						break
+					}
+				}
+			}
+			if len(compatible) > 0 {
+				r.logger.Info("filtered offers by template compatibility",
+					slog.Int("total", len(offers)),
+					slog.Int("compatible", len(compatible)),
+					slog.String("template", ollamaTemplateHash))
+				offers = compatible
+			} else {
+				r.logger.Warn("no offers compatible with Ollama template, using all offers",
+					slog.Int("total", len(offers)))
+			}
+		}
+	}
+
+	// Prefer single-GPU offers for benchmarks (cheaper, more available)
+	singleGPU := make([]models.GPUOffer, 0)
+	for _, o := range offers {
+		if o.GPUCount == 1 {
+			singleGPU = append(singleGPU, o)
+		}
+	}
+	if len(singleGPU) > 0 {
+		offers = singleGPU
+	}
+
+	// Sort by price ascending for SelectFromTopN
+	sort.Slice(offers, func(i, j int) bool {
+		return offers[i].PricePerHour < offers[j].PricePerHour
+	})
+
 	offer := models.SelectFromTopN(offers, 5, 1.5)
 	entry.OfferID = offer.ID
 	entry.PriceHour = offer.PricePerHour
@@ -544,7 +594,7 @@ func (r *Runner) processEntryOnce(ctx context.Context, run *BenchmarkRun, entry 
 	}
 	// Vast.ai: use the Ollama template so Ollama is pre-installed
 	if entry.Provider == "vastai" {
-		createReq.TemplateHashID = "a8a44c7363cbca20056020397e3bf072"
+		createReq.TemplateHashID = ollamaTemplateHash
 		createReq.DiskGB = 64
 	}
 	if entry.Provider == "bluelobster" {

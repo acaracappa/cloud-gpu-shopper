@@ -190,24 +190,34 @@ type mockProvider struct {
 }
 
 func newMockProvider(name string) *mockProvider {
-	return &mockProvider{
+	m := &mockProvider{
 		name: name,
-		createInstanceFn: func(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
-			return &provider.InstanceInfo{
-				ProviderInstanceID: "mock-instance-123",
-				SSHHost:            "192.168.1.100",
-				SSHPort:            22,
-				SSHUser:            "root",
-				Status:             "running",
-			}, nil
-		},
-		destroyInstanceFn: func(ctx context.Context, instanceID string) error {
-			return nil
-		},
-		getStatusFn: func(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
-			return nil, provider.ErrInstanceNotFound
-		},
 	}
+	m.createInstanceFn = func(ctx context.Context, req provider.CreateInstanceRequest) (*provider.InstanceInfo, error) {
+		return &provider.InstanceInfo{
+			ProviderInstanceID: "mock-instance-123",
+			SSHHost:            "192.168.1.100",
+			SSHPort:            22,
+			SSHUser:            "root",
+			Status:             "running",
+		}, nil
+	}
+	m.getStatusFn = func(ctx context.Context, instanceID string) (*provider.InstanceStatus, error) {
+		if m.getDestroyCalls() > 0 {
+			return nil, provider.ErrInstanceNotFound
+		}
+		return &provider.InstanceStatus{
+			Running: true,
+			Status:  "running",
+			SSHHost: "192.168.1.100",
+			SSHPort: 22,
+			SSHUser: "root",
+		}, nil
+	}
+	m.destroyInstanceFn = func(ctx context.Context, instanceID string) error {
+		return nil
+	}
+	return m
 }
 
 func (m *mockProvider) Name() string {
@@ -242,6 +252,12 @@ func (m *mockProvider) GetInstanceStatus(ctx context.Context, instanceID string)
 	m.statusCalls++
 	m.mu.Unlock()
 	return m.getStatusFn(ctx, instanceID)
+}
+
+func (m *mockProvider) getDestroyCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.destroyCalls
 }
 
 func (m *mockProvider) SupportsFeature(feature provider.ProviderFeature) bool {

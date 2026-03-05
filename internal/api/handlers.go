@@ -64,6 +64,9 @@ type CreateSessionRequest struct {
 	MaxRetries int    `json:"max_retries,omitempty"` // Max alternative offers to try (default 3, max 5)
 	RetryScope string `json:"retry_scope,omitempty"` // "same_gpu", "same_vram", "any"
 
+	// On-start command (runs inside container after boot)
+	OnStartCmd string `json:"on_start_cmd,omitempty"` // Shell script to run on startup
+
 	// SSH timeout override
 	SSHTimeoutMinutes int `json:"ssh_timeout_minutes,omitempty"` // SSH verify timeout (1-30 min)
 }
@@ -551,6 +554,7 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		MaxRetries:        req.MaxRetries,
 		RetryScope:        req.RetryScope,
 		SSHTimeoutMinutes: req.SSHTimeoutMinutes,
+		OnStartCmd:        req.OnStartCmd,
 	}
 
 	// Look up template's recommended disk space and SSH timeout (non-fatal if lookup fails)

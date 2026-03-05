@@ -135,6 +135,22 @@ func (b Bundle) ToHostProperties() map[string]interface{} {
 
 // ToGPUOffer converts a Vast.ai Bundle to a unified GPUOffer
 func (b Bundle) ToGPUOffer() models.GPUOffer {
+	interruptible := b.MinBid > 0
+
+	// Score by completion probability: reliability + bid safety.
+	// On-demand (min_bid=0) gets bidSafety=1.0; spot instances get a score
+	// based on how close min_bid is to dph_total (higher = harder to outbid = safer).
+	var bidSafety float64
+	if !interruptible {
+		bidSafety = 1.0 // on-demand, cannot be reclaimed
+	} else if b.DphTotal > 0 {
+		bidSafety = b.MinBid / b.DphTotal
+		if bidSafety > 1.0 {
+			bidSafety = 1.0
+		}
+	}
+	confidence := 0.6*b.Reliability + 0.4*bidSafety
+
 	return models.GPUOffer{
 		ID:           fmt.Sprintf("vastai-%d", b.ID),
 		Provider:     "vastai",
@@ -148,10 +164,11 @@ func (b Bundle) ToGPUOffer() models.GPUOffer {
 		Available:    b.Rentable && !b.Rented,
 		MaxDuration:  0, // Vast.ai doesn't have max duration
 		FetchedAt:    time.Now(),
-		// Vast.ai inventory is generally reliable
-		AvailabilityConfidence: VastAIAvailabilityConfidence,
+		AvailabilityConfidence: confidence,
 		CUDAVersion:            b.CudaMaxGood,
 		MachineID:              fmt.Sprintf("vastai-machine-%d", b.MachineID),
+		Interruptible:          interruptible,
+		MinBid:                 b.MinBid,
 	}
 }
 
@@ -231,6 +248,10 @@ type CreateInstanceRequest struct {
 	// If TemplateHashID is set, use the template instead of building config from Image/Env
 	// Request params override template defaults. Env vars are merged (request wins conflicts).
 	TemplateHashID string `json:"template_hash_id,omitempty"`
+
+	// Pricing: for interruptible instances, this is the bid per GPU per hour.
+	// If omitted, Vast.ai uses the minimum bid which may be immediately outbid.
+	Price float64 `json:"price,omitempty"`
 }
 
 // CreateInstanceResponse is the response from creating an instance

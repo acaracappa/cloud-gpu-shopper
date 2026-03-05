@@ -319,8 +319,11 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	}
 
 	// Build query - Vast.ai uses JSON query syntax
+	// Use type=on-demand to ensure we only get fixed-price offers that can't be interrupted.
+	// Without this, we may get interruptible-eligible hosts that are unreliable.
 	query := map[string]interface{}{
 		"rentable": map[string]bool{"eq": true},
+		"type":     "on-demand",
 	}
 
 	if filter.GPUType != "" {
@@ -332,11 +335,19 @@ func (c *Client) ListOffers(ctx context.Context, filter models.OfferFilter) (off
 	if filter.MaxPrice > 0 {
 		query["dph_total"] = map[string]float64{"lte": filter.MaxPrice}
 	}
-	if filter.MinReliability > 0 {
-		query["reliability2"] = map[string]float64{"gte": filter.MinReliability}
+	// Enforce reliability floor: use filter value if set, otherwise default to 0.98
+	// Higher floor avoids cheap unreliable hosts that go offline mid-session.
+	minReliability := filter.MinReliability
+	if minReliability <= 0 {
+		minReliability = 0.98
 	}
+	query["reliability2"] = map[string]float64{"gte": minReliability}
 	if filter.MinCUDAVersion > 0 {
 		query["cuda_max_good"] = map[string]float64{"gte": filter.MinCUDAVersion}
+	}
+	if filter.Location != "" {
+		// Location filter uses Vast.ai's geolocation "in" syntax with country codes (e.g., "US")
+		query["geolocation"] = map[string][]string{"in": {filter.Location}}
 	}
 
 	queryJSON, err := json.Marshal(query)
@@ -522,8 +533,14 @@ func (c *Client) CreateInstance(ctx context.Context, req provider.CreateInstance
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	if !result.Success {
-		return nil, provider.NewProviderError("vastai", "CreateInstance", 0, result.Error, nil)
+	// Vast.ai may return success=false for interruptible bids even when the
+	// instance IS created (new_contract > 0). Only treat as failure if no contract.
+	if result.NewContract == 0 {
+		errMsg := result.Error
+		if errMsg == "" {
+			errMsg = "no contract created"
+		}
+		return nil, provider.NewProviderError("vastai", "CreateInstance", 0, errMsg, nil)
 	}
 
 	instanceID := strconv.Itoa(result.NewContract)
@@ -581,6 +598,9 @@ func (c *Client) buildCreateRequest(req provider.CreateInstanceRequest) CreateIn
 		ClientID:  "me",
 		DiskSpace: diskSpace,
 		Label:     req.Tags.ToLabel(),
+		// NOTE: Do NOT set Price here. Omitting price creates an on-demand instance
+		// that cannot be interrupted. Sending price creates a spot/bid instance that
+		// Vast.ai can reclaim at any time. On-demand is what we want for production.
 	}
 
 	// Template-based provisioning: if template_hash_id is provided, use it
@@ -845,14 +865,19 @@ func (c *Client) GetInstanceStatus(ctx context.Context, instanceID string) (stat
 	}
 
 	// The individual instance endpoint wraps the response in {"instances": {...}}
+	// When an instance is deleted/gone, Vast.ai returns {"instances": null} with HTTP 200
 	var wrapper struct {
-		Instances Instance `json:"instances"`
+		Instances *Instance `json:"instances"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	result := wrapper.Instances
+	if wrapper.Instances == nil {
+		return nil, provider.ErrInstanceNotFound
+	}
+
+	result := *wrapper.Instances
 	return &provider.InstanceStatus{
 		Status:    result.ActualStatus,
 		Running:   result.ActualStatus == "running",

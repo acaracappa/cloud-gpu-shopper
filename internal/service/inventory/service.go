@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -228,16 +229,31 @@ func (s *Service) fetchFromAllProviders(ctx context.Context, filter models.Offer
 	return s.filterAndSort(allOffers, filter), nil
 }
 
+// cacheKey returns a cache key that includes provider name and key filter fields.
+// This ensures that GPU-specific or location-specific queries get their own cache entries,
+// since the Vast.ai API returns different (more targeted) results with these filters.
+func cacheKey(providerName string, filter models.OfferFilter) string {
+	key := providerName
+	if filter.GPUType != "" {
+		key += ":gpu=" + filter.GPUType
+	}
+	if filter.Location != "" {
+		key += ":loc=" + filter.Location
+	}
+	return key
+}
+
 // getOffersWithCache returns cached offers or fetches fresh ones
 // Implements stale-while-revalidate pattern: returns stale data immediately
 // while refreshing in the background to avoid blocking requests
 func (s *Service) getOffersWithCache(ctx context.Context, p provider.Provider, filter models.OfferFilter) ([]models.GPUOffer, error) {
 	providerName := p.Name()
+	key := cacheKey(providerName, filter)
 	now := time.Now()
 
 	// Check cache first
 	s.mu.RLock()
-	cached, exists := s.cache[providerName]
+	cached, exists := s.cache[key]
 	s.mu.RUnlock()
 
 	if exists {
@@ -261,20 +277,21 @@ func (s *Service) getOffersWithCache(ctx context.Context, p provider.Provider, f
 				slog.Int("count", len(cached.offers)))
 
 			// Trigger background refresh if not already refreshing
-			s.triggerBackgroundRefresh(p)
+			s.triggerBackgroundRefresh(p, filter)
 
 			return cached.offers, nil
 		}
 	}
 
 	// Case 3: No cache or cache expired - must fetch synchronously
-	return s.fetchOffersSync(ctx, p)
+	return s.fetchOffersSync(ctx, p, filter)
 }
 
 // triggerBackgroundRefresh starts a background goroutine to refresh the cache
 // Bug #19 fix: Track goroutines with WaitGroup and respect shutdown signal
-func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
+func (s *Service) triggerBackgroundRefresh(p provider.Provider, filter models.OfferFilter) {
 	providerName := p.Name()
+	key := cacheKey(providerName, filter)
 
 	// Check if shutdown is in progress
 	select {
@@ -284,7 +301,7 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 	}
 
 	s.mu.Lock()
-	cached, exists := s.cache[providerName]
+	cached, exists := s.cache[key]
 	if exists && cached.refreshing {
 		s.mu.Unlock()
 		return // Already refreshing
@@ -302,13 +319,13 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 		ctx, cancel := context.WithTimeout(context.Background(), s.providerTimeout)
 		defer cancel()
 
-		s.logger.Debug("background refresh started", slog.String("provider", providerName))
+		s.logger.Debug("background refresh started", slog.String("provider", providerName), slog.String("cache_key", key))
 
 		// Bug #19 fix: Check for shutdown during the refresh
 		select {
 		case <-s.shutdownCh:
 			s.mu.Lock()
-			if cached, exists := s.cache[providerName]; exists {
+			if cached, exists := s.cache[key]; exists {
 				cached.refreshing = false
 			}
 			s.mu.Unlock()
@@ -316,7 +333,7 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 		default:
 		}
 
-		offers, err := p.ListOffers(ctx, models.OfferFilter{})
+		offers, err := p.ListOffers(ctx, filter)
 		now := time.Now()
 
 		s.mu.Lock()
@@ -327,7 +344,7 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 				slog.String("provider", providerName),
 				slog.String("error", err.Error()))
 			// On error, keep the old cache but mark as no longer refreshing
-			if cached, exists := s.cache[providerName]; exists {
+			if cached, exists := s.cache[key]; exists {
 				cached.refreshing = false
 			}
 			return
@@ -335,7 +352,7 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 
 		ttl := s.getCacheTTL(providerName)
 		softExpiry := now.Add(ttl * 3 / 4) // Soft expiry at 75% of TTL
-		s.cache[providerName] = &providerCache{
+		s.cache[key] = &providerCache{
 			offers:     offers,
 			fetchedAt:  now,
 			expiresAt:  now.Add(ttl),
@@ -347,21 +364,23 @@ func (s *Service) triggerBackgroundRefresh(p provider.Provider) {
 
 		s.logger.Debug("background refresh completed",
 			slog.String("provider", providerName),
+			slog.String("cache_key", key),
 			slog.Int("count", len(offers)),
 			slog.Duration("ttl", ttl))
 	}()
 }
 
 // fetchOffersSync fetches offers synchronously and updates cache
-func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]models.GPUOffer, error) {
+func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider, filter models.OfferFilter) ([]models.GPUOffer, error) {
 	providerName := p.Name()
+	key := cacheKey(providerName, filter)
 
-	s.logger.Debug("fetching offers from provider (sync)", slog.String("provider", providerName))
+	s.logger.Debug("fetching offers from provider (sync)", slog.String("provider", providerName), slog.String("cache_key", key))
 
 	fetchCtx, cancel := context.WithTimeout(ctx, s.providerTimeout)
 	defer cancel()
 
-	offers, err := p.ListOffers(fetchCtx, models.OfferFilter{}) // Fetch all, filter locally for better caching
+	offers, err := p.ListOffers(fetchCtx, filter)
 	now := time.Now()
 
 	// Update cache
@@ -373,7 +392,7 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 			slog.String("provider", providerName),
 			slog.String("error", err.Error()))
 
-		s.cache[providerName] = &providerCache{
+		s.cache[key] = &providerCache{
 			offers:     nil,
 			fetchedAt:  now,
 			expiresAt:  now.Add(s.backoffTTL),
@@ -387,7 +406,7 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 
 	ttl := s.getCacheTTL(providerName)
 	softExpiry := now.Add(ttl * 3 / 4) // Soft expiry at 75% of TTL
-	s.cache[providerName] = &providerCache{
+	s.cache[key] = &providerCache{
 		offers:     offers,
 		fetchedAt:  now,
 		expiresAt:  now.Add(ttl),
@@ -399,6 +418,7 @@ func (s *Service) fetchOffersSync(ctx context.Context, p provider.Provider) ([]m
 
 	s.logger.Debug("cached offers from provider",
 		slog.String("provider", providerName),
+		slog.String("cache_key", key),
 		slog.Int("count", len(offers)),
 		slog.Duration("ttl", ttl))
 
@@ -430,8 +450,14 @@ func (s *Service) filterAndSort(offers []models.GPUOffer, filter models.OfferFil
 		}
 	}
 
-	// Sort by price (lowest first)
+	// Sort by availability confidence desc, then price asc.
+	// This prefers reliable on-demand instances over cheap spot instances.
 	sort.Slice(filtered, func(i, j int) bool {
+		ci := filtered[i].GetEffectiveAvailabilityConfidence()
+		cj := filtered[j].GetEffectiveAvailabilityConfidence()
+		if ci != cj {
+			return ci > cj
+		}
 		return filtered[i].PricePerHour < filtered[j].PricePerHour
 	})
 
@@ -509,7 +535,12 @@ func (s *Service) InvalidateCache(providerName string) {
 		s.cache = make(map[string]*providerCache)
 		s.logger.Debug("invalidated all provider caches")
 	} else {
-		delete(s.cache, providerName)
+		// Delete all cache entries for this provider (including filter-specific entries)
+		for key := range s.cache {
+			if key == providerName || strings.HasPrefix(key, providerName+":") {
+				delete(s.cache, key)
+			}
+		}
 		s.logger.Debug("invalidated provider cache", slog.String("provider", providerName))
 	}
 }

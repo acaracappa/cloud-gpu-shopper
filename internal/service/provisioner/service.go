@@ -73,6 +73,17 @@ const (
 	DefaultLowBalanceThreshold = 5.00
 )
 
+// ollamaOnStartScript installs Ollama on a lightweight base image after boot.
+// This is faster than pulling the heavy Ollama Docker image (~8GB) which can
+// take 8+ minutes on some machines. The base CUDA image boots in ~1 min, then
+// Ollama installs in ~30s via the official install script.
+const ollamaOnStartScript = `#!/bin/bash
+curl -fsSL https://ollama.com/install.sh | sh
+nohup ollama serve > /var/log/ollama.log 2>&1 &
+sleep 3
+echo "Ollama installed and serving on port 11434"
+`
+
 // ProgressiveBackoff implements an exponential backoff strategy with a maximum cap.
 // This reduces load on providers when instances take a long time to become ready.
 // Bug #21 fix: Added mutex for thread safety
@@ -505,6 +516,12 @@ func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateS
 		Tags:         tags,
 	}
 
+	// For interruptible instances, pass the bid price so the provider
+	// includes it in the create request (prevents immediate outbidding).
+	if offer.Interruptible && offer.PricePerHour > 0 {
+		instanceReq.BidPrice = offer.PricePerHour
+	}
+
 	// Template-based provisioning (Vast.ai)
 	if req.TemplateHashID != "" {
 		instanceReq.TemplateHashID = req.TemplateHashID
@@ -555,6 +572,15 @@ func (s *Service) createSessionWithRetry(ctx context.Context, req models.CreateS
 	if req.WorkloadType == models.WorkloadBenchmark && req.OnStartCmd == "" {
 		instanceReq.OnStartCmd = buildBenchmarkOnStart(session.ID, offer)
 		s.logger.Info("auto-injected benchmark script",
+			slog.String("session_id", session.ID))
+	}
+
+	// Fast-provision: for LLM workload without template, use lightweight base image
+	// and install Ollama via onstart script. This gets SSH up in ~1 min instead of
+	// waiting 8+ min for the heavy Ollama Docker image to pull.
+	if req.WorkloadType == models.WorkloadLLM && req.TemplateHashID == "" && req.OnStartCmd == "" {
+		instanceReq.OnStartCmd = ollamaOnStartScript
+		s.logger.Info("fast-provision: auto-injecting Ollama install script",
 			slog.String("session_id", session.ID))
 	}
 
@@ -877,6 +903,7 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 	attemptCount := 0
 	lastErrorType := "none"
 	lastError := ""
+	var lastSSHErr error // tracks last SSH attempt result; non-nil triggers instance status check
 	consecutivePermanentErrors := 0
 	consecutiveNeeded := 1
 	if session != nil && session.Provider == "bluelobster" {
@@ -942,11 +969,24 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 				return
 			}
 
-			// Poll provider for SSH info if we don't have it yet
-			if session.SSHHost == "" && session.ProviderID != "" {
+			// Poll provider for SSH info if we don't have it yet, OR check
+			// instance health after an SSH failure (detect reclaimed instances).
+			needStatusCheck := session.SSHHost == "" || lastSSHErr != nil
+			if needStatusCheck && session.ProviderID != "" {
 				status, err := prov.GetInstanceStatus(ctx, session.ProviderID)
 				if err != nil {
-					logger.Debug("failed to get instance status", slog.String("error", err.Error()))
+					if errors.Is(err, provider.ErrInstanceNotFound) {
+						logger.Error("instance no longer exists, failing session",
+							slog.String("provider_id", session.ProviderID))
+						s.failSession(ctx, session, "instance_vanished: no longer exists on provider")
+						metrics.RecordSessionDestroyed(session.Provider, "instance_vanished")
+						if s.inventory != nil {
+							s.inventory.RecordOfferFailure(session.OfferID, session.Provider, session.GPUType, "instance_vanished", "instance not found during SSH verification")
+							s.inventory.EvictOffer(session.OfferID)
+						}
+						return
+					}
+					logger.Warn("failed to get instance status", slog.String("error", err.Error()))
 					// Schedule next poll with progressive backoff
 					nextInterval = backoff.Next()
 					pollTimer.Reset(nextInterval)
@@ -956,9 +996,9 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 				// BUG-011 fix: Fail fast if instance stopped unexpectedly
 				// Don't fail for transient states like "creating", "starting", or "loading"
 				if !status.Running && status.Status != "" &&
-					status.Status != "creating" && status.Status != "starting" &&
-					status.Status != "provisioning" && status.Status != "booting" &&
-					status.Status != "loading" {
+					status.Status != "created" && status.Status != "creating" &&
+					status.Status != "starting" && status.Status != "provisioning" &&
+					status.Status != "booting" && status.Status != "loading" {
 					logger.Error("instance stopped unexpectedly",
 						slog.String("status", status.Status),
 						slog.String("error_detail", status.Error),
@@ -982,7 +1022,8 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 					return
 				}
 
-				if status.SSHHost != "" {
+				// Populate SSH info from provider if we don't have it yet
+				if session.SSHHost == "" && status.SSHHost != "" {
 					session.SSHHost = status.SSHHost
 					if status.SSHPort != 0 {
 						session.SSHPort = status.SSHPort
@@ -1011,6 +1052,7 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 				// Try a single connection attempt using the private key passed to this function
 				err := s.sshVerifier.VerifyOnce(ctx, session.SSHHost, session.SSHPort, session.SSHUser, privateKey)
 				if err == nil {
+					lastSSHErr = nil
 					consecutiveOK++
 					if consecutiveOK < consecutiveNeeded {
 						logger.Info("SSH succeeded, verifying stability",
@@ -1050,6 +1092,7 @@ func (s *Service) waitForSSHVerifyAsyncWithTimeout(ctx context.Context, sessionI
 					return
 				}
 
+				lastSSHErr = err
 				lastErrorType = classifySSHError(err)
 				consecutiveOK = 0
 				lastError = err.Error()

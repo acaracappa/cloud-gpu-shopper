@@ -2,6 +2,7 @@ package models
 
 import (
 	"math/rand/v2"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,8 @@ type GPUOffer struct {
 	AvailabilityConfidence float64   `json:"availability_confidence"` // 0-1 confidence that offer is actually available (default 1.0)
 	CUDAVersion            float64   `json:"cuda_version,omitempty"`  // Max supported CUDA version (e.g., 12.9). Only for Vast.ai.
 	MachineID              string    `json:"machine_id,omitempty"`    // Physical host identifier (e.g., Vast.ai machine_id). Used for host-level failure avoidance.
+	Interruptible          bool      `json:"interruptible,omitempty"` // True if this is a spot/interruptible instance that can be reclaimed.
+	MinBid                 float64   `json:"min_bid,omitempty"`       // Minimum bid for interruptible instances (0 = on-demand).
 
 	// CompatibleTemplates lists templates that can run on this offer.
 	// Only populated when include_templates=true is requested, and only for Vast.ai offers.
@@ -63,7 +66,7 @@ func (o *GPUOffer) MatchesFilter(f OfferFilter) bool {
 	if f.MaxPrice > 0 && o.PricePerHour > f.MaxPrice {
 		return false
 	}
-	if f.Location != "" && o.Location != f.Location {
+	if f.Location != "" && !strings.Contains(o.Location, f.Location) {
 		return false
 	}
 	if f.MinReliability > 0 && o.Reliability < f.MinReliability {
